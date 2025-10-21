@@ -53,7 +53,7 @@ const startServer = async () => {
 
         // Step 2: Database Synchronization
         console.log('\n🔄 [STARTUP] Synchronizing database models...');
-        await sequelize.sync({ alter: NODE_ENV === 'development' });
+        await sequelize.sync({ alter: false });
         console.log('✅ [STARTUP] Database models synchronized');
 
         // Step 3: Email Service

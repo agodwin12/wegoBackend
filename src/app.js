@@ -5,7 +5,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const path = require('path');
 const app = express();
-
+const rentalRoutes = require('./routes/rentalRoutes');
 // ═══════════════════════════════════════════════════════════════════════
 // MIDDLEWARE
 // ═══════════════════════════════════════════════════════════════════════
@@ -26,7 +26,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/driver', require('./routes/driver.routes'));
 app.use('/api/trips', require('./routes/trip.routes'));
-
+app.use('/api/rentals', rentalRoutes);
 // Health check
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

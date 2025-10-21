@@ -22,6 +22,7 @@ const IdempotencyKey = require('./IdempotencyKey');
 const VehicleRental = require('./VehicleRental');
 const VehicleCategory = require('./VehicleCategory');
 const DriverLocation = require('./DriverLocation');
+const Employee = require('./Employee')(sequelize); // NEW: Employee model
 
 // ────────────────────────────────────────────────────────────────
 // ACCOUNT RELATIONSHIPS
@@ -82,6 +83,17 @@ DriverLocation.belongsTo(Account, {
     as: 'driverAccountLocation',
 });
 
+// 6️⃣ Account ↔ Employee (1:1) - NEW
+Account.hasOne(Employee, {
+    foreignKey: 'accountId',
+    as: 'employee',
+    onDelete: 'CASCADE',
+});
+Employee.belongsTo(Account, {
+    foreignKey: 'accountId',
+    as: 'account',
+});
+
 // ────────────────────────────────────────────────────────────────
 // TRIP RELATIONSHIPS
 // ────────────────────────────────────────────────────────────────
@@ -107,28 +119,64 @@ Payment.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 // Rating ↔ Trip
 Rating.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
-// ────────────────────────────────────────────────────────────────
-// VEHICLE / RENTAL / CATEGORY RELATIONSHIPS
-// ────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// VEHICLE RELATIONSHIPS
+// ═══════════════════════════════════════════════════════════════
 
-// Vehicle ↔ VehicleCategory
-Vehicle.belongsTo(VehicleCategory, {
-    foreignKey: 'category_id',
-    as: 'vehicleCategory', // ✅ renamed alias (no more conflicts)
+// Vehicle belongs to Partner (owner)
+Vehicle.belongsTo(Account, {
+    foreignKey: 'partnerId',
+    as: 'partner',
 });
+
+// Vehicle posted by Employee
+Vehicle.belongsTo(Account, {
+    foreignKey: 'postedByEmployeeId',
+    as: 'postedByEmployee',
+});
+
+// Vehicle belongs to Category
+Vehicle.belongsTo(VehicleCategory, {
+    foreignKey: 'categoryId',
+    as: 'category',
+});
+
 VehicleCategory.hasMany(Vehicle, {
-    foreignKey: 'category_id',
+    foreignKey: 'categoryId',
     as: 'vehicles',
 });
 
-// Vehicle ↔ VehicleRental (1:N)
+// ═══════════════════════════════════════════════════════════════
+// RENTAL RELATIONSHIPS
+// ═══════════════════════════════════════════════════════════════
+
+// Rental belongs to User (passenger)
+VehicleRental.belongsTo(Account, {
+    foreignKey: 'userId',
+    as: 'user',
+});
+
+// Rental belongs to Vehicle
+VehicleRental.belongsTo(Vehicle, {
+    foreignKey: 'vehicleId',
+    as: 'vehicle',
+});
+
 Vehicle.hasMany(VehicleRental, {
-    foreignKey: 'vehicle_id',
+    foreignKey: 'vehicleId',
     as: 'rentals',
 });
-VehicleRental.belongsTo(Vehicle, {
-    foreignKey: 'vehicle_id',
-    as: 'vehicle',
+
+// Rental handled by Employee
+VehicleRental.belongsTo(Account, {
+    foreignKey: 'handledByEmployeeId',
+    as: 'handledByEmployee',
+});
+
+// Rental approved by Admin
+VehicleRental.belongsTo(Account, {
+    foreignKey: 'approvedByAdminId',
+    as: 'approvedByAdmin',
 });
 
 // ────────────────────────────────────────────────────────────────
@@ -154,4 +202,5 @@ module.exports = {
     VehicleRental,
     VehicleCategory,
     DriverLocation,
+    Employee, // NEW: Export Employee model
 };

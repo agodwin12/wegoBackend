@@ -1,8 +1,19 @@
+// src/models/DriverProfile.js
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
 
 const DriverProfile = sequelize.define('DriverProfile', {
-    account_id: { type: DataTypes.BIGINT.UNSIGNED, primaryKey: true },
+    account_id: {
+        type: DataTypes.CHAR(36),  // ✅ Changed from BIGINT.UNSIGNED to CHAR(36)
+        primaryKey: true,
+        allowNull: false,
+        references: {
+            model: 'accounts',
+            key: 'uuid',
+        },
+        onUpdate: 'CASCADE',
+        onDelete: 'CASCADE',
+    },
     cni_number: { type: DataTypes.STRING(64), allowNull: false },
     license_number: { type: DataTypes.STRING(64), allowNull: false },
     license_expiry: { type: DataTypes.DATEONLY, allowNull: false },
@@ -19,6 +30,8 @@ const DriverProfile = sequelize.define('DriverProfile', {
     verification_state: { type: DataTypes.ENUM('UNVERIFIED','PENDING','VERIFIED','REJECTED'), allowNull: false, defaultValue: 'PENDING' },
 }, {
     tableName: 'driver_profiles',
+    timestamps: true,
+    underscored: true,
 });
 
 module.exports = DriverProfile;
