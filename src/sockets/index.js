@@ -9,19 +9,31 @@ const {
     handleDriverLocationUpdate,
     handleTripAccept,
     handleTripDecline,
-    handleDriverEnRoute,      // ✅ ADDED: Import the new handler
+    handleDriverEnRoute,
     handleDriverArrived,
     handleTripStart,
     handleTripComplete,
     handleTripCancel,
 } = require('./driverHandlers');
 
+// Import chat handlers
+const ChatMessage = require('../models/ChatMessage');
+const Trip = require('../models/Trip');
+const Account = require('../models/Account');
+const { Op } = require('sequelize');
+
+// ═══════════════════════════════════════════════════════════════════════
+// MODULE-LEVEL VARIABLE TO STORE IO INSTANCE
+// ═══════════════════════════════════════════════════════════════════════
+
+let io = null;
+
 // ═══════════════════════════════════════════════════════════════════════
 // SOCKET.IO SETUP
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupSocketIO(server) {
-    const io = new Server(server, {
+    io = new Server(server, {
         cors: {
             origin: process.env.CORS_ORIGIN || '*',
             methods: ['GET', 'POST'],
@@ -114,11 +126,11 @@ function setupSocketIO(server) {
 
             // Driver location update
             socket.on('driver:location', (data) => {
-                handleDriverLocationUpdate(socket, data, io);  // ✅ FIXED: Added io parameter
+                handleDriverLocationUpdate(socket, data, io);
             });
 
             socket.on('driver:location_update', (data) => {
-                handleDriverLocationUpdate(socket, data, io);  // ✅ FIXED: Added io parameter
+                handleDriverLocationUpdate(socket, data, io);
             });
 
             // Trip actions
@@ -130,7 +142,6 @@ function setupSocketIO(server) {
                 handleTripDecline(socket, data);
             });
 
-            // ✅ CORRECT: Driver en route event
             socket.on('driver:en_route', (data) => {
                 handleDriverEnRoute(socket, data, io);
             });
@@ -168,6 +179,288 @@ function setupSocketIO(server) {
                 console.log('🚫 [SOCKET-PASSENGER] Cancel trip:', data.tripId);
             });
         }
+
+        // ───────────────────────────────────────────────────────────
+        // CHAT EVENTS (BOTH DRIVER & PASSENGER)
+        // ───────────────────────────────────────────────────────────
+
+        /**
+         * Send a chat message
+         */
+        socket.on('chat:send', async (data) => {
+            try {
+                const { tripId, text } = data;
+                const userId = socket.userId;
+
+                console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                console.log('💬 [CHAT] Message send request');
+                console.log(`📦 Trip ID: ${tripId}`);
+                console.log(`👤 From: ${userId}`);
+                console.log(`💬 Text: ${text}`);
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+                // Validate input
+                if (!tripId || !text) {
+                    socket.emit('chat:error', {
+                        message: 'Trip ID and message text are required',
+                    });
+                    return;
+                }
+
+                if (text.trim().length === 0) {
+                    socket.emit('chat:error', {
+                        message: 'Message cannot be empty',
+                    });
+                    return;
+                }
+
+                if (text.length > 2000) {
+                    socket.emit('chat:error', {
+                        message: 'Message too long (max 2000 characters)',
+                    });
+                    return;
+                }
+
+                // Verify trip and authorization
+                const trip = await Trip.findByPk(tripId);
+
+                if (!trip) {
+                    socket.emit('chat:error', {
+                        message: 'Trip not found',
+                    });
+                    return;
+                }
+
+                // Check authorization
+                if (trip.driverId !== userId && trip.passengerId !== userId) {
+                    socket.emit('chat:error', {
+                        message: 'Unauthorized',
+                    });
+                    return;
+                }
+
+                // Check trip status
+                const allowedStatuses = ['MATCHED', 'DRIVER_ARRIVED', 'IN_PROGRESS'];
+                if (!allowedStatuses.includes(trip.status)) {
+                    socket.emit('chat:error', {
+                        message: 'Chat is only available during active trips',
+                    });
+                    return;
+                }
+
+                console.log('✅ [CHAT] Authorization passed');
+
+                // Save message to database
+                const message = await ChatMessage.create({
+                    tripId,
+                    fromUserId: userId,
+                    text: text.trim(),
+                });
+
+                console.log(`✅ [CHAT] Message saved: ${message.id}`);
+
+                // Get sender info
+                const sender = await Account.findOne({
+                    where: { uuid: userId },
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url', 'user_type'],
+                });
+
+                // Determine recipient
+                const recipientId = trip.driverId === userId ? trip.passengerId : trip.driverId;
+
+                console.log(`📤 [CHAT] Recipient: ${recipientId}`);
+
+                // Prepare message data
+                const messageData = {
+                    id: message.id,
+                    tripId: message.tripId,
+                    text: message.text,
+                    fromUserId: message.fromUserId,
+                    sender: sender ? {
+                        uuid: sender.uuid,
+                        name: `${sender.first_name} ${sender.last_name}`.trim(),
+                        avatar: sender.avatar_url,
+                        userType: sender.user_type,
+                    } : null,
+                    readAt: message.readAt,
+                    createdAt: message.createdAt,
+                };
+
+                // Emit to sender (confirmation)
+                socket.emit('chat:message_sent', {
+                    success: true,
+                    message: messageData,
+                });
+
+                // Emit to recipient (real-time delivery)
+                io.to(`user:${recipientId}`).emit('chat:new_message', {
+                    tripId,
+                    message: messageData,
+                });
+
+                // Also emit to trip room
+                io.to(`trip:${tripId}`).emit('chat:new_message', {
+                    tripId,
+                    message: messageData,
+                });
+
+                console.log(`✅ [CHAT] Message delivered to recipient`);
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+            } catch (error) {
+                console.error('❌ [CHAT] Error sending message:', error);
+                socket.emit('chat:error', {
+                    message: 'Failed to send message',
+                    error: error.message,
+                });
+            }
+        });
+
+        /**
+         * Typing indicator
+         */
+        socket.on('chat:typing', async (data) => {
+            try {
+                const { tripId, isTyping } = data;
+                const userId = socket.userId;
+
+                console.log(`⌨️ [CHAT] Typing indicator: ${userId} - ${isTyping ? 'typing' : 'stopped'}`);
+
+                // Get trip to find recipient
+                const trip = await Trip.findByPk(tripId);
+
+                if (!trip) return;
+
+                // Check authorization
+                if (trip.driverId !== userId && trip.passengerId !== userId) {
+                    return;
+                }
+
+                // Determine recipient
+                const recipientId = trip.driverId === userId ? trip.passengerId : trip.driverId;
+
+                // Emit to recipient
+                io.to(`user:${recipientId}`).emit('chat:typing', {
+                    tripId,
+                    userId,
+                    isTyping,
+                });
+
+            } catch (error) {
+                console.error('❌ [CHAT] Typing indicator error:', error);
+            }
+        });
+
+        /**
+         * Mark messages as read
+         */
+        socket.on('chat:mark_read', async (data) => {
+            try {
+                const { tripId } = data;
+                const userId = socket.userId;
+
+                console.log(`✅ [CHAT] Marking messages as read - Trip: ${tripId}, User: ${userId}`);
+
+                // Verify trip and authorization
+                const trip = await Trip.findByPk(tripId);
+
+                if (!trip) return;
+
+                if (trip.driverId !== userId && trip.passengerId !== userId) {
+                    return;
+                }
+
+                // Mark messages as read
+                await ChatMessage.update(
+                    { readAt: new Date() },
+                    {
+                        where: {
+                            tripId,
+                            fromUserId: { [Op.ne]: userId },
+                            readAt: null,
+                        },
+                    }
+                );
+
+                // Notify sender that their messages were read
+                const recipientId = trip.driverId === userId ? trip.passengerId : trip.driverId;
+
+                io.to(`user:${recipientId}`).emit('chat:messages_read', {
+                    tripId,
+                    readBy: userId,
+                    readAt: new Date(),
+                });
+
+                console.log(`✅ [CHAT] Messages marked as read`);
+
+            } catch (error) {
+                console.error('❌ [CHAT] Mark read error:', error);
+            }
+        });
+
+        /**
+         * Join trip chat room
+         */
+        socket.on('chat:join', async (data) => {
+            try {
+                const { tripId } = data;
+                const userId = socket.userId;
+
+                console.log(`🚪 [CHAT] User joining trip chat - Trip: ${tripId}, User: ${userId}`);
+
+                // Verify authorization
+                const trip = await Trip.findByPk(tripId);
+
+                if (!trip) {
+                    socket.emit('chat:error', { message: 'Trip not found' });
+                    return;
+                }
+
+                if (trip.driverId !== userId && trip.passengerId !== userId) {
+                    socket.emit('chat:error', { message: 'Unauthorized' });
+                    return;
+                }
+
+                // Join trip room
+                socket.join(`trip:${tripId}`);
+
+                console.log(`✅ [CHAT] User joined trip chat room: trip:${tripId}`);
+
+                // Emit confirmation
+                socket.emit('chat:joined', {
+                    tripId,
+                    success: true,
+                });
+
+            } catch (error) {
+                console.error('❌ [CHAT] Join chat error:', error);
+                socket.emit('chat:error', {
+                    message: 'Failed to join chat',
+                    error: error.message,
+                });
+            }
+        });
+
+        /**
+         * Leave trip chat room
+         */
+        socket.on('chat:leave', (data) => {
+            try {
+                const { tripId } = data;
+
+                console.log(`🚪 [CHAT] User leaving trip chat - Trip: ${tripId}`);
+
+                socket.leave(`trip:${tripId}`);
+
+                socket.emit('chat:left', {
+                    tripId,
+                    success: true,
+                });
+
+            } catch (error) {
+                console.error('❌ [CHAT] Leave chat error:', error);
+            }
+        });
 
         // ───────────────────────────────────────────────────────────
         // GENERAL EVENTS
@@ -230,7 +523,24 @@ function setupSocketIO(server) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// GET IO INSTANCE
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Get the Socket.IO instance
+ * @returns {Server} Socket.IO server instance
+ * @throws {Error} If Socket.IO has not been initialized
+ */
+function getIO() {
+    if (!io) {
+        throw new Error('Socket.IO has not been initialized! Call setupSocketIO first.');
+    }
+    return io;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // EXPORTS
 // ═══════════════════════════════════════════════════════════════════════
 
 module.exports = setupSocketIO;
+module.exports.getIO = getIO;

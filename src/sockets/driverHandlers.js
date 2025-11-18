@@ -197,6 +197,10 @@ async function handleDriverLocationUpdate(socket, data, io) {
 /**
  * Handle driver accepting a trip
  */
+/**
+ * Handle driver accepting a trip
+ * ✅ FIXED: Now uses tripMatchingService for complete driver info
+ */
 async function handleTripAccept(socket, data, io) {
     const { tripId } = data;
     const driverId = socket.userId;
@@ -208,138 +212,61 @@ async function handleTripAccept(socket, data, io) {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
     try {
-        // Acquire atomic lock
-        const lockKey = REDIS_KEYS.TRIP_LOCK(tripId);
-        const lockAcquired = await acquireLock(lockKey, driverId, 10);
+        if (!tripId) {
+            return socket.emit('trip:accept:failed', {
+                message: 'Trip ID is required'
+            });
+        }
 
-        if (!lockAcquired) {
-            console.log('⚠️ [SOCKET-DRIVER] Trip already being accepted by another driver');
-            socket.emit('trip:accept:failed', {
+        // ✅ Use tripMatchingService which handles everything
+        const tripMatchingService = require('../services/tripMatchingService');
+        const result = await tripMatchingService.acceptTrip(tripId, driverId, io);
+
+        if (!result.success) {
+            console.log(`⚠️ [SOCKET-DRIVER] Could not accept trip: ${result.reason}`);
+            return socket.emit('trip:accept:failed', {
                 tripId,
-                message: 'Another driver is accepting this trip',
+                message: result.reason
             });
-            return;
         }
 
-        try {
-            // Find the trip
-            const trip = await Trip.findByPk(tripId);
+        console.log('✅ [SOCKET-DRIVER] Trip accepted successfully');
+        console.log('   Trip Status:', result.trip.status);
+        console.log('   Driver Info:', result.driver);
 
-            if (!trip) {
-                console.log('❌ [SOCKET-DRIVER] Trip not found');
-                socket.emit('trip:accept:failed', {
-                    tripId,
-                    message: 'Trip not found',
-                });
-                return;
-            }
+        // ✅ Emit success to driver with complete trip data
+        socket.emit('trip:accept:success', {
+            tripId: result.trip.id,
+            message: 'Trip accepted successfully',
+            trip: {
+                id: result.trip.id,
+                status: result.trip.status,
+                pickupLat: result.trip.pickupLat,
+                pickupLng: result.trip.pickupLng,
+                pickupAddress: result.trip.pickupAddress,
+                dropoffLat: result.trip.dropoffLat,
+                dropoffLng: result.trip.dropoffLng,
+                dropoffAddress: result.trip.dropoffAddress,
+                fareEstimate: result.trip.fareEstimate,
+                distanceM: result.trip.distanceM,
+                durationS: result.trip.durationS,
+            },
+            driver: result.driver // ✅ Complete driver info
+        });
 
-            // ✅ FIXED: Check for UPPERCASE 'SEARCHING'
-            if (trip.status !== 'SEARCHING') {
-                console.log('⚠️ [SOCKET-DRIVER] Trip is not searching:', trip.status);
-                socket.emit('trip:accept:failed', {
-                    tripId,
-                    message: 'Trip is no longer available',
-                    currentStatus: trip.status,
-                });
-                return;
-            }
+        console.log('📡 [SOCKET-DRIVER] Driver notified of acceptance');
 
-            // ✅ FIXED: Use camelCase and UPPERCASE status
-            const activeTrip = await Trip.findOne({
-                where: {
-                    driverId: driverId,
-                    status: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
-                },
-            });
-
-            if (activeTrip) {
-                console.log('⚠️ [SOCKET-DRIVER] Driver already has active trip');
-                socket.emit('trip:accept:failed', {
-                    tripId,
-                    message: 'You already have an active trip',
-                    activeTripId: activeTrip.id,
-                });
-                return;
-            }
-
-            // ✅ FIXED: Use camelCase fields and UPPERCASE 'MATCHED'
-            trip.driverId = driverId;
-            trip.status = 'MATCHED';
-            trip.driverAssignedAt = new Date();
-            await trip.save();
-
-            // Mark driver as unavailable
-            await setDriverUnavailable(driverId);
-            await DriverLocation.update(
-                { is_available: false },
-                { where: { driver_id: driverId } }
-            );
-
-            console.log('✅ [SOCKET-DRIVER] Trip accepted successfully');
-            console.log('   Trip Status:', trip.status);
-            console.log('   Driver:', driverId);
-
-            // Get driver info with vehicle
-            const driver = await trip.getDriver({
-                include: ['Vehicle']
-            });
-
-            // ✅ Emit success to driver
-            socket.emit('trip:accept:success', {
-                tripId: trip.id,
-                message: 'Trip accepted successfully',
-                trip: {
-                    id: trip.id,
-                    status: trip.status,
-                    pickupLat: trip.pickupLat,
-                    pickupLng: trip.pickupLng,
-                    pickupAddress: trip.pickupAddress,
-                    dropoffLat: trip.dropoffLat,
-                    dropoffLng: trip.dropoffLng,
-                    dropoffAddress: trip.dropoffAddress,
-                    fareEstimate: trip.fareEstimate,
-                },
-            });
-
-            // ✅ Emit to passenger that driver is assigned
-            io.to(`passenger:${trip.passengerId}`).emit('trip:driver_assigned', {
-                tripId: trip.id,
-                status: 'MATCHED',
-                driver: {
-                    id: driver.id,
-                    name: `${driver.first_name} ${driver.last_name}`,
-                    phone: driver.phone_e164,
-                    rating: driver.rating || 4.8,
-                    vehicle: driver.Vehicle ? {
-                        make: driver.Vehicle.make,
-                        model: driver.Vehicle.model,
-                        color: driver.Vehicle.color,
-                        plate: driver.Vehicle.license_plate,
-                    } : null,
-                },
-                message: 'Driver is on the way!',
-                timestamp: new Date().toISOString(),
-            });
-
-            // Notify other drivers that trip is no longer available
-            io.emit('trip:offer:canceled', { tripId: trip.id });
-
-        } finally {
-            // Always release lock
-            await releaseLock(lockKey);
-        }
+        // Note: tripMatchingService already notified the passenger with complete driver info
 
     } catch (error) {
         console.error('❌ [SOCKET-DRIVER] Trip accept error:', error);
         socket.emit('trip:accept:failed', {
             tripId,
             message: 'Failed to accept trip. Please try again.',
-            error: error.message,
+            error: error.message
         });
     }
 }
-
 /**
  * Handle driver declining a trip
  */

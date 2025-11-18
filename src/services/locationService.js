@@ -16,16 +16,24 @@ class LocationService {
 
             const pipeline = redisClient.pipeline();
 
+            // Add to geo index
             pipeline.geoadd(REDIS_KEYS.DRIVERS_GEO, lng, lat, driverId);
 
+            // Prepare driver metadata with proper defaults
             const driverMeta = {
-                status: metadata.status || 'online',
+                status: metadata.status || 'online',  // Default to 'online'
                 heading: metadata.heading || 0,
                 speed: metadata.speed || 0,
                 currentTripId: metadata.currentTripId || null,
                 lastUpdate: Date.now(),
+                lat: lat,  // Store lat/lng in metadata too
+                lng: lng,
                 ...metadata
             };
+
+            console.log(`💾 [LOCATION] Storing metadata for ${driverId}:`, driverMeta);
+
+            // Store metadata with 1 hour expiry
             pipeline.set(
                 REDIS_KEYS.DRIVER_META(driverId),
                 JSON.stringify(driverMeta),
@@ -35,8 +43,8 @@ class LocationService {
 
             await pipeline.exec();
 
-            console.log(`✅ [LOCATION] Driver ${driverId} location updated successfully`);
-            return { success: true, driverId, lat, lng };
+            console.log(`✅ [LOCATION] Driver ${driverId} location updated successfully with status: ${driverMeta.status}`);
+            return { success: true, driverId, lat, lng, status: driverMeta.status };
         } catch (error) {
             console.error('❌ [LOCATION] Error updating driver location:', error.message);
             throw error;
@@ -89,21 +97,36 @@ class LocationService {
 
             for (const [driverId, distance] of nearbyDrivers) {
                 const metaKey = REDIS_KEYS.DRIVER_META(driverId);
-                const metadata = await redisClient.get(metaKey);
+                const metadataStr = await redisClient.get(metaKey);
 
-                if (metadata) {
-                    const meta = JSON.parse(metadata);
+                if (!metadataStr) {
+                    console.log(`⚠️ [LOCATION] No metadata found for driver ${driverId}, skipping`);
+                    continue;
+                }
 
-                    if (meta.status === 'online' && !meta.currentTripId) {
+                try {
+                    const meta = JSON.parse(metadataStr);
+
+                    console.log(`🔍 [LOCATION] Driver ${driverId} - Status: ${meta.status}, CurrentTrip: ${meta.currentTripId || 'none'}`);
+
+                    // Check if driver is available (online and not on a trip)
+                    if (meta.status.toLowerCase() === 'online' && !meta.currentTripId)  {
                         driversWithMeta.push({
                             driverId,
                             distance: parseFloat(distance),
                             status: meta.status,
-                            heading: meta.heading,
-                            speed: meta.speed,
-                            lastUpdate: meta.lastUpdate
+                            heading: meta.heading || 0,
+                            speed: meta.speed || 0,
+                            lastUpdate: meta.lastUpdate,
+                            lat: meta.lat,
+                            lng: meta.lng
                         });
+                        console.log(`✅ [LOCATION] Driver ${driverId} is AVAILABLE`);
+                    } else {
+                        console.log(`❌ [LOCATION] Driver ${driverId} is NOT available (status: ${meta.status}, trip: ${meta.currentTripId})`);
                     }
+                } catch (parseError) {
+                    console.error(`❌ [LOCATION] Error parsing metadata for driver ${driverId}:`, parseError.message);
                 }
             }
 

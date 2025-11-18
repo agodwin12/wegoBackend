@@ -6,21 +6,29 @@ class Trip extends Model {}
 
 Trip.init({
     id: {
-        type: DataTypes.STRING(36),
+        type: DataTypes.CHAR(36),
         primaryKey: true,
         defaultValue: DataTypes.UUIDV4
     },
 
     passengerId: {
-        type: DataTypes.STRING(36),
+        type: DataTypes.CHAR(36),  // ✅ Changed from STRING to CHAR for consistency
         allowNull: false,
-        field: 'passengerId'
+        field: 'passengerId',
+        references: {
+            model: 'accounts',
+            key: 'uuid'
+        }
     },
 
     driverId: {
-        type: DataTypes.STRING(36),
+        type: DataTypes.CHAR(36),  // ✅ Changed from STRING to CHAR for consistency
         allowNull: true,
-        field: 'driverId'
+        field: 'driverId',
+        references: {
+            model: 'accounts',
+            key: 'uuid'
+        }
     },
 
     status: {
@@ -91,7 +99,7 @@ Trip.init({
     },
 
     fareEstimate: {
-        type: DataTypes.INTEGER, // XAF
+        type: DataTypes.INTEGER,
         field: 'fareEstimate'
     },
 
@@ -118,7 +126,6 @@ Trip.init({
         field: 'canceledBy'
     },
 
-    // ✅ ADD ALL MISSING TIMESTAMP FIELDS
     driverAssignedAt: {
         type: DataTypes.DATE,
         allowNull: true,
@@ -149,13 +156,32 @@ Trip.init({
         field: 'tripCompletedAt'
     },
 
+    // ✅ ADD MISSING FIELD
+    matchedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'matchedAt'
+    },
+
     canceledAt: {
         type: DataTypes.DATE,
         allowNull: true,
         field: 'canceledAt'
     },
 
-    // Sequelize automatic timestamps
+    // ✅ ADD MISSING FIELDS FOR DRIVER LOCATION
+    driverLocationLat: {
+        type: DataTypes.DECIMAL(10, 7),
+        allowNull: true,
+        field: 'driverLocationLat'
+    },
+
+    driverLocationLng: {
+        type: DataTypes.DECIMAL(10, 7),
+        allowNull: true,
+        field: 'driverLocationLng'
+    },
+
     createdAt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -171,13 +197,8 @@ Trip.init({
     sequelize,
     modelName: 'Trip',
     tableName: 'trips',
-
-    // ✅ CRITICAL: Tell Sequelize NOT to convert to snake_case
     underscored: false,
-
-    // ✅ Enable automatic timestamps
     timestamps: true,
-
     indexes: [
         { fields: ['passengerId', 'createdAt'] },
         { fields: ['driverId', 'status'] },

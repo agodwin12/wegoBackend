@@ -37,12 +37,16 @@ const initializeDriverSocket = (io, socket) => {
      * Driver goes online
      * Event: 'driver:online'
      * Data: { lat, lng, heading, accuracy, battery_level, app_version }
+     *
+     * ✅ FIXED: Now saves driver metadata to Redis for trip matching
      */
     socket.on('driver:online', async (data) => {
         try {
-            console.log('\n🟢 [DRIVER-SOCKET] Driver going online');
-            console.log('Driver:', socket.userId);
-            console.log('Location:', data);
+            console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log('🟢 [SOCKET-DRIVER] Driver going online');
+            console.log('👤 Driver ID:', socket.userId);
+            console.log('📍 Location:', data.lat, data.lng);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
             const { lat, lng, heading, accuracy, battery_level, app_version } = data;
 
@@ -55,7 +59,7 @@ const initializeDriverSocket = (io, socket) => {
                 return;
             }
 
-            // Update driver location
+            // ✅ STEP 1: Update driver location in database
             await DriverLocation.upsertLocation(socket.userId, {
                 lat,
                 lng,
@@ -65,13 +69,60 @@ const initializeDriverSocket = (io, socket) => {
                 app_version,
             });
 
-            // Set driver as online
+            // ✅ STEP 2: Set driver as online in database
             await DriverLocation.setOnline(socket.userId);
+            console.log('🔍 [DEBUG] Step 2 completed - Driver set online');
+
+            // ✅ STEP 3: Get driver info from database
+            console.log('🔍 [DEBUG] Step 3 starting - Finding driver account...');
+            const driver = await Account.findByPk(socket.userId);
+            console.log('🔍 [DEBUG] Step 3 - Driver found:', driver ? 'YES' : 'NO');
+
+            if (!driver) {
+                console.log('❌ [SOCKET-DRIVER] Driver not found in database');
+                socket.emit('error', {
+                    event: 'driver:online',
+                    message: 'Driver account not found',
+                });
+                return;
+            }
+
+            console.log('🔍 [DEBUG] Driver details:', {
+                id: driver.uuid,
+                firstName: driver.first_name,
+                lastName: driver.last_name,
+                phone: driver.phone_e164
+            });
+
+            // ✅ STEP 4: Save driver metadata to Redis (THE MISSING PIECE!)
+            console.log('🔍 [DEBUG] Step 4 starting - Saving metadata to Redis...');
+            const { redisClient } = require('../config/redis');
+            const metadataKey = `driver:${socket.userId}:metadata`;
+            const driverMetadata = {
+                driverId: socket.userId,
+                status: 'ONLINE',
+                isAvailable: true,
+                firstName: driver.first_name,
+                lastName: driver.last_name,
+                phone: driver.phone_e164,
+                lastUpdated: new Date().toISOString()
+            };
+
+            await redisClient.setex(
+                metadataKey,
+                3600, // Expire after 1 hour
+                JSON.stringify(driverMetadata)
+            );
+
+            console.log('✅ [SOCKET-DRIVER] Driver metadata saved to Redis');
+            console.log('   Key:', metadataKey);
+            console.log('🔍 [DEBUG] Metadata value:', JSON.stringify(driverMetadata));
 
             // Join driver room for broadcasting
             socket.join(`driver-${socket.userId}`);
+            console.log('🔍 [DEBUG] Joined room: driver-' + socket.userId);
 
-            console.log('✅ [DRIVER-SOCKET] Driver is now online');
+            console.log('✅ [SOCKET-DRIVER] Driver is now online\n');
 
             // Confirm to driver
             socket.emit('driver:online:success', {
@@ -81,7 +132,9 @@ const initializeDriverSocket = (io, socket) => {
             });
 
         } catch (error) {
-            console.error('❌ [DRIVER-SOCKET] Online error:', error);
+            console.error('❌ [SOCKET-DRIVER] Online error:', error);
+            console.error('🔍 [DEBUG] Error stack:', error.stack);
+            console.error('🔍 [DEBUG] Error message:', error.message);
             socket.emit('error', {
                 event: 'driver:online',
                 message: 'Failed to go online',
@@ -100,6 +153,13 @@ const initializeDriverSocket = (io, socket) => {
 
             // Set driver as offline
             await DriverLocation.setOffline(socket.userId);
+
+            // Delete driver metadata from Redis
+            const { redisClient } = require('../config/redis');
+            const metadataKey = `driver:${socket.userId}:metadata`;
+            await redisClient.del(metadataKey);
+
+            console.log('✅ [SOCKET-DRIVER] Driver metadata removed from Redis');
 
             // Leave driver room
             socket.leave(`driver-${socket.userId}`);
@@ -192,89 +252,47 @@ const initializeDriverSocket = (io, socket) => {
 
             const { tripId } = data;
 
-            // Find the trip
-            const trip = await Trip.findByPk(tripId);
-
-            if (!trip) {
-                socket.emit('trip:accept:error', {
-                    tripId,
-                    message: 'Trip not found',
+            if (!tripId) {
+                return socket.emit('trip:accept:error', {
+                    message: 'Trip ID is required'
                 });
-                return;
             }
 
-            // Check if trip is still available
-            if (trip.status !== 'PENDING' && trip.status !== 'SEARCHING') {
-                socket.emit('trip:accept:error', {
+            // ✅ Use the tripMatchingService which has ALL the logic
+            const tripMatchingService = require('../services/tripMatchingService');
+            const result = await tripMatchingService.acceptTrip(tripId, socket.userId, io);
+
+            if (!result.success) {
+                console.log(`⚠️ [DRIVER-SOCKET] Could not accept trip: ${result.reason}`);
+                return socket.emit('trip:accept:error', {
                     tripId,
-                    message: 'Trip is no longer available',
-                    currentStatus: trip.status,
+                    message: result.reason
                 });
-                return;
             }
-
-            // Check if driver already has active trip
-            const activeTrip = await Trip.findOne({
-                where: {
-                    driver_id: socket.userId,
-                    status: {
-                        [Op.in]: ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
-                    },
-                },
-            });
-
-            if (activeTrip) {
-                socket.emit('trip:accept:error', {
-                    tripId,
-                    message: 'You already have an active trip',
-                    activeTripId: activeTrip.uuid,
-                });
-                return;
-            }
-
-            // Get driver info
-            const driver = await Account.findByPk(socket.userId);
-
-            // Assign driver to trip
-            trip.driver_id = socket.userId;
-            trip.status = 'DRIVER_ASSIGNED';
-            trip.driver_assigned_at = new Date();
-            await trip.save();
 
             console.log('✅ [DRIVER-SOCKET] Trip accepted successfully');
 
-            // Notify driver
+            // Notify driver of success
             socket.emit('trip:accept:success', {
-                tripId: trip.uuid,
-                trip,
+                tripId: result.trip.id,
+                trip: result.trip,
+                driver: result.driver, // ✅ Complete driver info returned
+                message: 'Trip accepted successfully'
             });
 
-            // Join trip room
-            socket.join(`trip-${trip.uuid}`);
+            // Join trip room for real-time updates
+            socket.join(`trip-${result.trip.id}`);
 
-            // Notify passenger
-            io.to(`passenger-${trip.passenger_id}`).emit('trip:matched', {
-                tripId: trip.uuid,
-                driver: {
-                    id: driver.uuid,
-                    firstName: driver.first_name,
-                    lastName: driver.last_name,
-                    phone: driver.phone_e164,
-                    rating: 4.8, // TODO: Get from database
-                },
-                status: trip.status,
-            });
-
-            console.log('📡 [DRIVER-SOCKET] Trip matched notification sent to passenger');
+            console.log('📡 [DRIVER-SOCKET] Driver notified and joined trip room');
 
         } catch (error) {
             console.error('❌ [DRIVER-SOCKET] Accept trip error:', error);
             socket.emit('trip:accept:error', {
                 message: 'Failed to accept trip',
+                error: error.message
             });
         }
     });
-
     /**
      * Driver declines trip
      * Event: 'trip:decline'
@@ -597,8 +615,13 @@ const initializeDriverSocket = (io, socket) => {
             activeDrivers.delete(socket.userId);
             console.log(`📊 [DRIVER-SOCKET] Active drivers: ${activeDrivers.size}`);
 
-            // Set driver as offline (optional - you may want to keep them online)
+            // Set driver as offline (optional - you may want to keep them online for some time)
             // await DriverLocation.setOffline(socket.userId);
+
+            // Optional: Remove metadata from Redis when driver disconnects
+            // const { redisClient } = require('../config/redis');
+            // const metadataKey = `driver:${socket.userId}:metadata`;
+            // await redisClient.del(metadataKey);
         }
 
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');

@@ -1,146 +1,151 @@
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
-// Create upload directories if they don't exist
+/* ================================
+   CREATE UPLOAD DIRECTORIES
+================================= */
 const uploadDirs = {
-    profiles: path.join(__dirname, '../../uploads/profiles'),
-    documents: path.join(__dirname, '../../uploads/documents'),
-    vehicles: path.join(__dirname, '../../uploads/vehicles'),
+    profiles: path.join(__dirname, "../../uploads/profiles"),
+    documents: path.join(__dirname, "../../uploads/documents"),
+    vehicles: path.join(__dirname, "../../uploads/vehicles"),
 };
 
-// Create directories
-Object.values(uploadDirs).forEach(dir => {
+Object.values(uploadDirs).forEach((dir) => {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
         console.log(`✅ Created directory: ${dir}`);
     }
 });
 
-// Storage configuration for PROFILE PICTURES
+/* ================================
+   STORAGE ENGINES
+================================= */
+
+// Profile Picture Storage
 const profileStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadDirs.profiles);
-    },
+    destination: (req, file, cb) => cb(null, uploadDirs.profiles),
     filename: (req, file, cb) => {
-        // Generate unique filename: profile-1699999999999-123456789.jpg
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
         const ext = path.extname(file.originalname);
         cb(null, `profile-${uniqueSuffix}${ext}`);
     }
 });
 
-// Storage configuration for DRIVER DOCUMENTS (license, insurance, CNI)
+// Driver Document Storage
 const documentStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadDirs.documents);
-    },
+    destination: (req, file, cb) => cb(null, uploadDirs.documents),
     filename: (req, file, cb) => {
-        // Generate unique filename with field name: license-1699999999999-123456789.jpg
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
         const ext = path.extname(file.originalname);
-        const fieldName = file.fieldname; // 'license', 'insurance', 'cni'
-        cb(null, `${fieldName}-${uniqueSuffix}${ext}`);
+        cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
     }
 });
 
-// Storage configuration for VEHICLE PHOTOS
+// Vehicle Photo Storage
 const vehicleStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadDirs.vehicles);
-    },
+    destination: (req, file, cb) => cb(null, uploadDirs.vehicles),
     filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
         const ext = path.extname(file.originalname);
         cb(null, `vehicle-${uniqueSuffix}${ext}`);
     }
 });
 
-// File filter - Accept ONLY IMAGES (for profile pictures and vehicle photos)
+/* ================================
+   FILE FILTERS (FIXED)
+================================= */
+
+// Accepts png even if Flutter sends wrong MIME "application/octet-stream"
 const imageFilter = (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|webp/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
+    const allowedExtensions = /\.(jpg|jpeg|png|webp)$/i;
 
-    if (mimetype && extname) {
-        return cb(null, true);
+    const isValidExt = allowedExtensions.test(file.originalname);
+    const isValidMime =
+        file.mimetype.startsWith("image/") || file.mimetype === "application/octet-stream";
+
+    if (isValidExt && isValidMime) {
+        cb(null, true);
     } else {
-        cb(new Error('Only image files (JPEG, JPG, PNG, WEBP) are allowed!'));
+        cb(new Error("Only image files (JPEG, JPG, PNG, WEBP) are allowed!"), false);
     }
 };
 
-// File filter - Accept IMAGES and PDFs (for driver documents)
+// Allow images + PDF for documents
 const documentFilter = (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|pdf/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
+    const allowedExtensions = /\.(jpg|jpeg|png|pdf)$/i;
 
-    if (mimetype && extname) {
-        return cb(null, true);
+    const isValidExt = allowedExtensions.test(file.originalname);
+    const isValidMime =
+        file.mimetype.startsWith("image/") ||
+        file.mimetype === "application/pdf" ||
+        file.mimetype === "application/octet-stream";
+
+    if (isValidExt && isValidMime) {
+        cb(null, true);
     } else {
-        cb(new Error('Only image files (JPEG, JPG, PNG) or PDF are allowed!'));
+        cb(new Error("Only JPG, PNG or PDF files are allowed!"), false);
     }
 };
 
-// Create multer instances for different upload types
+/* ================================
+   MULTER CONFIG
+================================= */
+
 const uploadProfile = multer({
     storage: profileStorage,
     fileFilter: imageFilter,
-    limits: {
-        fileSize: 5 * 1024 * 1024 // 5MB max
-    }
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
 const uploadDocuments = multer({
     storage: documentStorage,
     fileFilter: documentFilter,
-    limits: {
-        fileSize: 10 * 1024 * 1024 // 10MB max
-    }
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
 const uploadVehicle = multer({
     storage: vehicleStorage,
     fileFilter: imageFilter,
-    limits: {
-        fileSize: 5 * 1024 * 1024 // 5MB max
-    }
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
-// Helper function to DELETE a file from filesystem
+/* ================================
+   HELPERS
+================================= */
+
 const deleteFile = (filePath) => {
     try {
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
-            console.log(`🗑️  Deleted file: ${filePath}`);
+            console.log(`🗑️ Deleted file: ${filePath}`);
             return true;
         }
-        return false;
-    } catch (error) {
-        console.error('Error deleting file:', error);
-        return false;
+    } catch (err) {
+        console.error("❌ Error deleting file:", err);
     }
+    return false;
 };
 
-// Helper to get PUBLIC URL for uploaded file
-const getFileUrl = (filename, type = 'profile') => {
+const getFileUrl = (filename, type = "profile") => {
     if (!filename) return null;
-    // Returns: /uploads/profiles/profile-1699999999999-123456789.jpg
     return `/uploads/${type}s/${filename}`;
 };
 
-// Helper to extract filename from URL
 const getFilenameFromUrl = (url) => {
     if (!url) return null;
     return path.basename(url);
 };
 
+/* ================================
+   EXPORTS
+================================= */
 module.exports = {
-    uploadProfile,      // Use for profile picture uploads
-    uploadDocuments,    // Use for driver document uploads (license, insurance, CNI)
-    uploadVehicle,      // Use for vehicle photo uploads
-    deleteFile,         // Delete file helper
-    getFileUrl,         // Generate public URL
-    getFilenameFromUrl, // Extract filename from URL
-    uploadDirs          // Directory paths (in case you need them)
+    uploadProfile,
+    uploadDocuments,
+    uploadVehicle,
+    deleteFile,
+    getFileUrl,
+    getFilenameFromUrl,
+    uploadDirs,
 };

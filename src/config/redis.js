@@ -38,6 +38,7 @@ redis.on('reconnecting', () => {
 
 const REDIS_KEYS = {
     // User/Driver keys
+    DRIVER_META: (driverId) => `driver:${driverId}:metadata`,
     USER_SOCKET: (userId) => `user:socket:${userId}`,
     DRIVER_ONLINE: (driverId) => `driver:online:${driverId}`,
     DRIVER_LOCATION: (driverId) => `driver:location:${driverId}`,

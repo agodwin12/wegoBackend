@@ -13,7 +13,7 @@ exports.estimateSchema = Joi.object({
 exports.createSchema = Joi.object({
     pickup: coords.required(),
     dropoff: coords.required(),
-    payment_method: Joi.string().valid('cash','momo','om').default('cash')
+    payment_method: Joi.string().valid('CASH','MOMO','OM').uppercase().default('CASH')
 });
 
 exports.cancelSchema = Joi.object({
@@ -21,7 +21,7 @@ exports.cancelSchema = Joi.object({
 });
 
 exports.historySchema = Joi.object({
-    status: Joi.string().valid('active','completed','canceled','all').default('all'),
+    status: Joi.string().valid('active','COMPLETED','CANCELED','all').uppercase().default('all'),
     limit: Joi.number().integer().min(1).max(50).default(20),
     cursor: Joi.string().allow(null, ''),
 });

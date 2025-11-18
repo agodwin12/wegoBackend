@@ -77,20 +77,42 @@ Account.init(
             allowNull: false,
             defaultValue: 'PENDING',
         },
+        lastLatitude: {
+            type: DataTypes.DECIMAL(10, 7),
+            allowNull: true,
+            comment: 'Last known latitude',
+            field: 'lastLatitude',
+        },
+
+        lastLongitude: {
+            type: DataTypes.DECIMAL(10, 7),
+            allowNull: true,
+            comment: 'Last known longitude',
+            field: 'lastLongitude',
+        },
+
+        isAvailable: {
+            type: DataTypes.BOOLEAN,
+            defaultValue: false,
+            comment: 'Is driver available for trips (online)',
+            field: 'isAvailable',
+        },
+
+        lastSeenAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+            comment: 'Last time driver was seen online',
+            field: 'lastSeenAt',
+        }
     },
     {
         sequelize,
         modelName: 'Account',
         tableName: 'accounts',
-        timestamps: true,   // ✅ adds created_at / updated_at
-        underscored: true,  // ✅ uses snake_case columns
+        timestamps: true,
+        underscored: true,
     }
 );
 
-// ═══════════════════════════════════════════════════════════════════════
-// RELATIONSHIPS
-// (❌ none defined here to avoid alias duplication)
-// All associations are centralized in src/models/index.js
-// ═══════════════════════════════════════════════════════════════════════
 
 module.exports = Account;
