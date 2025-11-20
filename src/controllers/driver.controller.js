@@ -625,7 +625,6 @@ exports.acceptTrip = async (req, res, next) => {
 
         // Create trip event (optional - don't fail if this doesn't work)
         try {
-            // Check if TripEvent model exists
             const { TripEvent } = require('../models');
 
             if (TripEvent) {
@@ -642,7 +641,6 @@ exports.acceptTrip = async (req, res, next) => {
             }
         } catch (eventError) {
             console.warn('⚠️ [ACCEPT-TRIP] Failed to create trip event (non-critical):', eventError.message);
-            // Don't fail the whole operation if event creation fails
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -745,7 +743,66 @@ exports.acceptTrip = async (req, res, next) => {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // STEP 11: SEND SUCCESS RESPONSE - ✅ FIXED STRUCTURE
+        // STEP 11: FETCH PASSENGER INFO FROM DATABASE
+        // ═══════════════════════════════════════════════════════════════
+        console.log('🔍 [ACCEPT-TRIP] Fetching passenger information from database...');
+
+        const passengerAccount = await Account.findOne({
+            where: { uuid: trip.passengerId },
+            attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url', 'rating_avg']
+        });
+
+        if (!passengerAccount) {
+            console.error('❌ [ACCEPT-TRIP] Passenger account not found:', trip.passengerId);
+
+            // Still release lock
+            await redisClient.del(lockKey);
+
+            return res.status(404).json({
+                error: true,
+                message: 'Passenger account not found',
+                code: 'PASSENGER_NOT_FOUND'
+            });
+        }
+
+        console.log('✅ [ACCEPT-TRIP] Passenger info retrieved:', {
+            uuid: passengerAccount.uuid,
+            name: `${passengerAccount.first_name} ${passengerAccount.last_name}`,
+            phone: passengerAccount.phone_e164
+        });
+
+        // ✅ BUILD COMPLETE PASSENGER DATA OBJECT WITH MULTIPLE FIELD FORMATS
+        const passengerData = {
+            id: passengerAccount.uuid,
+            uuid: passengerAccount.uuid,
+            name: `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
+            firstName: passengerAccount.first_name,
+            lastName: passengerAccount.last_name,
+            first_name: passengerAccount.first_name,
+            last_name: passengerAccount.last_name,
+            phone: passengerAccount.phone_e164,
+            phone_e164: passengerAccount.phone_e164,
+            phoneNumber: passengerAccount.phone_e164,
+            avatar: passengerAccount.avatar_url,
+            avatar_url: passengerAccount.avatar_url,
+            rating: passengerAccount.rating_avg || 5.0,
+            pickup: {
+                lat: trip.pickupLat,
+                lng: trip.pickupLng,
+                address: trip.pickupAddress
+            },
+            dropoff: {
+                lat: trip.dropoffLat,
+                lng: trip.dropoffLng,
+                address: trip.dropoffAddress
+            }
+        };
+
+        console.log('✅ [ACCEPT-TRIP] Passenger data prepared:');
+        console.log(JSON.stringify(passengerData, null, 2));
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 12: SEND SUCCESS RESPONSE WITH COMPLETE DATA
         // ═══════════════════════════════════════════════════════════════
         console.log('✅ [ACCEPT-TRIP] Trip acceptance completed successfully');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -753,7 +810,7 @@ exports.acceptTrip = async (req, res, next) => {
         return res.status(200).json({
             message: 'Trip accepted successfully',
             data: {
-                driver_id: driverId,  // ✅ Add driver_id for socket emit
+                driver_id: driverId,  // ✅ For socket emit
                 trip: {
                     id: dbTrip.id,
                     status: dbTrip.status,
@@ -772,21 +829,7 @@ exports.acceptTrip = async (req, res, next) => {
                         address: trip.dropoffAddress
                     }
                 },
-                passenger: {  // ✅ SEPARATE PASSENGER OBJECT (not nested in trip)
-                    id: trip.passengerId,
-                    name: trip.passengerName || 'Passenger',
-                    phone: trip.passengerPhone || '',
-                    pickup: {
-                        lat: trip.pickupLat,
-                        lng: trip.pickupLng,
-                        address: trip.pickupAddress
-                    },
-                    dropoff: {
-                        lat: trip.dropoffLat,
-                        lng: trip.dropoffLng,
-                        address: trip.dropoffAddress
-                    }
-                }
+                passenger: passengerData  // ✅ COMPLETE passenger object from database
             }
         });
 
@@ -809,6 +852,7 @@ exports.acceptTrip = async (req, res, next) => {
         next(error);
     }
 };
+
 /**
  * Decline Trip
  * POST /api/driver/trips/:tripId/decline
