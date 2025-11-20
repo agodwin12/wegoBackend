@@ -157,6 +157,103 @@ exports.createTrip = async (req, res, next) => {
     }
 };
 
+
+/**
+ * Get recent trips for a user
+ * GET /api/trips/recent
+ */
+exports.getRecentTrips = async (req, res) => {
+    try {
+        const userId = req.user.uuid;
+        const limit = parseInt(req.query.limit) || 10;
+
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📋 [RECENT TRIPS] Fetching recent trips');
+        console.log(`👤 User ID: ${userId}`);
+        console.log(`📊 Limit: ${limit}`);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        // Fetch recent trips for this user
+        const trips = await Trip.findAll({
+            where: {
+                passengerId: userId,
+                status: {
+                    [Op.in]: ['COMPLETED', 'CANCELED']
+                }
+            },
+            include: [
+                {
+                    model: Account,
+                    as: 'driver',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                    include: [
+                        {
+                            model: Driver,
+                            as: 'driverProfile',
+                            attributes: ['vehicle_type', 'vehicle_plate', 'vehicle_make_model', 'vehicle_color', 'vehicle_year', 'rating_avg', 'total_trips'],
+                        }
+                    ]
+                }
+            ],
+            order: [['updatedAt', 'DESC']],
+            limit: limit
+        });
+
+        console.log(`✅ [RECENT TRIPS] Found ${trips.length} trips\n`);
+
+        // Format response
+        const formattedTrips = trips.map(trip => ({
+            tripId: trip.trip_id,
+            status: trip.status,
+            pickupAddress: trip.pickup_address,
+            dropoffAddress: trip.dropoff_address,
+            pickupLat: trip.pickup_lat,
+            pickupLng: trip.pickup_lng,
+            dropoffLat: trip.dropoff_lat,
+            dropoffLng: trip.dropoff_lng,
+            fareEstimate: trip.fare_estimate,
+            finalFare: trip.final_fare,
+            distanceM: trip.distance_m,
+            durationS: trip.duration_s,
+            createdAt: trip.createdAt,
+            completedAt: trip.completedAt,
+            driver: trip.driver ? {
+                uuid: trip.driver.uuid,
+                firstName: trip.driver.first_name,
+                lastName: trip.driver.last_name,
+                phone: trip.driver.phone_e164,
+                avatar: trip.driver.avatar_url,
+                vehicle: trip.driver.driverProfile ? {
+                    type: trip.driver.driverProfile.vehicle_type,
+                    plate: trip.driver.driverProfile.vehicle_plate,
+                    makeModel: trip.driver.driverProfile.vehicle_make_model,
+                    color: trip.driver.driverProfile.vehicle_color,
+                    year: trip.driver.driverProfile.vehicle_year,
+                } : null,
+                rating: trip.driver.driverProfile?.rating_avg || null,
+                totalTrips: trip.driver.driverProfile?.total_trips || 0,
+            } : null
+        }));
+
+        res.status(200).json({
+            success: true,
+            data: {
+                trips: formattedTrips,
+                count: formattedTrips.length
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [RECENT TRIPS] Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch recent trips',
+            error: error.message
+        });
+    }
+};
+
+
 // ═══════════════════════════════════════════════════════════════════════
 // GET TRIP DETAILS
 // ═══════════════════════════════════════════════════════════════════════
@@ -377,3 +474,187 @@ exports.getTripEvents = async (req, res, next) => {
         next(error);
     }
 };
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// CANCEL TRIP (PASSENGER OR DRIVER)
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.cancelTrip = async (req, res, next) => {
+    console.log('========================');
+    console.log('🚫 [TRIP_CONTROLLER:cancelTrip] Request initiated');
+    try {
+        const { tripId } = req.params;
+        const { reason } = req.body;
+        const userId = req.user.uuid;
+        const userType = req.user.user_type;
+
+        console.log('🆔 Trip ID:', tripId);
+        console.log('👤 User:', userId);
+        console.log('👤 User Type:', userType);
+        console.log('📝 Reason:', reason || 'No reason provided');
+
+        // Try to get trip from Redis first
+        let trip = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        let fromRedis = true;
+
+        if (!trip) {
+            console.log('💽 [DB] Trip not in Redis, checking database...');
+            trip = await Trip.findOne({ where: { id: tripId } });
+            fromRedis = false;
+
+            if (!trip) {
+                console.log('❌ Trip not found');
+                const err = new Error('Trip not found');
+                err.status = 404;
+                throw err;
+            }
+        }
+
+        // Authorization check
+        const isPassenger = (fromRedis ? trip.passengerId : trip.passengerId) === userId;
+        const isDriver = (fromRedis ? trip.driverId : trip.driverId) === userId;
+
+        if (!isPassenger && !isDriver) {
+            console.log('⚠️ Unauthorized cancellation attempt');
+            const err = new Error('Unauthorized to cancel this trip');
+            err.status = 403;
+            throw err;
+        }
+
+        // Check if trip can be canceled
+        const cancelableStatuses = ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+        const currentStatus = fromRedis ? trip.status : trip.status;
+
+        if (!cancelableStatuses.includes(currentStatus)) {
+            console.log(`⚠️ Cannot cancel trip in status: ${currentStatus}`);
+            return res.status(400).json({
+                success: false,
+                message: `Cannot cancel trip in ${currentStatus} status`
+            });
+        }
+
+        const canceledBy = isPassenger ? 'PASSENGER' : 'DRIVER';
+        console.log(`🚫 Trip being canceled by: ${canceledBy}`);
+
+        // If trip is only in Redis (SEARCHING status)
+        if (fromRedis && trip.status === 'SEARCHING') {
+            console.log('🧠 [REDIS] Canceling SEARCHING trip from Redis');
+
+            // Delete from Redis
+            await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+            await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+            await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
+
+            // Notify passenger via Socket.IO
+            const io = getIO();
+            io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', {
+                tripId,
+                canceledBy,
+                reason: reason || 'Trip canceled'
+            });
+
+            io.to(`user:${trip.passengerId}`).emit('trip:canceled', {
+                tripId,
+                canceledBy,
+                reason: reason || 'Trip canceled'
+            });
+
+            console.log('✅ SEARCHING trip canceled successfully (Redis only)');
+
+            return res.status(200).json({
+                success: true,
+                message: 'Trip canceled successfully',
+                data: {
+                    tripId,
+                    status: 'CANCELED',
+                    canceledBy
+                }
+            });
+        }
+
+        // If trip is in database
+        console.log('💽 [DB] Updating trip status to CANCELED');
+
+        let dbTrip = trip;
+        if (fromRedis) {
+            // Get from database if we only had Redis data
+            dbTrip = await Trip.findOne({ where: { id: tripId } });
+            if (!dbTrip) {
+                console.log('❌ Trip not found in database');
+                const err = new Error('Trip not found in database');
+                err.status = 404;
+                throw err;
+            }
+        }
+
+        // Update trip status
+        dbTrip.status = 'CANCELED';
+        dbTrip.canceledBy = canceledBy;
+        dbTrip.cancelReason = reason || null;
+        dbTrip.canceledAt = new Date();
+        await dbTrip.save();
+
+        // Create trip event
+        await TripEvent.create({
+            id: uuidv4(),
+            tripId: tripId,
+            type: 'trip_canceled',
+            payload: {
+                canceledBy,
+                reason: reason || 'No reason provided'
+            }
+        });
+
+        // Update driver status if driver was assigned
+        if (dbTrip.driverId) {
+            const locationService = require('../services/locationService');
+            await locationService.updateDriverStatus(dbTrip.driverId, 'available', null);
+            console.log(`✅ Driver ${dbTrip.driverId} status updated to available`);
+        }
+
+        // Clean up Redis
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${dbTrip.passengerId}`);
+        if (dbTrip.driverId) {
+            await redisClient.del(`driver:active_trip:${dbTrip.driverId}`);
+        }
+
+        // Notify via Socket.IO
+        const io = getIO();
+        const cancelData = {
+            tripId,
+            status: 'CANCELED',
+            canceledBy,
+            reason: reason || 'Trip canceled'
+        };
+
+        // Notify passenger
+        io.to(`passenger:${dbTrip.passengerId}`).emit('trip:canceled', cancelData);
+        io.to(`user:${dbTrip.passengerId}`).emit('trip:canceled', cancelData);
+
+        // Notify driver if assigned
+        if (dbTrip.driverId) {
+            io.to(`driver:${dbTrip.driverId}`).emit('trip:canceled', cancelData);
+            io.to(`user:${dbTrip.driverId}`).emit('trip:canceled', cancelData);
+        }
+
+        console.log('✅ Trip canceled successfully');
+
+        res.status(200).json({
+            success: true,
+            message: 'Trip canceled successfully',
+            data: {
+                tripId,
+                status: 'CANCELED',
+                canceledBy,
+                canceledAt: dbTrip.canceledAt
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [CANCEL TRIP] Error:', error.stack || error.message);
+        next(error);
+    }
+};
+
