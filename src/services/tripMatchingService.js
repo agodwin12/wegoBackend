@@ -9,6 +9,14 @@ class TripMatchingService {
         this.offerTtlMs = parseInt(process.env.OFFER_TTL_MS || 20000, 10);
         this.searchRadiusKm = parseFloat(process.env.DRIVER_SEARCH_RADIUS_KM || 5);
 
+        // 🔍 DEBUG: Log the timeout value
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🔧 [TRIP-MATCHING-SERVICE] Configuration:');
+        console.log('   OFFER_TTL_MS from env:', process.env.OFFER_TTL_MS);
+        console.log('   Parsed offerTtlMs:', this.offerTtlMs);
+        console.log('   Timeout in minutes:', (this.offerTtlMs / 60000).toFixed(2));
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
         // ✅ NEW: Store active timeouts in memory
         this.activeTimeouts = new Map();
     }
