@@ -1,5 +1,5 @@
 // src/controllers/rental/RentalController.js
-const { Vehicle, VehicleRental, Account, VehicleCategory, Employee } = require('../../models');
+const { Vehicle, VehicleRental, Account, VehicleCategory, Employee, PassengerProfile } = require('../../models');
 const { v4: uuidv4 } = require('uuid');
 const Joi = require('joi');
 const { Op } = require('sequelize');
@@ -7,8 +7,11 @@ const dayjs = require('dayjs');
 const { getFileUrl } = require('../../middleware/upload');
 
 /**
- * Validation schemas
+ * =====================================================
+ * VALIDATION SCHEMAS
+ * =====================================================
  */
+
 const vehicleSchema = Joi.object({
     partnerId: Joi.string().uuid().required(),
     plate: Joi.string().max(24).required(),
@@ -33,6 +36,106 @@ const createRentalSchema = Joi.object({
     userNotes: Joi.string().max(500).allow(null, '')
 });
 
+const calculatePriceSchema = Joi.object({
+    vehicleId: Joi.string().uuid().required(),
+    rentalType: Joi.string().valid('HOUR', 'DAY', 'WEEK', 'MONTH').required(),
+    startDate: Joi.date().iso().required(),
+    endDate: Joi.date().iso().greater(Joi.ref('startDate')).required()
+});
+
+const updatePaymentSchema = Joi.object({
+    paymentMethod: Joi.string().valid('orange_money', 'mtn_momo', 'cash').required(),
+    transactionRef: Joi.string().max(100).allow(null, '')
+});
+
+const cancelRentalSchema = Joi.object({
+    reason: Joi.string().min(10).max(500).required()
+});
+
+/**
+ * =====================================================
+ * HELPER FUNCTIONS
+ * =====================================================
+ */
+
+/**
+ * Calculate rental price based on duration and type
+ */
+function calculateRentalPrice(vehicle, rentalType, startDate, endDate) {
+    const start = dayjs(startDate);
+    const end = dayjs(endDate);
+    let totalPrice = 0;
+    let duration = 0;
+    let pricePerUnit = 0;
+
+    switch (rentalType) {
+        case 'HOUR':
+            if (!vehicle.rentalPricePerHour) {
+                return { error: 'Hourly rental not available for this vehicle' };
+            }
+            duration = end.diff(start, 'hour');
+            pricePerUnit = parseFloat(vehicle.rentalPricePerHour);
+            totalPrice = duration * pricePerUnit;
+            break;
+
+        case 'DAY':
+            if (!vehicle.rentalPricePerDay) {
+                return { error: 'Daily rental not available for this vehicle' };
+            }
+            duration = end.diff(start, 'day');
+            pricePerUnit = parseFloat(vehicle.rentalPricePerDay);
+            totalPrice = duration * pricePerUnit;
+            break;
+
+        case 'WEEK':
+            if (!vehicle.rentalPricePerWeek) {
+                return { error: 'Weekly rental not available for this vehicle' };
+            }
+            duration = end.diff(start, 'week');
+            pricePerUnit = parseFloat(vehicle.rentalPricePerWeek);
+            totalPrice = duration * pricePerUnit;
+            break;
+
+        case 'MONTH':
+            if (!vehicle.rentalPricePerMonth) {
+                return { error: 'Monthly rental not available for this vehicle' };
+            }
+            duration = end.diff(start, 'month');
+            pricePerUnit = parseFloat(vehicle.rentalPricePerMonth);
+            totalPrice = duration * pricePerUnit;
+            break;
+    }
+
+    if (totalPrice <= 0 || duration <= 0) {
+        return { error: 'Invalid rental duration or pricing' };
+    }
+
+    return {
+        duration,
+        pricePerUnit,
+        totalPrice,
+        rentalType,
+        currency: vehicle.rentalCurrency || 'XAF'
+    };
+}
+
+/**
+ * Check if cancellation is allowed (24 hours before start date)
+ */
+function isCancellationAllowed(startDate) {
+    const now = dayjs();
+    const start = dayjs(startDate);
+    const hoursUntilStart = start.diff(now, 'hour');
+
+    return hoursUntilStart >= 24;
+}
+
+/**
+ * =====================================================
+ * VEHICLE MANAGEMENT
+ * =====================================================
+ */
+
 /**
  * Employee uploads/registers a vehicle WITH IMAGES
  */
@@ -47,7 +150,6 @@ async function createVehicle(req, res, next) {
             return res.status(400).json({ error: error.details[0].message });
         }
 
-        // Get employeeId from request body (for testing without auth)
         const employeeId = req.body.employeeId || req.user?.uuid;
 
         if (!employeeId) {
@@ -59,7 +161,6 @@ async function createVehicle(req, res, next) {
 
         console.log("✅ Checking employee ID:", employeeId);
 
-        // Verify the employee exists in the Employee table
         const employee = await Employee.findOne({
             where: { accountId: employeeId },
             include: [{
@@ -74,26 +175,20 @@ async function createVehicle(req, res, next) {
             return res.status(404).json({
                 error: 'Employee not found',
                 message: 'The provided employee ID does not exist in the employees table',
-                employeeId: employeeId,
-                hint: 'Make sure the employee record exists in the employees table'
+                employeeId: employeeId
             });
         }
-
-        console.log("✅ Employee found:", employee);
-        console.log("✅ Employment status:", employee.employmentStatus);
 
         if (employee.employmentStatus !== 'ACTIVE') {
             console.log("❌ Employee not active:", employee.employmentStatus);
             return res.status(403).json({
                 error: 'Employee not active',
-                message: `Employee status is ${employee.employmentStatus}. Only active employees can register vehicles.`,
-                employeeId: employeeId
+                message: `Employee status is ${employee.employmentStatus}. Only active employees can register vehicles.`
             });
         }
 
         console.log("✅ Employee verified:", employee.account?.first_name, employee.account?.last_name);
 
-        // Verify the partner exists
         const partner = await Account.findOne({
             where: { uuid: value.partnerId, user_type: 'PARTNER' }
         });
@@ -102,28 +197,24 @@ async function createVehicle(req, res, next) {
             console.log("❌ Partner not found:", value.partnerId);
             return res.status(404).json({
                 error: 'Partner not found',
-                message: 'The provided partner ID does not exist or is not a partner account',
-                partnerId: value.partnerId
+                message: 'The provided partner ID does not exist or is not a partner account'
             });
         }
 
         console.log("✅ Partner verified:", partner.first_name, partner.last_name);
 
-        // Verify category exists if provided
         if (value.categoryId) {
             const category = await VehicleCategory.findByPk(value.categoryId);
             if (!category) {
                 console.log("❌ Category not found:", value.categoryId);
                 return res.status(404).json({
                     error: 'Vehicle category not found',
-                    message: 'The provided category ID does not exist',
-                    categoryId: value.categoryId
+                    message: 'The provided category ID does not exist'
                 });
             }
             console.log("✅ Category verified:", category.name);
         }
 
-        // Process uploaded images
         let imageUrls = [];
         if (req.files && req.files.length > 0) {
             imageUrls = req.files.map(file => getFileUrl(file.filename, 'vehicle'));
@@ -179,13 +270,10 @@ async function createVehicle(req, res, next) {
     } catch (err) {
         console.error("❌ Error in createVehicle:", err);
 
-        // Return user-friendly error messages
         if (err.name === 'SequelizeForeignKeyConstraintError') {
             return res.status(400).json({
                 error: 'Foreign key constraint error',
-                message: 'Referenced partner, employee, or category does not exist in the database',
-                details: err.message,
-                hint: 'Please verify that the employeeId, partnerId, and categoryId are correct'
+                message: 'Referenced partner, employee, or category does not exist in the database'
             });
         }
 
@@ -208,7 +296,6 @@ async function createVehicle(req, res, next) {
             });
         }
 
-        // Generic database error
         return res.status(500).json({
             error: 'Database error',
             message: 'Failed to create vehicle',
@@ -222,9 +309,9 @@ async function createVehicle(req, res, next) {
  */
 async function listAvailableVehicles(req, res, next) {
     try {
-        const { region, categoryId } = req.query;
+        const { region, categoryId, minPrice, maxPrice, seats } = req.query;
 
-        console.log("Fetching available vehicles. Filters:", { region, categoryId });
+        console.log("🔍 Fetching available vehicles. Filters:", { region, categoryId, minPrice, maxPrice, seats });
 
         const whereClause = { availableForRent: true };
 
@@ -236,13 +323,17 @@ async function listAvailableVehicles(req, res, next) {
             whereClause.categoryId = categoryId;
         }
 
+        if (seats) {
+            whereClause.seats = { [Op.gte]: parseInt(seats) };
+        }
+
         const vehicles = await Vehicle.findAll({
             where: whereClause,
             attributes: [
                 'id', 'plate', 'makeModel', 'color', 'region', 'seats',
                 'rentalPricePerHour', 'rentalPricePerDay',
                 'rentalPricePerWeek', 'rentalPricePerMonth',
-                'rentalCurrency', 'images', 'categoryId'
+                'rentalCurrency', 'images', 'categoryId', 'createdAt'
             ],
             include: [
                 {
@@ -254,36 +345,145 @@ async function listAvailableVehicles(req, res, next) {
             order: [['createdAt', 'DESC']]
         });
 
-        console.log("Available vehicles found:", vehicles.length);
+        console.log("✅ Available vehicles found:", vehicles.length);
         res.json({
+            success: true,
             count: vehicles.length,
             vehicles
         });
     } catch (err) {
-        console.error("Error in listAvailableVehicles:", err);
+        console.error("❌ Error in listAvailableVehicles:", err);
         next(err);
     }
 }
 
 /**
- * Passenger creates a rental request (no approval needed)
+ * Update vehicle availability
+ */
+async function updateVehicleAvailability(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { availableForRent } = req.body;
+
+        console.log("🔄 Updating vehicle availability:", id);
+
+        if (typeof availableForRent !== 'boolean') {
+            return res.status(400).json({ error: 'availableForRent must be a boolean' });
+        }
+
+        const vehicle = await Vehicle.findByPk(id);
+        if (!vehicle) {
+            return res.status(404).json({ error: 'Vehicle not found' });
+        }
+
+        vehicle.availableForRent = availableForRent;
+        await vehicle.save();
+
+        console.log("✅ Vehicle availability updated:", vehicle.id);
+
+        res.json({
+            success: true,
+            message: 'Vehicle availability updated successfully',
+            vehicle: {
+                id: vehicle.id,
+                availableForRent: vehicle.availableForRent
+            }
+        });
+    } catch (err) {
+        console.error("❌ Error in updateVehicleAvailability:", err);
+        next(err);
+    }
+}
+
+/**
+ * =====================================================
+ * RENTAL PRICING & CALCULATION
+ * =====================================================
+ */
+
+/**
+ * Calculate rental price before booking (NEW)
+ */
+async function calculatePrice(req, res, next) {
+    try {
+        console.log("💰 Calculating rental price:", req.query);
+
+        const { error, value } = calculatePriceSchema.validate(req.query);
+        if (error) {
+            console.log("❌ Validation error:", error.details);
+            return res.status(400).json({
+                error: error.details[0].message,
+                details: error.details
+            });
+        }
+
+        const vehicle = await Vehicle.findByPk(value.vehicleId);
+
+        if (!vehicle || !vehicle.availableForRent) {
+            console.log("❌ Vehicle not available:", value.vehicleId);
+            return res.status(400).json({
+                error: 'Vehicle not available for rental'
+            });
+        }
+
+        const calculation = calculateRentalPrice(
+            vehicle,
+            value.rentalType,
+            value.startDate,
+            value.endDate
+        );
+
+        if (calculation.error) {
+            return res.status(400).json({ error: calculation.error });
+        }
+
+        console.log("✅ Price calculated:", calculation);
+
+        res.json({
+            success: true,
+            vehicleId: vehicle.id,
+            makeModel: vehicle.makeModel,
+            plate: vehicle.plate,
+            rentalType: calculation.rentalType,
+            duration: calculation.duration,
+            pricePerUnit: calculation.pricePerUnit,
+            totalPrice: calculation.totalPrice,
+            currency: calculation.currency,
+            breakdown: {
+                startDate: value.startDate,
+                endDate: value.endDate,
+                calculation: `${calculation.duration} ${value.rentalType}(s) × ${calculation.pricePerUnit} ${calculation.currency} = ${calculation.totalPrice} ${calculation.currency}`
+            }
+        });
+    } catch (err) {
+        console.error("❌ Error in calculatePrice:", err);
+        next(err);
+    }
+}
+
+/**
+ * =====================================================
+ * RENTAL BOOKING & MANAGEMENT
+ * =====================================================
+ */
+
+/**
+ * Passenger creates a rental request (PENDING status - requires admin approval)
  */
 async function createRental(req, res, next) {
     try {
-        console.log("Rental request from user:", req.body);
+        console.log("📝 Rental request from user:", req.body);
 
-        // Check if body is empty
         if (!req.body || Object.keys(req.body).length === 0) {
             return res.status(400).json({
                 error: 'Request body is empty',
-                message: 'Please provide rental details in JSON format',
-                hint: 'Make sure Content-Type is application/json and Body type is "raw" JSON in Postman'
+                message: 'Please provide rental details in JSON format'
             });
         }
 
         const { error, value } = createRentalSchema.validate(req.body, { stripUnknown: true });
         if (error) {
-            console.log("Validation error:", error.details);
+            console.log("❌ Validation error:", error.details);
             return res.status(400).json({
                 error: error.details[0].message,
                 details: error.details
@@ -298,19 +498,17 @@ async function createRental(req, res, next) {
         if (!user) {
             return res.status(404).json({
                 error: 'User not found',
-                message: 'The provided userId does not exist or is not a passenger account',
-                userId: value.userId
+                message: 'The provided userId does not exist or is not a passenger account'
             });
         }
 
         const vehicle = await Vehicle.findByPk(value.vehicleId);
-        console.log("Vehicle fetched:", vehicle ? vehicle.id : "Not found");
+        console.log("🚗 Vehicle fetched:", vehicle ? vehicle.id : "Not found");
 
         if (!vehicle || !vehicle.availableForRent) {
-            console.log("Vehicle not available:", value.vehicleId);
+            console.log("❌ Vehicle not available:", value.vehicleId);
             return res.status(400).json({
-                error: 'Vehicle not available for rental',
-                vehicleId: value.vehicleId
+                error: 'Vehicle not available for rental'
             });
         }
 
@@ -325,14 +523,14 @@ async function createRental(req, res, next) {
         const overlap = await VehicleRental.findOne({
             where: {
                 vehicleId: value.vehicleId,
-                status: { [Op.in]: ['PENDING', 'CONFIRMED', 'ONGOING'] },
+                status: { [Op.in]: ['PENDING', 'CONFIRMED'] },
                 startDate: { [Op.lt]: value.endDate },
                 endDate: { [Op.gt]: value.startDate }
             }
         });
 
         if (overlap) {
-            console.log("Double booking detected:", overlap.id);
+            console.log("❌ Double booking detected:", overlap.id);
             return res.status(400).json({
                 error: 'Vehicle already booked for this period',
                 conflictingRental: {
@@ -342,53 +540,21 @@ async function createRental(req, res, next) {
             });
         }
 
-        // Calculate price based on rental type
-        const start = dayjs(value.startDate);
-        const end = dayjs(value.endDate);
-        let totalPrice = 0;
-        let duration = 0;
+        // Calculate price
+        const calculation = calculateRentalPrice(
+            vehicle,
+            value.rentalType,
+            value.startDate,
+            value.endDate
+        );
 
-        switch (value.rentalType) {
-            case 'HOUR':
-                if (!vehicle.rentalPricePerHour) {
-                    return res.status(400).json({ error: 'Hourly rental not available for this vehicle' });
-                }
-                duration = end.diff(start, 'hour');
-                totalPrice = duration * parseFloat(vehicle.rentalPricePerHour);
-                break;
-
-            case 'DAY':
-                if (!vehicle.rentalPricePerDay) {
-                    return res.status(400).json({ error: 'Daily rental not available for this vehicle' });
-                }
-                duration = end.diff(start, 'day');
-                totalPrice = duration * parseFloat(vehicle.rentalPricePerDay);
-                break;
-
-            case 'WEEK':
-                if (!vehicle.rentalPricePerWeek) {
-                    return res.status(400).json({ error: 'Weekly rental not available for this vehicle' });
-                }
-                duration = end.diff(start, 'week');
-                totalPrice = duration * parseFloat(vehicle.rentalPricePerWeek);
-                break;
-
-            case 'MONTH':
-                if (!vehicle.rentalPricePerMonth) {
-                    return res.status(400).json({ error: 'Monthly rental not available for this vehicle' });
-                }
-                duration = end.diff(start, 'month');
-                totalPrice = duration * parseFloat(vehicle.rentalPricePerMonth);
-                break;
+        if (calculation.error) {
+            return res.status(400).json({ error: calculation.error });
         }
 
-        console.log(`Calculated: ${duration} ${value.rentalType}(s), Total price: ${totalPrice}`);
+        console.log(`💰 Calculated: ${calculation.duration} ${value.rentalType}(s), Total price: ${calculation.totalPrice}`);
 
-        if (totalPrice <= 0 || duration <= 0) {
-            return res.status(400).json({ error: 'Invalid rental duration or pricing' });
-        }
-
-        // Create rental with CONFIRMED status (no approval needed)
+        // Create rental with PENDING status
         const rental = await VehicleRental.create({
             id: uuidv4(),
             userId: value.userId,
@@ -397,17 +563,17 @@ async function createRental(req, res, next) {
             rentalType: value.rentalType,
             startDate: value.startDate,
             endDate: value.endDate,
-            status: 'CONFIRMED',
-            contactStatus: 'PENDING',
+            status: 'PENDING',
             userNotes: value.userNotes || null,
-            totalPrice,
-            paymentStatus: 'UNPAID'
+            totalPrice: calculation.totalPrice,
+            paymentStatus: 'unpaid'
         });
 
-        console.log("Rental confirmed:", rental.toJSON());
+        console.log("✅ Rental created with PENDING status:", rental.id);
 
         res.status(201).json({
-            message: 'Rental confirmed successfully. Our team will contact you shortly to arrange details.',
+            success: true,
+            message: 'Rental request submitted successfully. Our team will review and contact you shortly.',
             rental: {
                 id: rental.id,
                 vehicleId: rental.vehicleId,
@@ -417,11 +583,12 @@ async function createRental(req, res, next) {
                 rentalType: rental.rentalType,
                 totalPrice: rental.totalPrice,
                 status: rental.status,
-                contactStatus: rental.contactStatus
+                paymentStatus: rental.paymentStatus,
+                createdAt: rental.createdAt
             }
         });
     } catch (err) {
-        console.error("Error in createRental:", err);
+        console.error("❌ Error in createRental:", err);
         return res.status(500).json({
             error: 'Failed to create rental',
             message: err.message,
@@ -431,16 +598,134 @@ async function createRental(req, res, next) {
 }
 
 /**
- * Employee/Admin cancels a rental
+ * Get single rental details (NEW)
  */
-async function cancelRental(req, res, next) {
+async function getRentalById(req, res, next) {
     try {
-        console.log("Cancelling rental:", req.params.id);
+        const { id } = req.params;
+        console.log("🔍 Fetching rental:", id);
 
-        const rental = await VehicleRental.findByPk(req.params.id, {
+        const rental = await VehicleRental.findByPk(id, {
+            include: [
+                {
+                    model: Vehicle,
+                    attributes: ['id', 'plate', 'makeModel', 'color', 'images', 'region', 'seats', 'rentalCurrency'],
+                    include: [
+                        {
+                            model: VehicleCategory,
+                            as: 'category',
+                            attributes: ['id', 'name', 'slug', 'icon']
+                        }
+                    ]
+                },
+                {
+                    model: Account,
+                    as: 'user',
+                    attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164'],
+                    include: [
+                        {
+                            model: PassengerProfile,
+                            as: 'passenger_profile',
+                            required: false
+                        }
+                    ]
+                }
+            ]
+        });
+
+        if (!rental) {
+            return res.status(404).json({
+                error: 'Rental not found'
+            });
+        }
+
+        console.log("✅ Rental found:", rental.id);
+
+        res.json({
+            success: true,
+            rental
+        });
+    } catch (err) {
+        console.error("❌ Error in getRentalById:", err);
+        next(err);
+    }
+}
+
+
+/**
+ * List all rentals for a specific user
+ * GET /api/rentals/user/:userId
+ */
+/**
+ * List all rentals for a specific user
+ * GET /api/rentals/user/:userId
+ */
+const listUserRentals = async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        console.log('📋 Fetching rentals for user:', userId);
+
+        const rentals = await VehicleRental.findAll({
+            where: { userId },
+            include: [
+                {
+                    model: Vehicle,
+                    as: 'vehicle',
+                    include: [
+                        {
+                            model: VehicleCategory,
+                            as: 'category',
+                        },
+                    ],
+                },
+                {
+                    model: Account,  // ✅ CHANGE: Use Account instead of User
+                    as: 'user',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'email', 'user_type'], // ✅ CHANGE: Use snake_case field names
+                },
+            ],
+            order: [['createdAt', 'DESC']],
+        });
+
+        console.log(`✅ Found ${rentals.length} rentals for user ${userId}`);
+
+        return res.status(200).json({
+            success: true,
+            message: `Found ${rentals.length} rentals`,
+            data: {
+                rentals,
+                count: rentals.length,
+            },
+        });
+    } catch (error) {
+        console.error('❌ Error in listUserRentals:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to fetch user rentals',
+            details: error.message,
+        });
+    }
+};
+/**
+ * User cancels their rental (24-hour rule) (NEW)
+ */
+async function cancelRentalByUser(req, res, next) {
+    try {
+        const { id } = req.params;
+        console.log("🚫 User cancelling rental:", id);
+
+        const { error, value } = cancelRentalSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({
+                error: error.details[0].message
+            });
+        }
+
+        const rental = await VehicleRental.findByPk(id, {
             include: [
                 { model: Vehicle, attributes: ['id', 'plate', 'makeModel'] },
-                { model: Account, as: 'user', attributes: ['uuid', 'first_name', 'last_name', 'email'] }
+                { model: Account, as: 'user', attributes: ['uuid', 'first_name', 'last_name'] }
             ]
         });
 
@@ -448,6 +733,7 @@ async function cancelRental(req, res, next) {
             return res.status(404).json({ error: 'Rental not found' });
         }
 
+        // Check if rental can be cancelled
         if (rental.status === 'CANCELLED') {
             return res.status(400).json({ error: 'Rental already cancelled' });
         }
@@ -456,72 +742,111 @@ async function cancelRental(req, res, next) {
             return res.status(400).json({ error: 'Cannot cancel completed rental' });
         }
 
+        // Check 24-hour cancellation policy
+        if (!isCancellationAllowed(rental.startDate)) {
+            const hoursUntilStart = dayjs(rental.startDate).diff(dayjs(), 'hour');
+            return res.status(400).json({
+                error: 'Cannot cancel rental',
+                message: `Cancellation is only allowed 24 hours before the start date. Your rental starts in ${hoursUntilStart} hours.`,
+                policy: 'Cancellations must be made at least 24 hours before the rental start date'
+            });
+        }
+
+        // Update rental
         rental.status = 'CANCELLED';
+        rental.cancellationReason = value.reason;
         await rental.save();
 
-        console.log("Rental cancelled:", rental.id);
+        console.log("✅ Rental cancelled by user:", rental.id);
 
         res.json({
+            success: true,
             message: 'Rental cancelled successfully',
             rental: {
                 id: rental.id,
                 status: rental.status,
+                cancellationReason: rental.cancellationReason,
                 vehicleId: rental.vehicleId,
                 userId: rental.userId
             }
         });
     } catch (err) {
-        console.error("Error in cancelRental:", err);
+        console.error("❌ Error in cancelRentalByUser:", err);
         next(err);
     }
 }
 
 /**
- * User views their rental history
+ * Update payment details (on pickup) (NEW)
  */
-async function listUserRentals(req, res, next) {
+async function updatePayment(req, res, next) {
     try {
-        const userId = req.params.userId;
-        console.log("Fetching rentals for user:", userId);
+        const { id } = req.params;
+        console.log("💳 Updating payment for rental:", id);
 
-        const rentals = await VehicleRental.findAll({
-            where: { userId },
-            include: [
-                {
-                    model: Vehicle,
-                    attributes: ['id', 'plate', 'makeModel', 'color', 'images', 'region']
-                }
-            ],
-            order: [['createdAt', 'DESC']]
-        });
+        const { error, value } = updatePaymentSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({
+                error: error.details[0].message
+            });
+        }
 
-        console.log("User rentals found:", rentals.length);
+        const rental = await VehicleRental.findByPk(id);
+
+        if (!rental) {
+            return res.status(404).json({ error: 'Rental not found' });
+        }
+
+        // Update payment details
+        rental.paymentStatus = 'paid';
+        rental.paymentMethod = value.paymentMethod;
+        if (value.transactionRef) {
+            rental.transactionRef = value.transactionRef;
+        }
+
+        await rental.save();
+
+        console.log("✅ Payment updated for rental:", rental.id);
+
         res.json({
-            count: rentals.length,
-            rentals
+            success: true,
+            message: 'Payment updated successfully',
+            rental: {
+                id: rental.id,
+                paymentStatus: rental.paymentStatus,
+                paymentMethod: rental.paymentMethod,
+                transactionRef: rental.transactionRef,
+                totalPrice: rental.totalPrice
+            }
         });
     } catch (err) {
-        console.error("Error in listUserRentals:", err);
+        console.error("❌ Error in updatePayment:", err);
         next(err);
     }
 }
+
+/**
+ * =====================================================
+ * ADMIN/EMPLOYEE FUNCTIONS
+ * =====================================================
+ */
 
 /**
  * Admin/Employee views all rental requests
  */
 async function listAllRentals(req, res, next) {
     try {
-        console.log("Fetching all rental requests...");
+        console.log("📋 Fetching all rental requests...");
 
-        const { status, contactStatus } = req.query;
+        const { status, paymentStatus } = req.query;
         const whereClause = {};
 
         if (status) {
             whereClause.status = status;
         }
 
-        if (contactStatus) {
-            whereClause.contactStatus = contactStatus;
+        if (paymentStatus) {
+            whereClause.paymentStatus = paymentStatus;
         }
 
         const rentals = await VehicleRental.findAll({
@@ -547,77 +872,61 @@ async function listAllRentals(req, res, next) {
             order: [['createdAt', 'DESC']]
         });
 
-        console.log("Total rental requests found:", rentals.length);
+        console.log("✅ Total rental requests found:", rentals.length);
         res.json({
+            success: true,
             count: rentals.length,
             rentals
         });
     } catch (err) {
-        console.error("Error in listAllRentals:", err);
+        console.error("❌ Error in listAllRentals:", err);
         next(err);
     }
 }
 
 /**
- * Update rental contact status (when company contacts the user)
+ * Employee/Admin cancels a rental
  */
-async function updateContactStatus(req, res, next) {
+async function cancelRental(req, res, next) {
     try {
-        const { id } = req.params;
-        const { contactStatus } = req.body;
+        console.log("🚫 Admin cancelling rental:", req.params.id);
 
-        console.log("Updating contact status for rental:", id);
+        const rental = await VehicleRental.findByPk(req.params.id, {
+            include: [
+                { model: Vehicle, attributes: ['id', 'plate', 'makeModel'] },
+                { model: Account, as: 'user', attributes: ['uuid', 'first_name', 'last_name', 'email'] }
+            ]
+        });
 
-        const validStatuses = ['PENDING', 'CONTACTED', 'CONFIRMED'];
-        if (!validStatuses.includes(contactStatus)) {
-            return res.status(400).json({
-                error: 'Invalid contact status',
-                validStatuses
-            });
-        }
-
-        const rental = await VehicleRental.findByPk(id);
         if (!rental) {
             return res.status(404).json({ error: 'Rental not found' });
         }
 
-        rental.contactStatus = contactStatus;
+        if (rental.status === 'CANCELLED') {
+            return res.status(400).json({ error: 'Rental already cancelled' });
+        }
+
+        if (rental.status === 'COMPLETED') {
+            return res.status(400).json({ error: 'Cannot cancel completed rental' });
+        }
+
+        rental.status = 'CANCELLED';
         await rental.save();
 
-        console.log("Contact status updated:", rental.id);
+        console.log("✅ Rental cancelled by admin:", rental.id);
 
         res.json({
-            message: 'Contact status updated successfully',
+            success: true,
+            message: 'Rental cancelled successfully',
             rental: {
                 id: rental.id,
-                contactStatus: rental.contactStatus
+                status: rental.status,
+                vehicleId: rental.vehicleId,
+                userId: rental.userId
             }
         });
     } catch (err) {
-        console.error("Error in updateContactStatus:", err);
-        next(err);
-    }
-}
-
-/**
- * List vehicle categories
- */
-async function listCategories(req, res, next) {
-    try {
-        console.log("Fetching vehicle categories...");
-
-        const categories = await VehicleCategory.findAll({
-            where: { isActive: true },
-            order: [['sortOrder', 'ASC']]
-        });
-
-        console.log("Categories found:", categories.length);
-        res.json({
-            count: categories.length,
-            categories
-        });
-    } catch (err) {
-        console.error("Error in listCategories:", err);
+        console.error("❌ Error in cancelRental:", err);
         next(err);
     }
 }
@@ -628,7 +937,7 @@ async function listCategories(req, res, next) {
 async function completeRental(req, res, next) {
     try {
         const { id } = req.params;
-        console.log("Completing rental:", id);
+        console.log("✅ Completing rental:", id);
 
         const rental = await VehicleRental.findByPk(id);
         if (!rental) {
@@ -646,9 +955,10 @@ async function completeRental(req, res, next) {
         rental.status = 'COMPLETED';
         await rental.save();
 
-        console.log("Rental completed:", rental.id);
+        console.log("✅ Rental completed:", rental.id);
 
         res.json({
+            success: true,
             message: 'Rental marked as completed',
             rental: {
                 id: rental.id,
@@ -656,57 +966,68 @@ async function completeRental(req, res, next) {
             }
         });
     } catch (err) {
-        console.error("Error in completeRental:", err);
+        console.error("❌ Error in completeRental:", err);
         next(err);
     }
 }
 
 /**
- * Update vehicle availability
+ * =====================================================
+ * CATEGORIES
+ * =====================================================
  */
-async function updateVehicleAvailability(req, res, next) {
+
+/**
+ * List vehicle categories
+ */
+async function listCategories(req, res, next) {
     try {
-        const { id } = req.params;
-        const { availableForRent } = req.body;
+        console.log("📁 Fetching vehicle categories...");
 
-        console.log("Updating vehicle availability:", id);
+        const categories = await VehicleCategory.findAll({
+            where: { isActive: true },
+            order: [['sortOrder', 'ASC']]
+        });
 
-        if (typeof availableForRent !== 'boolean') {
-            return res.status(400).json({ error: 'availableForRent must be a boolean' });
-        }
-
-        const vehicle = await Vehicle.findByPk(id);
-        if (!vehicle) {
-            return res.status(404).json({ error: 'Vehicle not found' });
-        }
-
-        vehicle.availableForRent = availableForRent;
-        await vehicle.save();
-
-        console.log("Vehicle availability updated:", vehicle.id);
-
+        console.log("✅ Categories found:", categories.length);
         res.json({
-            message: 'Vehicle availability updated successfully',
-            vehicle: {
-                id: vehicle.id,
-                availableForRent: vehicle.availableForRent
-            }
+            success: true,
+            count: categories.length,
+            categories
         });
     } catch (err) {
-        console.error("Error in updateVehicleAvailability:", err);
+        console.error("❌ Error in listCategories:", err);
         next(err);
     }
 }
 
+/**
+ * =====================================================
+ * EXPORTS
+ * =====================================================
+ */
+
 module.exports = {
+    // Vehicle Management
     createVehicle,
     listAvailableVehicles,
-    createRental,
-    cancelRental,
-    listUserRentals,
-    listAllRentals,
-    updateContactStatus,
-    completeRental,
     updateVehicleAvailability,
+
+    // Pricing
+    calculatePrice,
+
+    // Rental Booking (User)
+    createRental,
+    getRentalById,
+    listUserRentals,
+    cancelRentalByUser,
+    updatePayment,
+
+    // Admin Management
+    listAllRentals,
+    cancelRental,
+    completeRental,
+
+    // Categories
     listCategories
 };

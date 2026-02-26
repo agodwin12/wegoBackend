@@ -2,7 +2,6 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/auth.controller');
-const { uploadProfile } = require('../middleware/upload');
 const { authenticate } = require('../middleware/auth.middleware');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -15,8 +14,11 @@ const { authenticate } = require('../middleware/auth.middleware');
  * Content-Type: multipart/form-data
  * Fields: email, phone_e164, password, first_name, last_name, etc.
  * File: avatar (optional)
+ *
+ * ✅ NOTE: Multer middleware is handled inside the controller
+ * This prevents "Unexpected end of form" errors from duplicate multer processing
  */
-router.post('/signup/passenger', uploadProfile.single('avatar'), authController.registerPassenger);
+router.post('/signup/passenger', authController.registerPassenger);
 
 /**
  * Register Driver with multiple file uploads
@@ -29,9 +31,9 @@ router.post('/signup/passenger', uploadProfile.single('avatar'), authController.
  *   - insurance (optional): Insurance document
  *   - vehicle_photo (optional): Vehicle photo
  *
- * NOTE: Multer middleware is handled inside the controller for multiple files
+ * ✅ NOTE: Multer middleware is handled inside the controller
  */
-router.post('/signup/driver', authController.registerDriver); // ✅ No multer here - handled in controller
+router.post('/signup/driver', authController.registerDriver);
 
 // ═══════════════════════════════════════════════════════════════════════
 // TOKEN REFRESH
@@ -90,8 +92,10 @@ router.get('/me', authenticate, authController.getProfile);
  * Headers: Authorization: Bearer <access_token>
  * Content-Type: multipart/form-data
  * File: avatar (required)
+ *
+ * ✅ NOTE: Multer middleware is handled inside the controller
  */
-router.patch('/me/avatar', authenticate, uploadProfile.single('avatar'), authController.updateAvatar);
+router.patch('/me/avatar', authenticate, authController.updateAvatar);
 
 // ═══════════════════════════════════════════════════════════════════════
 // LOGOUT

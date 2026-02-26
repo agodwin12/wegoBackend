@@ -4,13 +4,16 @@ const router = express.Router();
 const {
     createVehicle,
     listAvailableVehicles,
-    createRental,
-    cancelRental,
-    listUserRentals,
-    listAllRentals,
-    updateContactStatus,
-    completeRental,
     updateVehicleAvailability,
+    calculatePrice,
+    createRental,
+    getRentalById,
+    listUserRentals,
+    cancelRentalByUser,
+    updatePayment,
+    listAllRentals,
+    cancelRental,
+    completeRental,
     listCategories
 } = require('../controllers/rental/RentalController');
 
@@ -19,7 +22,7 @@ const { uploadVehicle } = require('../middleware/upload');
 
 /**
  * =====================================================
- * VEHICLE MANAGEMENT ROUTES
+ * VEHICLE MANAGEMENT ROUTES (ADMIN/EMPLOYEE)
  * =====================================================
  */
 
@@ -48,7 +51,7 @@ router.patch('/vehicles/:id/availability', updateVehicleAvailability);
  * @route   GET /api/rentals/vehicles/available
  * @desc    Get all available vehicles for rent (with optional filters)
  * @access  Public
- * @query   region, categoryId
+ * @query   region, categoryId, minPrice, maxPrice, seats
  */
 router.get('/vehicles/available', listAvailableVehicles);
 
@@ -60,15 +63,25 @@ router.get('/vehicles/available', listAvailableVehicles);
 router.get('/categories', listCategories);
 
 /**
+ * @route   GET /api/rentals/calculate-price
+ * @desc    Calculate rental price before booking
+ * @access  Public
+ * @query   vehicleId, rentalType, startDate, endDate
+ * @example /api/rentals/calculate-price?vehicleId=xxx&rentalType=DAY&startDate=2024-01-01T10:00:00Z&endDate=2024-01-05T10:00:00Z
+ */
+router.get('/calculate-price', calculatePrice);
+
+/**
  * =====================================================
- * RENTAL BOOKING ROUTES
+ * RENTAL BOOKING ROUTES (USER)
  * =====================================================
  */
 
 /**
  * @route   POST /api/rentals
- * @desc    Create a new rental booking (passenger)
+ * @desc    Create a new rental booking (passenger) - Status: PENDING
  * @access  Public (for testing)
+ * @body    { userId, vehicleId, rentalRegion, rentalType, startDate, endDate, userNotes? }
  */
 router.post('/', createRental);
 
@@ -80,25 +93,41 @@ router.post('/', createRental);
 router.get('/user/:userId', listUserRentals);
 
 /**
+ * @route   GET /api/rentals/:id
+ * @desc    Get single rental details
+ * @access  Public (for testing)
+ */
+router.get('/:id', getRentalById);
+
+/**
+ * @route   PATCH /api/rentals/:id/cancel-by-user
+ * @desc    User cancels their rental (24-hour policy)
+ * @access  Public (for testing)
+ * @body    { reason: "..." }
+ */
+router.patch('/:id/cancel-by-user', cancelRentalByUser);
+
+/**
+ * @route   PATCH /api/rentals/:id/payment
+ * @desc    Update payment details (on pickup)
+ * @access  Public (for testing)
+ * @body    { paymentMethod: "orange_money"|"mtn_momo"|"cash", transactionRef?: "..." }
+ */
+router.patch('/:id/payment', updatePayment);
+
+/**
+ * =====================================================
+ * ADMIN/EMPLOYEE RENTAL MANAGEMENT ROUTES
+ * =====================================================
+ */
+
+/**
  * @route   GET /api/rentals/all
  * @desc    Get all rental requests (Admin/Employee view)
  * @access  Public (for testing)
- * @query   status, contactStatus
+ * @query   status, paymentStatus
  */
 router.get('/all', listAllRentals);
-
-/**
- * =====================================================
- * RENTAL MANAGEMENT ROUTES
- * =====================================================
- */
-
-/**
- * @route   PATCH /api/rentals/:id/contact-status
- * @desc    Update contact status of a rental
- * @access  Public (for testing)
- */
-router.patch('/:id/contact-status', updateContactStatus);
 
 /**
  * @route   PATCH /api/rentals/:id/complete
@@ -109,7 +138,7 @@ router.patch('/:id/complete', completeRental);
 
 /**
  * @route   DELETE /api/rentals/:id
- * @desc    Cancel a rental
+ * @desc    Admin/Employee cancels a rental
  * @access  Public (for testing)
  */
 router.delete('/:id', cancelRental);

@@ -1,8 +1,9 @@
 // src/controllers/driver.controller.js
 
-const { Account, Trip, TripEvent } = require('../models');const { Op } = require('sequelize');
+const { Account, DriverProfile, Trip, TripEvent, Rating } = require('../models');
+const { Op } = require('sequelize');
 const { v4: uuidv4 } = require('uuid');
-const { redisClient, redisHelpers, acquireLock, releaseLock, REDIS_KEYS } = require('../config/redis');
+const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets/index');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -12,43 +13,18 @@ const { getIO } = require('../sockets/index');
 exports.reportNoShow = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('⚠️ [DRIVER-CONTROLLER] Report No-Show');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Trip ID:', req.params.tripId);
-
+        console.log('⚠️  [DRIVER] reportNoShow');
         const { tripId } = req.params;
         const { waitingTime, reason } = req.body;
 
         if (!waitingTime || waitingTime < 0) {
-            console.log('❌ [DRIVER-CONTROLLER] Invalid waiting time');
-            return res.status(400).json({
-                error: 'Validation error',
-                message: 'Valid waiting time is required',
-            });
+            return res.status(400).json({ error: 'Validation error', message: 'Valid waiting time is required' });
         }
 
         const trip = await Trip.findByPk(tripId);
-
-        if (!trip) {
-            console.log('❌ [DRIVER-CONTROLLER] Trip not found');
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist',
-            });
-        }
-
-        if (trip.driverId !== req.user.uuid) {
-            console.log('❌ [DRIVER-CONTROLLER] Access denied - not driver\'s trip');
-            return res.status(403).json({
-                error: 'Access denied',
-                message: 'You are not assigned to this trip',
-            });
-        }
-
+        if (!trip) return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
         if (trip.status !== 'DRIVER_ARRIVED') {
-            console.log('❌ [DRIVER-CONTROLLER] Invalid status for no-show');
-            console.log('   Current Status:', trip.status);
             return res.status(400).json({
                 error: 'Invalid status',
                 message: 'Can only report no-show when status is DRIVER_ARRIVED',
@@ -56,291 +32,194 @@ exports.reportNoShow = async (req, res, next) => {
             });
         }
 
-        const MIN_WAITING_TIME = 300;
-        if (waitingTime < MIN_WAITING_TIME) {
-            console.log('⚠️ [DRIVER-CONTROLLER] Waiting time below minimum');
+        const MIN_WAIT = 300;
+        if (waitingTime < MIN_WAIT) {
             return res.status(400).json({
                 error: 'Invalid waiting time',
-                message: `Please wait at least ${MIN_WAITING_TIME / 60} minutes before reporting no-show`,
-                minimumWaitingTime: MIN_WAITING_TIME,
+                message: `Please wait at least ${MIN_WAIT / 60} minutes before reporting no-show`,
+                minimumWaitingTime: MIN_WAIT,
                 currentWaitingTime: waitingTime,
             });
         }
 
-        trip.status = 'NO_SHOW';
+        trip.status      = 'NO_SHOW';
         trip.cancelReason = reason || 'Passenger did not show up';
-        trip.canceledBy = 'DRIVER';
-        trip.canceledAt = new Date();
-
+        trip.canceledBy   = 'DRIVER';
+        trip.canceledAt   = new Date();
         await trip.save();
 
-        console.log('✅ [DRIVER-CONTROLLER] No-show reported successfully');
-        console.log('   Waiting Time:', waitingTime, 'seconds');
-        console.log('   Reason:', trip.cancelReason);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        // Clean up Redis
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+        await redisClient.del(`driver:active_trip:${req.user.uuid}`);
 
-        res.status(200).json({
-            message: 'No-show reported successfully',
-            data: {
-                trip,
-                waitingTime,
-            },
+        const io = getIO();
+        io.to(`passenger:${trip.passengerId}`).emit('trip:no_show', {
+            tripId: trip.id,
+            waitingTime,
+            reason: trip.cancelReason,
         });
 
+        console.log('✅ [DRIVER] No-show reported');
+        res.status(200).json({ message: 'No-show reported successfully', data: { trip, waitingTime } });
+
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Report No-Show Error:', error);
+        console.error('❌ [DRIVER] reportNoShow error:', error);
         next(error);
     }
 };
 
-/**
- * Go Online - Set driver status to ONLINE
- * POST /api/driver/online
- */
+// ─────────────────────────────────────────────────────────────────────
 exports.goOnline = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🟢 [DRIVER-CONTROLLER] Go Online Request');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Driver Name:', req.user.first_name, req.user.last_name);
-        console.log('Request Body:', req.body);
-
+        console.log('🟢 [DRIVER] goOnline — Driver:', req.user.uuid);
         const { lat, lng, heading } = req.body;
 
-        // Validate required fields
         if (!lat || !lng) {
-            console.log('❌ [DRIVER-CONTROLLER] Missing location data');
-            return res.status(400).json({
-                error: 'Validation error',
-                message: 'Location (lat, lng) is required to go online',
-            });
+            return res.status(400).json({ error: 'Validation error', message: 'Location (lat, lng) is required' });
         }
-
-        // Validate coordinates
         if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-            console.log('❌ [DRIVER-CONTROLLER] Invalid coordinates');
-            return res.status(400).json({
-                error: 'Validation error',
-                message: 'Invalid coordinates provided',
-            });
+            return res.status(400).json({ error: 'Validation error', message: 'Invalid coordinates' });
         }
 
-        // ✅ STEP 1: Update driver location in database (NOT Account.status!)
+        // Update last known location in DB (Account.status stays 'ACTIVE' — never change it)
         const driver = await Account.findByPk(req.user.uuid);
         if (driver) {
-            // ✅ DON'T CHANGE Account.status - it should stay 'ACTIVE'
-            // Only update location fields if they exist
-            if (driver.lastLatitude !== undefined) {
-                driver.lastLatitude = lat;
-            }
-            if (driver.lastLongitude !== undefined) {
-                driver.lastLongitude = lng;
-            }
+            if (driver.lastLatitude  !== undefined) driver.lastLatitude  = lat;
+            if (driver.lastLongitude !== undefined) driver.lastLongitude = lng;
             await driver.save();
-            console.log('✅ [DRIVER-CONTROLLER] Driver location updated in accounts table');
         }
 
-        // ✅ STEP 2: Add driver location to Redis geospatial index (for nearby search)
-        const geoRedisKey = 'drivers:locations';
-        await redisClient.geoadd(
-            geoRedisKey,
-            parseFloat(lng),  // Redis expects longitude first
-            parseFloat(lat),  // Then latitude
-            req.user.uuid.toString()
-        );
+        // Redis GEO index (for nearby driver search)
+        await redisClient.geoadd(REDIS_KEYS.DRIVERS_GEO, parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
+        await redisClient.sadd(REDIS_KEYS.ONLINE_DRIVERS, req.user.uuid.toString());
+        await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
 
-        console.log('✅ [DRIVER-CONTROLLER] Redis GEO location added');
-        console.log('   Driver ID:', req.user.uuid);
-        console.log('   Location:', lat, lng);
+        // Redis JSON location (for trip acceptance)
+        await redisHelpers.setJson(`driver:location:${req.user.uuid}`, {
+            driverId:    req.user.uuid,
+            lat:         parseFloat(lat),
+            lng:         parseFloat(lng),
+            heading:     heading || 0,
+            lastUpdated: new Date().toISOString(),
+        }, 3600);
 
-        // ✅ STEP 3: Store location as JSON (for trip acceptance)
-        const driverLocationKey = `driver:location:${req.user.uuid}`;
-        const locationData = {
-            driverId: req.user.uuid,
-            lat: parseFloat(lat),
-            lng: parseFloat(lng),
-            heading: heading || 0,
-            lastUpdated: new Date().toISOString()
-        };
-
-        await redisHelpers.setJson(driverLocationKey, locationData, 3600); // 1 hour TTL
-
-        console.log('✅ [DRIVER-CONTROLLER] Redis JSON location stored');
-        console.log('   Location Key:', driverLocationKey);
-
-        // ✅ STEP 4: Store driver metadata in Redis with ONLINE status
-        const metadataKey = `driver:${req.user.uuid}:metadata`;
-        const driverMetadata = {
-            driverId: req.user.uuid,
-            status: 'ONLINE',  // ✅ This is for Redis only, not DB
-            isAvailable: true,
-            firstName: req.user.first_name,
-            lastName: req.user.last_name,
-            phone: req.user.phone_e164,
-            lastUpdated: new Date().toISOString()
-        };
-
+        // Redis metadata — ONLINE status lives here only
         await redisClient.setex(
-            metadataKey,
-            3600, // Expire after 1 hour
-            JSON.stringify(driverMetadata)
+            REDIS_KEYS.DRIVER_META(req.user.uuid),
+            3600,
+            JSON.stringify({
+                driverId:    req.user.uuid,
+                status:      'ONLINE',
+                isAvailable: true,
+                firstName:   req.user.first_name,
+                lastName:    req.user.last_name,
+                phone:       req.user.phone_e164,
+                lastUpdated: new Date().toISOString(),
+            })
         );
 
-        console.log('✅ [DRIVER-CONTROLLER] Redis metadata saved (status: ONLINE)');
-        console.log('   Metadata Key:', metadataKey);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
+        console.log('✅ [DRIVER] Online — Redis updated (GEO + JSON + metadata)');
         res.status(200).json({
             message: 'You are now online and ready to receive trips',
-            data: {
-                driver_id: req.user.uuid,
-                is_online: true,
-                location: { lat, lng, heading },
-                timestamp: new Date().toISOString(),
-            },
+            data: { driver_id: req.user.uuid, is_online: true, location: { lat, lng, heading }, timestamp: new Date().toISOString() },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Go Online Error:', error);
+        console.error('❌ [DRIVER] goOnline error:', error);
         next(error);
     }
 };
 
-/**
- * Go Offline - Set driver status to OFFLINE
- * POST /api/driver/offline
- */
+// ─────────────────────────────────────────────────────────────────────
 exports.goOffline = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🔴 [DRIVER-CONTROLLER] Go Offline Request');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
+        console.log('🔴 [DRIVER] goOffline — Driver:', req.user.uuid);
 
-        // ✅ DON'T update Account.status - it should stay 'ACTIVE'
-        // Just clean up Redis data
+        await redisClient.zrem(REDIS_KEYS.DRIVERS_GEO, req.user.uuid.toString());
+        await redisClient.srem(REDIS_KEYS.ONLINE_DRIVERS, req.user.uuid.toString());
+        await redisClient.srem(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
+        await redisClient.del(REDIS_KEYS.DRIVER_META(req.user.uuid));
+        await redisClient.del(REDIS_KEYS.DRIVER_LOCATION(req.user.uuid));
 
-        // Remove from Redis geospatial index
-        const geoRedisKey = 'drivers:locations';
-        await redisClient.zrem(geoRedisKey, req.user.uuid.toString());
-
-        // Remove location JSON
-        const driverLocationKey = `driver:location:${req.user.uuid}`;
-        await redisClient.del(driverLocationKey);
-
-        // Remove metadata
-        const metadataKey = `driver:${req.user.uuid}:metadata`;
-        await redisClient.del(metadataKey);
-
-        console.log('✅ [DRIVER-CONTROLLER] Driver is now offline (Redis cleaned)');
-        console.log('   Account status remains: ACTIVE');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
+        console.log('✅ [DRIVER] Offline — Redis cleaned. Account.status unchanged (ACTIVE)');
         res.status(200).json({
             message: 'You are now offline. You will not receive trip requests.',
-            data: {
-                driver_id: req.user.uuid,
-                is_online: false,
-                timestamp: new Date().toISOString(),
-            },
+            data: { driver_id: req.user.uuid, is_online: false, timestamp: new Date().toISOString() },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Go Offline Error:', error);
+        console.error('❌ [DRIVER] goOffline error:', error);
         next(error);
     }
 };
-/**
- * Update Location - Update driver's current location
- * POST /api/driver/location
- */
+
+// ─────────────────────────────────────────────────────────────────────
 exports.updateLocation = async (req, res, next) => {
     try {
         const { lat, lng, heading, speed, accuracy } = req.body;
-
-        console.log('📍 [DRIVER-CONTROLLER] Location Update');
-        console.log('   Driver:', req.user.uuid);
-        console.log('   Location:', lat, lng);
-
-        // Validate
         if (!lat || !lng) {
-            return res.status(400).json({
-                error: 'Validation error',
-                message: 'Location (lat, lng) is required',
-            });
+            return res.status(400).json({ error: 'Validation error', message: 'lat and lng are required' });
         }
 
-        // ✅ Update Redis geospatial index
-        const geoRedisKey = 'drivers:locations';
-        await redisClient.geoadd(
-            geoRedisKey,
-            parseFloat(lng),
-            parseFloat(lat),
-            req.user.uuid.toString()
-        );
-
-        // ✅ ALSO update JSON location
-        const driverLocationKey = `driver:location:${req.user.uuid}`;
-        const locationData = {
-            driverId: req.user.uuid,
-            lat: parseFloat(lat),
-            lng: parseFloat(lng),
-            heading: heading || 0,
-            speed: speed || 0,
-            accuracy: accuracy || 0,
-            lastUpdated: new Date().toISOString()
-        };
-
-        await redisHelpers.setJson(driverLocationKey, locationData, 3600);
-
-        console.log('📍 [REDIS] Driver location stored:', req.user.uuid, `(${lat}, ${lng})`);
+        await redisClient.geoadd('drivers:locations', parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
+        await redisHelpers.setJson(`driver:location:${req.user.uuid}`, {
+            driverId:    req.user.uuid,
+            lat:         parseFloat(lat),
+            lng:         parseFloat(lng),
+            heading:     heading || 0,
+            speed:       speed   || 0,
+            accuracy:    accuracy || 0,
+            lastUpdated: new Date().toISOString(),
+        }, 3600);
 
         res.status(200).json({
             message: 'Location updated successfully',
-            data: {
-                lat,
-                lng,
-                heading,
-                speed,
-                timestamp: new Date().toISOString(),
-            },
+            data: { lat, lng, heading, speed, timestamp: new Date().toISOString() },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Update Location Error:', error);
+        console.error('❌ [DRIVER] updateLocation error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Get Status - Get driver's current online/offline status
  * GET /api/driver/status
+ * ✅ FIX STEP 4: Read is_online from Redis metadata, NOT from Account.status.
+ * Account.status is always 'ACTIVE'. Online state only lives in Redis.
  */
 exports.getStatus = async (req, res, next) => {
     try {
-        console.log('📊 [DRIVER-CONTROLLER] Get Status Request');
-        console.log('   Driver:', req.user.uuid);
+        console.log('📊 [DRIVER] getStatus — Driver:', req.user.uuid);
 
-        const driver = await Account.findByPk(req.user.uuid);
+        // ✅ FIX STEP 4: Read from Redis metadata key, not Account.status
+        const metadataKey = `driver:${req.user.uuid}:metadata`;
+        const rawMeta     = await redisClient.get(metadataKey);
+        const meta        = rawMeta ? JSON.parse(rawMeta) : null;
+        const is_online   = meta?.status === 'ONLINE';
 
-        const status = {
-            driver_id: req.user.uuid,
-            is_online: driver?.status === 'ONLINE' || false,
-            location: driver?.lastLatitude && driver?.lastLongitude ? {
-                lat: driver.lastLatitude,
-                lng: driver.lastLongitude
-            } : null,
-            last_updated: new Date().toISOString(),
-        };
+        // Get last known location from Redis JSON (more accurate than DB)
+        const locationData = await redisHelpers.getJson(`driver:location:${req.user.uuid}`);
+
+        console.log(`✅ [DRIVER] getStatus — is_online: ${is_online} (from Redis)`);
 
         res.status(200).json({
             message: 'Driver status retrieved',
-            data: status,
+            data: {
+                driver_id:    req.user.uuid,
+                is_online,
+                is_available: meta?.isAvailable ?? false,
+                location: locationData ? { lat: locationData.lat, lng: locationData.lng } : null,
+                last_updated: meta?.lastUpdated || new Date().toISOString(),
+            },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Status Error:', error);
+        console.error('❌ [DRIVER] getStatus error:', error);
         next(error);
     }
 };
@@ -349,159 +228,87 @@ exports.getStatus = async (req, res, next) => {
 // TRIP MANAGEMENT CONTROLLERS
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Get Current Trip - Get driver's active trip
- * GET /api/driver/current-trip
- */
 exports.getCurrentTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🔍 [DRIVER-CONTROLLER] Get Current Trip');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
+        console.log('🔍 [DRIVER] getCurrentTrip — Driver:', req.user.uuid);
 
         const trip = await Trip.findOne({
             where: {
                 driverId: req.user.uuid,
-                status: {
-                    [Op.in]: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
-                },
+                status: { [Op.in]: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'] },
             },
+            include: [
+                {
+                    model: Account,
+                    as: 'passenger',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                    required: false,
+                }
+            ],
             order: [['createdAt', 'DESC']],
         });
 
         if (!trip) {
-            console.log('ℹ️ [DRIVER-CONTROLLER] No active trip found');
-            return res.status(200).json({
-                message: 'No active trip',
-                data: {
-                    currentTrip: null,
-                },
-            });
+            return res.status(200).json({ message: 'No active trip', data: { currentTrip: null } });
         }
 
-        console.log('✅ [DRIVER-CONTROLLER] Active trip found');
-        console.log('   Trip ID:', trip.id);
-        console.log('   Status:', trip.status);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        res.status(200).json({
-            message: 'Current trip retrieved',
-            data: {
-                currentTrip: trip,
-            },
-        });
+        console.log('✅ [DRIVER] Active trip:', trip.id, '—', trip.status);
+        res.status(200).json({ message: 'Current trip retrieved', data: { currentTrip: trip } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Current Trip Error:', error);
+        console.error('❌ [DRIVER] getCurrentTrip error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Accept Trip - Accept a trip offer
  * POST /api/driver/trips/:tripId/accept
+ * ✅ FIX STEP 5: io.emit('trip:taken') → replaced with targeted emit
+ *               to only the drivers who were originally notified about this trip.
  */
-
 exports.acceptTrip = async (req, res, next) => {
-    const { tripId } = req.params;
-    const driverId = req.user.uuid;
-    const driverName = `${req.user.first_name} ${req.user.last_name}`;
-
-    const lockKey = `trip:lock:${tripId}`;
-    const lockValue = uuidv4();
-    const lockTTL = 10;
+    const { tripId }  = req.params;
+    const driverId    = req.user.uuid;
+    const driverName  = `${req.user.first_name} ${req.user.last_name}`;
+    const lockKey     = `trip:lock:${tripId}`;
+    const lockValue   = uuidv4();
+    const lockTTL     = 10;
 
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚕 [ACCEPT-TRIP] Processing acceptance request');
-    console.log('🆔 Trip ID:', tripId);
-    console.log('👤 Driver ID:', driverId);
-    console.log('👤 Driver Name:', driverName);
-    console.log('🔒 Lock Key:', lockKey);
-    console.log('⏰ Current timestamp:', Date.now());
+    console.log('🚕 [ACCEPT-TRIP] Processing — Trip:', tripId, '| Driver:', driverId);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
     try {
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 1: ACQUIRE ATOMIC LOCK
-        // ═══════════════════════════════════════════════════════════════
-        console.log('🔒 [ACCEPT-TRIP] Attempting to acquire lock...');
-
-        const lockAcquired = await redisClient.set(
-            lockKey,
-            lockValue,
-            'EX', lockTTL,
-            'NX'
-        );
-
+        // ── STEP 1: Acquire atomic Redis lock ─────────────────────────
+        const lockAcquired = await redisClient.set(lockKey, lockValue, 'EX', lockTTL, 'NX');
         if (!lockAcquired) {
-            console.log('❌ [ACCEPT-TRIP] Lock acquisition failed - another driver is processing');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+            console.log('❌ [ACCEPT-TRIP] Lock failed — another driver is processing');
             return res.status(409).json({
                 error: true,
-                message: 'This trip is being accepted by another driver. Please try again.',
+                message: 'Trip is being accepted by another driver',
                 code: 'TRIP_LOCKED'
             });
         }
+        console.log('✅ [ACCEPT-TRIP] Lock acquired');
 
-        console.log('✅ [ACCEPT-TRIP] Lock acquired successfully at', Date.now());
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 2: 🔥 CRITICAL - IMMEDIATELY CLEAR ALL TIMEOUT MECHANISMS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n⏰⏰⏰ [ACCEPT-TRIP] CLEARING TIMEOUT MECHANISMS ⏰⏰⏰');
-        console.log('Timestamp:', Date.now());
-
-        const timeoutKey = `trip:timeout:${tripId}`;
-
-        // Check if timeout key exists BEFORE deletion
-        const timeoutExistsBefore = await redisClient.exists(timeoutKey);
-        console.log(`📊 [ACCEPT-TRIP] Timeout key EXISTS before deletion: ${timeoutExistsBefore === 1 ? 'YES' : 'NO'}`);
-
-        if (timeoutExistsBefore) {
-            const ttl = await redisClient.ttl(timeoutKey);
-            console.log(`📊 [ACCEPT-TRIP] Timeout key TTL: ${ttl} seconds`);
-        }
-
-        // Delete the timeout key
-        const timeoutCleared = await redisClient.del(timeoutKey);
-        console.log(`🗑️ [ACCEPT-TRIP] Timeout key deletion result: ${timeoutCleared} key(s) deleted`);
-
-        // Verify it's actually deleted
-        const timeoutExistsAfter = await redisClient.exists(timeoutKey);
-        console.log(`📊 [ACCEPT-TRIP] Timeout key EXISTS after deletion: ${timeoutExistsAfter === 1 ? 'YES' : 'NO'}`);
-
-        if (timeoutExistsAfter === 1) {
-            console.error('❌❌❌ [ACCEPT-TRIP] CRITICAL: Timeout key still exists after deletion!');
-        } else {
-            console.log('✅✅✅ [ACCEPT-TRIP] Timeout key successfully deleted - trip will NOT expire');
-        }
-
-        // Set a marker that this trip is being accepted (extra safety)
+        // ── STEP 2: Clear timeout mechanisms ──────────────────────────
+        const timeoutKey   = `trip:timeout:${tripId}`;
         const acceptingKey = `trip:accepting:${tripId}`;
-        await redisClient.set(acceptingKey, driverId, 'EX', 120); // 2 minutes
-        console.log(`✅ [ACCEPT-TRIP] Set accepting marker at ${acceptingKey}`);
+        const noExpireKey  = `trip:no_expire:${tripId}`;
 
-        // Set a marker that timeout should be ignored (triple redundancy)
-        const noExpireKey = `trip:no_expire:${tripId}`;
-        await redisClient.set(noExpireKey, '1', 'EX', 120);
-        console.log(`✅ [ACCEPT-TRIP] Set no-expire marker at ${noExpireKey}`);
+        await redisClient.del(timeoutKey);
+        await redisClient.set(acceptingKey, driverId, 'EX', 120);
+        await redisClient.set(noExpireKey,  '1',      'EX', 120);
+        console.log('✅ [ACCEPT-TRIP] Timeout cleared, accepting markers set');
 
-        console.log('⏰⏰⏰ [ACCEPT-TRIP] TIMEOUT CLEARING COMPLETE ⏰⏰⏰\n');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 3: GET TRIP FROM REDIS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('🔍 [ACCEPT-TRIP] Fetching trip from Redis...');
-
+        // ── STEP 3: Get trip from Redis ────────────────────────────────
         const tripKey = REDIS_KEYS.ACTIVE_TRIP(tripId);
-        const trip = await redisHelpers.getJson(tripKey);
+        const trip    = await redisHelpers.getJson(tripKey);
 
         if (!trip) {
-            console.log('❌ [ACCEPT-TRIP] Trip not found in Redis');
-            await redisClient.del(lockKey);
-            await redisClient.del(acceptingKey);
-            await redisClient.del(noExpireKey);
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(404).json({
                 error: true,
                 message: 'Trip not found or already expired',
@@ -509,260 +316,133 @@ exports.acceptTrip = async (req, res, next) => {
             });
         }
 
-        console.log('📦 [ACCEPT-TRIP] Trip data:', {
-            id: trip.id,
-            status: trip.status,
-            passengerId: trip.passengerId,
-            driverId: trip.driverId
-        });
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 4: VALIDATE TRIP STATUS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('🔍 [ACCEPT-TRIP] Validating trip status...');
-
+        // ── STEP 4: Validate status ────────────────────────────────────
         if (trip.status !== 'SEARCHING') {
-            console.log(`❌ [ACCEPT-TRIP] Invalid status: ${trip.status}`);
-            await redisClient.del(lockKey);
-            await redisClient.del(acceptingKey);
-            await redisClient.del(noExpireKey);
-
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(409).json({
                 error: true,
                 message: 'This trip is no longer available',
                 code: 'TRIP_NOT_AVAILABLE',
-                data: {
-                    currentStatus: trip.status,
-                    acceptedBy: trip.driverId || null
-                }
+                data: { currentStatus: trip.status, acceptedBy: trip.driverId || null }
             });
         }
 
         if (trip.driverId && trip.driverId !== driverId) {
-            console.log(`❌ [ACCEPT-TRIP] Already assigned to driver: ${trip.driverId}`);
-            await redisClient.del(lockKey);
-            await redisClient.del(acceptingKey);
-            await redisClient.del(noExpireKey);
-
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(409).json({
                 error: true,
-                message: 'This trip has already been accepted by another driver',
+                message: 'Trip already accepted by another driver',
                 code: 'TRIP_ALREADY_ACCEPTED'
             });
         }
 
-        console.log('✅ [ACCEPT-TRIP] Trip is available for acceptance');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 5: GET DRIVER LOCATION FROM REDIS (JSON FORMAT)
-        // ═══════════════════════════════════════════════════════════════
-        console.log('📍 [ACCEPT-TRIP] Fetching driver location...');
-
-        const driverLocationKey = `driver:location:${driverId}`;
-        const driverLocationData = await redisHelpers.getJson(driverLocationKey);
-
+        // ── STEP 5: Get driver location ────────────────────────────────
+        const driverLocationData = await redisHelpers.getJson(`driver:location:${driverId}`);
         if (!driverLocationData) {
-            console.log('⚠️ [ACCEPT-TRIP] Driver location not found');
-            await redisClient.del(lockKey);
-            await redisClient.del(acceptingKey);
-            await redisClient.del(noExpireKey);
-
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(400).json({
                 error: true,
-                message: 'Cannot accept trip - driver location not available. Please ensure you are online.',
+                message: 'Driver location not available. Please ensure you are online.',
                 code: 'DRIVER_LOCATION_MISSING'
             });
         }
-
         const driverLocation = {
             lat: parseFloat(driverLocationData.lat),
             lng: parseFloat(driverLocationData.lng)
         };
 
-        console.log('✅ [ACCEPT-TRIP] Driver location:', driverLocation);
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 6: UPDATE TRIP IN REDIS WITH NEW STATUS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('💾 [ACCEPT-TRIP] Updating trip in Redis...');
-
+        // ── STEP 6: Update Redis trip ──────────────────────────────────
         const updatedTrip = {
             ...trip,
             driverId,
             driverName,
             driverLocation,
-            status: 'MATCHED',
+            status:    'MATCHED',
             matchedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
         };
-
         await redisHelpers.setJson(tripKey, updatedTrip, 7200);
+        console.log('✅ [ACCEPT-TRIP] Redis trip updated → MATCHED');
 
-        console.log('✅ [ACCEPT-TRIP] Trip updated in Redis with MATCHED status');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 7: SAVE TRIP TO DATABASE
-        // ═══════════════════════════════════════════════════════════════
-        console.log('💾 [ACCEPT-TRIP] Saving trip to database...');
-
+        // ── STEP 7: Save trip to DB ────────────────────────────────────
         let dbTrip;
         try {
             dbTrip = await Trip.create({
-                id: trip.id,
-                passengerId: trip.passengerId,
+                id:                trip.id,
+                passengerId:       trip.passengerId,
                 driverId,
-                status: 'MATCHED',
-                pickupLat: trip.pickupLat,
-                pickupLng: trip.pickupLng,
-                pickupAddress: trip.pickupAddress,
-                dropoffLat: trip.dropoffLat,
-                dropoffLng: trip.dropoffLng,
-                dropoffAddress: trip.dropoffAddress,
-                distanceM: trip.distanceM,
-                durationS: trip.durationS,
-                fareEstimate: trip.fareEstimate,
-                paymentMethod: trip.paymentMethod || 'CASH',
-                routePolyline: trip.routePolyline,
+                status:            'MATCHED',
+                pickupLat:         trip.pickupLat,
+                pickupLng:         trip.pickupLng,
+                pickupAddress:     trip.pickupAddress,
+                dropoffLat:        trip.dropoffLat,
+                dropoffLng:        trip.dropoffLng,
+                dropoffAddress:    trip.dropoffAddress,
+                distanceM:         trip.distanceM,
+                durationS:         trip.durationS,
+                fareEstimate:      trip.fareEstimate,
+                paymentMethod:     trip.paymentMethod || 'CASH',
+                routePolyline:     trip.routePolyline,
                 driverLocationLat: driverLocation.lat,
                 driverLocationLng: driverLocation.lng,
-                matchedAt: new Date()
+                matchedAt:         new Date(),
             });
-
-            console.log('✅ [ACCEPT-TRIP] Trip saved to database with ID:', dbTrip.id);
+            console.log('✅ [ACCEPT-TRIP] Trip saved to DB:', dbTrip.id);
         } catch (dbError) {
-            console.error('❌ [ACCEPT-TRIP] Database save error:', dbError.message);
-
-            await redisClient.del(lockKey);
-            await redisClient.del(acceptingKey);
-            await redisClient.del(noExpireKey);
-
+            console.error('❌ [ACCEPT-TRIP] DB save error:', dbError.message);
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(500).json({
                 error: true,
-                message: 'Failed to save trip to database',
+                message: 'Failed to save trip',
                 code: 'DATABASE_ERROR',
                 details: dbError.message
             });
         }
 
-        // Create trip event (optional)
+        // ── STEP 8: Trip event audit log (non-fatal) ───────────────────
         try {
             await TripEvent.create({
-                tripId: trip.id,
-                eventType: 'TRIP_MATCHED',
+                tripId:      trip.id,
+                eventType:   'TRIP_MATCHED',
                 performedBy: driverId,
-                metadata: {
-                    driverLocation,
-                    matchedAt: new Date().toISOString()
-                }
+                metadata:    { driverLocation, matchedAt: new Date().toISOString() },
             });
-            console.log('✅ [ACCEPT-TRIP] Trip event created');
-        } catch (eventError) {
-            console.warn('⚠️ [ACCEPT-TRIP] Failed to create trip event:', eventError.message);
+        } catch (e) {
+            console.warn('⚠️  [ACCEPT-TRIP] TripEvent create failed (non-fatal):', e.message);
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 8: UPDATE PASSENGER'S ACTIVE TRIP REFERENCE
-        // ═══════════════════════════════════════════════════════════════
-        const passengerActiveTripKey = `passenger:active_trip:${trip.passengerId}`;
-        await redisHelpers.setJson(passengerActiveTripKey, {
-            tripId: trip.id,
-            status: 'MATCHED',
-            driverId,
-            driverName
-        }, 7200);
+        // ── STEP 9: Update active trip refs in Redis ───────────────────
+        await redisHelpers.setJson(
+            `passenger:active_trip:${trip.passengerId}`,
+            { tripId: trip.id, status: 'MATCHED', driverId, driverName },
+            7200
+        );
+        await redisHelpers.setJson(
+            `driver:active_trip:${driverId}`,
+            { tripId: trip.id, status: 'MATCHED' },
+            7200
+        );
 
-        console.log('✅ [ACCEPT-TRIP] Passenger active trip reference updated');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 9: CLEAN UP DRIVER OFFERS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('🧹 [ACCEPT-TRIP] Cleaning up driver offers...');
-
-        const driverOffersPattern = `driver:pending_offers:*`;
-        const driverOfferKeys = await redisClient.keys(driverOffersPattern);
-
-        for (const key of driverOfferKeys) {
-            const offers = await redisHelpers.getJson(key);
-            if (offers && Array.isArray(offers)) {
-                const filteredOffers = offers.filter(o => o.tripId !== tripId);
-                if (filteredOffers.length !== offers.length) {
-                    await redisHelpers.setJson(key, filteredOffers, 3600);
+        // ── STEP 10: Clean driver offer queues ────────────────────────
+        const offerKeys = await redisClient.keys('driver:pending_offers:*');
+        for (const key of offerKeys) {
+            const offers = await redisHelpers.getJson(key) || [];
+            if (Array.isArray(offers)) {
+                const filtered = offers.filter(o => o.tripId !== tripId);
+                if (filtered.length !== offers.length) {
+                    await redisHelpers.setJson(key, filtered, 3600);
                 }
             }
         }
 
-        console.log('✅ [ACCEPT-TRIP] Driver offers cleaned up');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 10: EMIT SOCKET EVENTS
-        // ═══════════════════════════════════════════════════════════════
-        console.log('📡 [ACCEPT-TRIP] Emitting socket events...');
-
-        const io = getIO();
-
-        io.to(`passenger:${trip.passengerId}`).emit('trip:driver_assigned', {
-            tripId: trip.id,
-            driver: {
-                id: driverId,
-                name: driverName,
-                location: driverLocation
-            },
-            trip: updatedTrip,
-            timestamp: new Date().toISOString()
-        });
-
-        io.to(`driver:${driverId}`).emit('trip:matched', {
-            tripId: trip.id,
-            trip: updatedTrip,
-            passenger: {
-                id: trip.passengerId,
-                name: trip.passengerName || 'Passenger',
-                phone: trip.passengerPhone || '',
-                pickup: {
-                    lat: trip.pickupLat,
-                    lng: trip.pickupLng,
-                    address: trip.pickupAddress
-                },
-                dropoff: {
-                    lat: trip.dropoffLat,
-                    lng: trip.dropoffLng,
-                    address: trip.dropoffAddress
-                }
-            },
-            timestamp: new Date().toISOString()
-        });
-
-        io.emit('trip:taken', {
-            tripId: trip.id,
-            message: 'This trip has been accepted by another driver',
-            timestamp: new Date().toISOString()
-        });
-
-        console.log('✅ [ACCEPT-TRIP] Socket events emitted');
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 11: RELEASE LOCK
-        // ═══════════════════════════════════════════════════════════════
-        const currentLockValue = await redisClient.get(lockKey);
-        if (currentLockValue === lockValue) {
-            await redisClient.del(lockKey);
-        }
-
-        // Clean up accepting marker (but keep no_expire marker for safety)
-        await redisClient.del(acceptingKey);
-
-        // ═══════════════════════════════════════════════════════════════
-        // STEP 12: FETCH PASSENGER INFO FROM DATABASE
-        // ═══════════════════════════════════════════════════════════════
-        console.log('🔍 [ACCEPT-TRIP] Fetching passenger information...');
-
+        // ── STEP 11: Fetch passenger info from DB ──────────────────────
         const passengerAccount = await Account.findOne({
-            where: { uuid: trip.passengerId },
-            attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url']
+            where:      { uuid: trip.passengerId },
+            attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
         });
 
         if (!passengerAccount) {
-            console.error('❌ [ACCEPT-TRIP] Passenger account not found');
+            await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(404).json({
                 error: true,
                 message: 'Passenger account not found',
@@ -770,33 +450,92 @@ exports.acceptTrip = async (req, res, next) => {
             });
         }
 
+        // ── STEP 12: Fetch passenger rating ───────────────────────────
+        // ✅ FIXED: using snake_case field names + stars column
+        let passengerRating = null;
+        try {
+            const passengerRatingRows = await Rating.findAll({
+                where: {
+                    rated_user:  trip.passengerId,        // ✅ snake_case matches DB
+                    rating_type: 'DRIVER_TO_PASSENGER',   // ✅ snake_case matches DB
+                },
+                attributes: ['stars'],                    // ✅ 'stars' not 'rating'
+            });
+
+            if (passengerRatingRows.length) {
+                const total = passengerRatingRows.reduce((sum, r) => sum + r.stars, 0); // ✅ r.stars
+                passengerRating = parseFloat((total / passengerRatingRows.length).toFixed(1));
+            }
+            console.log('✅ [ACCEPT-TRIP] Passenger rating fetched:', passengerRating);
+        } catch (ratingError) {
+            // Non-fatal — rating fetch failure should NOT block trip acceptance
+            console.warn('⚠️  [ACCEPT-TRIP] Rating fetch failed (non-fatal):', ratingError.message);
+        }
+
         const passengerData = {
-            id: passengerAccount.uuid,
-            uuid: passengerAccount.uuid,
-            name: `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
+            id:        passengerAccount.uuid,
+            uuid:      passengerAccount.uuid,
+            name:      `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
             firstName: passengerAccount.first_name,
-            lastName: passengerAccount.last_name,
-            first_name: passengerAccount.first_name,
-            last_name: passengerAccount.last_name,
-            phone: passengerAccount.phone_e164,
-            phone_e164: passengerAccount.phone_e164,
-            phoneNumber: passengerAccount.phone_e164,
-            avatar: passengerAccount.avatar_url,
-            avatar_url: passengerAccount.avatar_url,
-            rating: 5.0,
+            lastName:  passengerAccount.last_name,
+            phone:     passengerAccount.phone_e164,
+            avatar:    passengerAccount.avatar_url,
+            rating:    passengerRating,
             pickup: {
-                lat: trip.pickupLat,
-                lng: trip.pickupLng,
-                address: trip.pickupAddress
+                lat:     trip.pickupLat,
+                lng:     trip.pickupLng,
+                address: trip.pickupAddress,
             },
             dropoff: {
-                lat: trip.dropoffLat,
-                lng: trip.dropoffLng,
-                address: trip.dropoffAddress
-            }
+                lat:     trip.dropoffLat,
+                lng:     trip.dropoffLng,
+                address: trip.dropoffAddress,
+            },
         };
 
-        console.log('✅ [ACCEPT-TRIP] Trip acceptance completed successfully');
+        // ── STEP 13: Emit socket events ────────────────────────────────
+        const io = getIO();
+
+        // Notify passenger their driver is matched
+        io.to(`passenger:${trip.passengerId}`).emit('trip:driver_assigned', {
+            tripId:    trip.id,
+            driver:    { id: driverId, name: driverName, location: driverLocation },
+            trip:      updatedTrip,
+            timestamp: new Date().toISOString(),
+        });
+
+        // Notify accepting driver with full passenger info
+        io.to(`driver:${driverId}`).emit('trip:matched', {
+            tripId:    trip.id,
+            trip:      updatedTrip,
+            passenger: passengerData,
+            timestamp: new Date().toISOString(),
+        });
+
+        // Notify other drivers who received this offer that it is taken
+        const tripOffersKey   = REDIS_KEYS.TRIP_OFFERS
+            ? REDIS_KEYS.TRIP_OFFERS(tripId)
+            : `trip:offers:${tripId}`;
+        const tripOffersData  = await redisHelpers.getJson(tripOffersKey);
+        const notifiedDrivers = tripOffersData?.drivers || tripOffersData?.notifiedDrivers || [];
+
+        for (const notifiedDriverId of notifiedDrivers) {
+            if (notifiedDriverId !== driverId) {
+                io.to(`driver:${notifiedDriverId}`).emit('trip:request_expired', {
+                    tripId,
+                    message:   'This trip was accepted by another driver.',
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        }
+        console.log(`✅ [ACCEPT-TRIP] trip:request_expired sent to ${notifiedDrivers.length - 1} other drivers`);
+
+        // ── STEP 14: Release lock ──────────────────────────────────────
+        const currentLock = await redisClient.get(lockKey);
+        if (currentLock === lockValue) await redisClient.del(lockKey);
+        await redisClient.del(acceptingKey);
+
+        console.log('✅ [ACCEPT-TRIP] Completed successfully');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(200).json({
@@ -804,318 +543,285 @@ exports.acceptTrip = async (req, res, next) => {
             data: {
                 driver_id: driverId,
                 trip: {
-                    id: dbTrip.id,
-                    status: dbTrip.status,
-                    fare: trip.fareEstimate,
-                    distance: trip.distanceM,
-                    duration: trip.durationS,
+                    id:        dbTrip.id,
+                    status:    dbTrip.status,
+                    fare:      trip.fareEstimate,
+                    distance:  trip.distanceM,
+                    duration:  trip.durationS,
                     matchedAt: dbTrip.matchedAt,
-                    pickup: {
-                        lat: trip.pickupLat,
-                        lng: trip.pickupLng,
-                        address: trip.pickupAddress
-                    },
-                    dropoff: {
-                        lat: trip.dropoffLat,
-                        lng: trip.dropoffLng,
-                        address: trip.dropoffAddress
-                    }
+                    pickup:  { lat: trip.pickupLat,  lng: trip.pickupLng,  address: trip.pickupAddress  },
+                    dropoff: { lat: trip.dropoffLat, lng: trip.dropoffLng, address: trip.dropoffAddress },
                 },
-                passenger: passengerData
-            }
+                passenger: passengerData,
+            },
         });
 
     } catch (error) {
         console.error('❌ [ACCEPT-TRIP] Unexpected error:', error);
-
         try {
-            const currentLockValue = await redisClient.get(lockKey);
-            if (currentLockValue === lockValue) {
-                await redisClient.del(lockKey);
-            }
-            await redisClient.del(`trip:accepting:${tripId}`);
-            await redisClient.del(`trip:no_expire:${tripId}`);
-        } catch (lockError) {
-            console.error('❌ [ACCEPT-TRIP] Failed to release lock:', lockError);
-        }
-
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+            const cur = await redisClient.get(lockKey);
+            if (cur === lockValue) await redisClient.del(lockKey);
+            await redisClient.del(`trip:accepting:${tripId}`, `trip:no_expire:${tripId}`);
+        } catch (e) { /* lock release best-effort */ }
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 exports.declineTrip = async (req, res, next) => {
     const { tripId } = req.params;
-    const driverId = req.user.uuid;
-
+    const driverId   = req.user.uuid;
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚫 [DECLINE-TRIP] Processing decline request');
-    console.log('🆔 Trip ID:', tripId);
-    console.log('👤 Driver ID:', driverId);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    console.log('🚫 [DRIVER] declineTrip — Trip:', tripId, '| Driver:', driverId);
 
     try {
-        const driverOffersKey = `driver:pending_offers:${driverId}`;
-        const offers = await redisHelpers.getJson(driverOffersKey) || [];
-
-        const filteredOffers = offers.filter(o => o.tripId !== tripId);
-        await redisHelpers.setJson(driverOffersKey, filteredOffers, 3600);
+        const offers  = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
+        const filtered = offers.filter(o => o.tripId !== tripId);
+        await redisHelpers.setJson(`driver:pending_offers:${driverId}`, filtered, 3600);
 
         const declinedKey = `trip:declined:${tripId}`;
         await redisClient.sadd(declinedKey, driverId);
         await redisClient.expire(declinedKey, 300);
 
-        console.log('✅ [DECLINE-TRIP] Trip declined successfully');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
         const io = getIO();
-        io.to(`driver:${driverId}`).emit('trip:decline:success', {
-            tripId,
-            message: 'Trip declined successfully',
-            timestamp: new Date().toISOString()
-        });
+        io.to(`driver:${driverId}`).emit('trip:decline:success', { tripId, timestamp: new Date().toISOString() });
 
-        return res.status(200).json({
-            message: 'Trip declined successfully',
-            data: { tripId }
-        });
+        console.log('✅ [DRIVER] Trip declined');
+        return res.status(200).json({ message: 'Trip declined successfully', data: { tripId } });
 
     } catch (error) {
-        console.error('❌ [DECLINE-TRIP] Error:', error);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.error('❌ [DRIVER] declineTrip error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Arrived at Pickup
  * POST /api/driver/trips/:tripId/arrived
+ * ✅ FIX BE Data Integrity #1: Status guard — must be DRIVER_EN_ROUTE
+ * ✅ FIX BE Data Integrity #2: Sync Redis ACTIVE_TRIP after DB save
  */
 exports.arrivedAtPickup = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📍 [DRIVER-CONTROLLER] Arrived at Pickup');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Trip ID:', req.params.tripId);
-
+        console.log('📍 [DRIVER] arrivedAtPickup — Trip:', req.params.tripId);
         const { tripId } = req.params;
 
         const trip = await Trip.findByPk(tripId);
+        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
 
-        if (!trip) {
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist',
+        // ✅ FIX BE Data Integrity #1: Status transition guard
+        const allowedPrev = ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE'];
+        if (!allowedPrev.includes(trip.status)) {
+            return res.status(400).json({
+                error: 'Invalid status transition',
+                message: `Cannot mark arrived from status: ${trip.status}. Must be one of: ${allowedPrev.join(', ')}`,
+                currentStatus: trip.status,
             });
         }
 
-        if (trip.driverId !== req.user.uuid) {
-            return res.status(403).json({
-                error: 'Access denied',
-                message: 'You are not assigned to this trip',
-            });
-        }
-
-        trip.status = 'DRIVER_ARRIVED';
+        trip.status   = 'DRIVER_ARRIVED';
+        trip.arrivedAt = new Date();
         await trip.save();
 
-        console.log('✅ [DRIVER-CONTROLLER] Status updated to DRIVER_ARRIVED');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        // ✅ FIX BE Data Integrity #2: Keep Redis in sync with DB status
+        await redisHelpers.setJson(
+            REDIS_KEYS.ACTIVE_TRIP(tripId),
+            { ...trip.toJSON(), status: 'DRIVER_ARRIVED' },
+            7200
+        );
+
+        console.log('✅ [DRIVER] Status → DRIVER_ARRIVED, Redis synced');
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:driver_arrived', {
-            tripId: trip.id,
-            arrivedAt: new Date(),
+            tripId:    trip.id,
+            arrivedAt: trip.arrivedAt,
         });
 
-        res.status(200).json({
-            message: 'Status updated: Driver arrived at pickup',
-            data: { trip },
-        });
+        res.status(200).json({ message: 'Status updated: Driver arrived at pickup', data: { trip } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Arrived at Pickup Error:', error);
+        console.error('❌ [DRIVER] arrivedAtPickup error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Start Trip
  * POST /api/driver/trips/:tripId/start
+ * ✅ FIX BE Data Integrity #1: Status guard — must be DRIVER_ARRIVED
+ * ✅ FIX BE Data Integrity #2: Sync Redis ACTIVE_TRIP after DB save
  */
 exports.startTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🚀 [DRIVER-CONTROLLER] Start Trip');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Trip ID:', req.params.tripId);
-
+        console.log('🚀 [DRIVER] startTrip — Trip:', req.params.tripId);
         const { tripId } = req.params;
 
         const trip = await Trip.findByPk(tripId);
+        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
 
-        if (!trip) {
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist',
+        // ✅ FIX BE Data Integrity #1: Status guard — passenger must be boarded
+        if (trip.status !== 'DRIVER_ARRIVED') {
+            return res.status(400).json({
+                error: 'Invalid status transition',
+                message: `Cannot start trip from status: ${trip.status}. Driver must be DRIVER_ARRIVED first.`,
+                currentStatus: trip.status,
             });
         }
 
-        if (trip.driverId !== req.user.uuid) {
-            return res.status(403).json({
-                error: 'Access denied',
-                message: 'You are not assigned to this trip',
-            });
-        }
-
-        trip.status = 'IN_PROGRESS';
+        trip.status        = 'IN_PROGRESS';
         trip.tripStartedAt = new Date();
         await trip.save();
 
-        console.log('✅ [DRIVER-CONTROLLER] Trip started');
-        console.log('   Started At:', trip.tripStartedAt);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        // ✅ FIX BE Data Integrity #2: Sync Redis
+        await redisHelpers.setJson(
+            REDIS_KEYS.ACTIVE_TRIP(tripId),
+            { ...trip.toJSON(), status: 'IN_PROGRESS' },
+            7200
+        );
+
+        console.log('✅ [DRIVER] Status → IN_PROGRESS, Redis synced');
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:started', {
-            tripId: trip.id,
+            tripId:    trip.id,
             startedAt: trip.tripStartedAt,
         });
 
-        res.status(200).json({
-            message: 'Trip started successfully',
-            data: { trip },
-        });
+        res.status(200).json({ message: 'Trip started successfully', data: { trip } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Start Trip Error:', error);
+        console.error('❌ [DRIVER] startTrip error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Complete Trip
  * POST /api/driver/trips/:tripId/complete
+ * ✅ FIX BE Data Integrity #1: Status guard — must be IN_PROGRESS
+ * ✅ FIX BE Data Integrity #3: Clean up Redis keys on completion
  */
 exports.completeTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🏁 [DRIVER-CONTROLLER] Complete Trip');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Trip ID:', req.params.tripId);
-
-        const { tripId } = req.params;
+        console.log('🏁 [DRIVER] completeTrip — Trip:', req.params.tripId);
+        const { tripId }    = req.params;
         const { final_fare, notes } = req.body;
 
         const trip = await Trip.findByPk(tripId);
+        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
 
-        if (!trip) {
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist',
+        // ✅ FIX BE Data Integrity #1: Status guard
+        if (trip.status !== 'IN_PROGRESS') {
+            return res.status(400).json({
+                error: 'Invalid status transition',
+                message: `Cannot complete trip from status: ${trip.status}. Trip must be IN_PROGRESS.`,
+                currentStatus: trip.status,
             });
         }
 
-        if (trip.driverId !== req.user.uuid) {
-            return res.status(403).json({
-                error: 'Access denied',
-                message: 'You are not assigned to this trip',
-            });
-        }
-
-        trip.status = 'COMPLETED';
+        trip.status          = 'COMPLETED';
         trip.tripCompletedAt = new Date();
         if (final_fare) trip.fareFinal = final_fare;
+        if (notes)      trip.notes     = notes;
         await trip.save();
 
-        console.log('✅ [DRIVER-CONTROLLER] Trip completed');
-        console.log('   Completed At:', trip.tripCompletedAt);
-        console.log('   Final Fare:', trip.fareFinal);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.log('✅ [DRIVER] Trip COMPLETED — Final fare:', trip.fareFinal);
+
+        // ✅ FIX BE Data Integrity #3: Clean ALL Redis keys for this trip
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+        await redisClient.del(`driver:active_trip:${req.user.uuid}`);
+        await redisClient.del(`trip:timeout:${tripId}`);
+        await redisClient.del(`trip:accepting:${tripId}`);
+        await redisClient.del(`trip:no_expire:${tripId}`);
+
+        // Reset driver metadata — they're available for new trips
+        const rawMeta = await redisClient.get(`driver:${req.user.uuid}:metadata`);
+        if (rawMeta) {
+            const meta = JSON.parse(rawMeta);
+            meta.isAvailable = true;
+            meta.lastUpdated = new Date().toISOString();
+            await redisClient.setex(`driver:${req.user.uuid}:metadata`, 3600, JSON.stringify(meta));
+        }
+
+        console.log('✅ [DRIVER] Redis cleaned after completion');
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:completed', {
-            tripId: trip.id,
+            tripId:      trip.id,
             completedAt: trip.tripCompletedAt,
-            finalFare: trip.fareFinal,
+            finalFare:   trip.fareFinal,
         });
 
-        res.status(200).json({
-            message: 'Trip completed successfully',
-            data: { trip },
-        });
+        res.status(200).json({ message: 'Trip completed successfully', data: { trip } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Complete Trip Error:', error);
+        console.error('❌ [DRIVER] completeTrip error:', error);
         next(error);
     }
 };
 
-/**
- * Cancel Trip
- * POST /api/driver/trips/:tripId/cancel
- */
+// ─────────────────────────────────────────────────────────────────────
 exports.cancelTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🚫 [DRIVER-CONTROLLER] Cancel Trip');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-        console.log('Trip ID:', req.params.tripId);
-
+        console.log('🚫 [DRIVER] cancelTrip — Trip:', req.params.tripId);
         const { tripId } = req.params;
         const { reason } = req.body;
 
-        if (!reason) {
-            return res.status(400).json({
-                error: 'Validation error',
-                message: 'Cancellation reason is required',
-            });
-        }
+        if (!reason) return res.status(400).json({ error: 'Validation error', message: 'Cancellation reason is required' });
 
         const trip = await Trip.findByPk(tripId);
+        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
 
-        if (!trip) {
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist',
+        const cancelable = ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
+        if (!cancelable.includes(trip.status)) {
+            return res.status(400).json({
+                error: 'Cannot cancel',
+                message: `Trip in ${trip.status} status cannot be canceled`,
             });
         }
 
-        if (trip.driverId !== req.user.uuid) {
-            return res.status(403).json({
-                error: 'Access denied',
-                message: 'You are not assigned to this trip',
-            });
-        }
-
-        trip.status = 'CANCELED';
+        trip.status     = 'CANCELED';
         trip.cancelReason = reason;
         trip.canceledBy = 'DRIVER';
         trip.canceledAt = new Date();
         await trip.save();
 
-        console.log('✅ [DRIVER-CONTROLLER] Trip canceled');
-        console.log('   Reason:', reason);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        // Clean Redis
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+        await redisClient.del(`driver:active_trip:${req.user.uuid}`);
+
+        // Reset driver availability
+        const rawMeta = await redisClient.get(`driver:${req.user.uuid}:metadata`);
+        if (rawMeta) {
+            const meta = JSON.parse(rawMeta);
+            meta.isAvailable = true;
+            meta.lastUpdated = new Date().toISOString();
+            await redisClient.setex(`driver:${req.user.uuid}:metadata`, 3600, JSON.stringify(meta));
+        }
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', {
-            tripId: trip.id,
+            tripId:    trip.id,
             canceledBy: 'DRIVER',
             reason,
         });
 
-        res.status(200).json({
-            message: 'Trip canceled',
-            data: { trip },
-        });
+        console.log('✅ [DRIVER] Trip canceled, Redis cleaned');
+        res.status(200).json({ message: 'Trip canceled', data: { trip } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Cancel Trip Error:', error);
+        console.error('❌ [DRIVER] cancelTrip error:', error);
         next(error);
     }
 };
@@ -1124,224 +830,167 @@ exports.cancelTrip = async (req, res, next) => {
 // STATS & HISTORY CONTROLLERS
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Get Stats
- * GET /api/driver/stats
- */
 exports.getStats = async (req, res, next) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📊 [DRIVER-CONTROLLER] Get Stats Request');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('Driver UUID:', req.user.uuid);
-
         const driverId = req.user.uuid;
+        const today    = new Date(); today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+        const weekStart = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
 
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        const baseWhere = { driverId, status: 'COMPLETED' };
 
-        const weekStart = new Date(today);
-        weekStart.setDate(today.getDate() - today.getDay());
-
-        const todayTrips = await Trip.count({
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-                tripCompletedAt: {
-                    [Op.gte]: today,
-                    [Op.lt]: tomorrow,
-                },
-            },
-        });
-
-        const todayEarnings = await Trip.sum('fareFinal', {
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-                tripCompletedAt: {
-                    [Op.gte]: today,
-                    [Op.lt]: tomorrow,
-                },
-            },
-        }) || 0;
-
-        const weekTrips = await Trip.count({
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-                tripCompletedAt: {
-                    [Op.gte]: weekStart,
-                },
-            },
-        });
-
-        const weekEarnings = await Trip.sum('fareFinal', {
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-                tripCompletedAt: {
-                    [Op.gte]: weekStart,
-                },
-            },
-        }) || 0;
-
-        const totalTrips = await Trip.count({
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-            },
-        });
-
-        const totalEarnings = await Trip.sum('fareFinal', {
-            where: {
-                driverId: driverId,
-                status: 'COMPLETED',
-            },
-        }) || 0;
-
-        console.log('✅ [DRIVER-CONTROLLER] Stats retrieved successfully');
-        console.log(`   Today: ${todayTrips} trips, ${todayEarnings} XAF`);
-        console.log(`   Week: ${weekTrips} trips, ${weekEarnings} XAF`);
-        console.log(`   Total: ${totalTrips} trips, ${totalEarnings} XAF`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        const [todayTrips, todayEarnings, weekTrips, weekEarnings, totalTrips, totalEarnings] = await Promise.all([
+            Trip.count({ where: { ...baseWhere, tripCompletedAt: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
+            Trip.sum('fareFinal', { where: { ...baseWhere, tripCompletedAt: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
+            Trip.count({ where: { ...baseWhere, tripCompletedAt: { [Op.gte]: weekStart } } }),
+            Trip.sum('fareFinal',  { where: { ...baseWhere, tripCompletedAt: { [Op.gte]: weekStart } } }),
+            Trip.count({ where: baseWhere }),
+            Trip.sum('fareFinal',  { where: baseWhere }),
+        ]);
 
         res.status(200).json({
             message: 'Driver stats retrieved successfully',
             data: {
-                today: {
-                    trips: todayTrips,
-                    earnings: todayEarnings,
-                },
-                week: {
-                    trips: weekTrips,
-                    earnings: weekEarnings,
-                },
-                total: {
-                    trips: totalTrips,
-                    earnings: totalEarnings,
-                },
+                today:  { trips: todayTrips,  earnings: todayEarnings  || 0 },
+                week:   { trips: weekTrips,   earnings: weekEarnings   || 0 },
+                total:  { trips: totalTrips,  earnings: totalEarnings  || 0 },
             },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Stats Error:', error);
+        console.error('❌ [DRIVER] getStats error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Get Earnings
  * GET /api/driver/earnings
+ * ✅ FIX BE Broken Feature #1: Replaced stub with real DB query.
+ * Returns per-trip breakdown grouped by today / this week / all time.
  */
 exports.getEarnings = async (req, res, next) => {
     try {
-        console.log('💰 [DRIVER-CONTROLLER] Get Earnings Request');
-
-        const { period = 'all' } = req.query;
+        console.log('💰 [DRIVER] getEarnings — Driver:', req.user.uuid);
+        const { period = 'week' } = req.query;
         const driverId = req.user.uuid;
+
+        const now       = new Date();
+        const today     = new Date(now); today.setHours(0, 0, 0, 0);
+        const tomorrow  = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+        const weekStart = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        let dateFilter = {};
+        if (period === 'today') dateFilter = { [Op.gte]: today, [Op.lt]: tomorrow };
+        else if (period === 'week')  dateFilter = { [Op.gte]: weekStart };
+        else if (period === 'month') dateFilter = { [Op.gte]: monthStart };
+        // 'all' — no date filter
+
+        const where = {
+            driverId,
+            status: 'COMPLETED',
+            ...(Object.keys(dateFilter).length ? { tripCompletedAt: dateFilter } : {}),
+        };
+
+        const trips = await Trip.findAll({
+            where,
+            attributes: ['id', 'fareEstimate', 'fareFinal', 'distanceM', 'durationS', 'tripCompletedAt', 'paymentMethod'],
+            order: [['tripCompletedAt', 'DESC']],
+        });
+
+        const total = trips.reduce((sum, t) => sum + (t.fareFinal || t.fareEstimate || 0), 0);
+
+        // Summary by day for charting
+        const byDay = {};
+        for (const t of trips) {
+            if (!t.tripCompletedAt) continue;
+            const day = t.tripCompletedAt.toISOString().split('T')[0];
+            if (!byDay[day]) byDay[day] = { date: day, trips: 0, earnings: 0 };
+            byDay[day].trips    += 1;
+            byDay[day].earnings += (t.fareFinal || t.fareEstimate || 0);
+        }
+
+        console.log(`✅ [DRIVER] getEarnings — ${trips.length} trips, ${total} XAF total`);
 
         res.status(200).json({
             message: 'Earnings retrieved',
             data: {
                 period,
-                earnings: [],
-                total: 0,
+                total,
+                tripCount: trips.length,
+                currency:  'XAF',
+                byDay:     Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date)),
+                trips:     trips.map(t => ({
+                    id:          t.id,
+                    fare:        t.fareFinal || t.fareEstimate || 0,
+                    distanceM:   t.distanceM,
+                    durationS:   t.durationS,
+                    completedAt: t.tripCompletedAt,
+                    payment:     t.paymentMethod,
+                })),
             },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Earnings Error:', error);
+        console.error('❌ [DRIVER] getEarnings error:', error);
         next(error);
     }
 };
 
-/**
- * Get Trip History
- * GET /api/driver/trips/history
- */
+// ─────────────────────────────────────────────────────────────────────
 exports.getTripHistory = async (req, res, next) => {
     try {
-        console.log('📜 [DRIVER-CONTROLLER] Get Trip History Request');
-
         const { page = 1, limit = 20, status } = req.query;
         const driverId = req.user.uuid;
+        const offset   = (page - 1) * limit;
 
-        const offset = (page - 1) * limit;
-
-        const where = {
-            driverId: driverId,
-        };
-
-        if (status) {
-            where.status = status;
-        }
+        const where = { driverId };
+        if (status) where.status = status;
 
         const { count, rows: trips } = await Trip.findAndCountAll({
             where,
-            limit: parseInt(limit),
+            include: [
+                {
+                    model: Account,
+                    as: 'passenger',
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    required: false,
+                }
+            ],
+            limit:  parseInt(limit),
             offset: parseInt(offset),
-            order: [['createdAt', 'DESC']],
+            order:  [['createdAt', 'DESC']],
         });
-
-        console.log('✅ [DRIVER-CONTROLLER] Trip history retrieved');
-        console.log('   Total:', count);
-        console.log('   Page:', page, 'of', Math.ceil(count / limit));
 
         res.status(200).json({
             message: 'Trip history retrieved',
             data: {
                 trips,
                 pagination: {
-                    total: count,
-                    page: parseInt(page),
-                    limit: parseInt(limit),
+                    total:      count,
+                    page:       parseInt(page),
+                    limit:      parseInt(limit),
                     totalPages: Math.ceil(count / limit),
                 },
             },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Trip History Error:', error);
+        console.error('❌ [DRIVER] getTripHistory error:', error);
         next(error);
     }
 };
 
-/**
- * Get Trip Details
- * GET /api/driver/trips/:tripId
- */
+// ─────────────────────────────────────────────────────────────────────
 exports.getTripDetails = async (req, res, next) => {
     try {
-        console.log('🔍 [DRIVER-CONTROLLER] Get Trip Details Request');
-
         const { tripId } = req.params;
-        const driverId = req.user.uuid;
-
-        const trip = await Trip.findOne({
-            where: {
-                id: tripId,
-                driverId: driverId,
-            },
-        });
-
-        if (!trip) {
-            return res.status(404).json({
-                error: 'Trip not found',
-                message: 'The requested trip does not exist or you are not assigned to it',
-            });
-        }
-
-        console.log('✅ [DRIVER-CONTROLLER] Trip details retrieved');
-
-        res.status(200).json({
-            message: 'Trip details retrieved',
-            data: { trip },
-        });
-
+        const trip = await Trip.findOne({ where: { id: tripId, driverId: req.user.uuid } });
+        if (!trip) return res.status(404).json({ error: 'Trip not found or not assigned to you' });
+        res.status(200).json({ message: 'Trip details retrieved', data: { trip } });
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Trip Details Error:', error);
+        console.error('❌ [DRIVER] getTripDetails error:', error);
         next(error);
     }
 };
@@ -1350,74 +999,158 @@ exports.getTripDetails = async (req, res, next) => {
 // PROFILE CONTROLLERS
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Get Profile
- * GET /api/driver/profile
- */
 exports.getProfile = async (req, res, next) => {
     try {
-        console.log('👤 [DRIVER-CONTROLLER] Get Profile Request');
-
         const driver = await Account.findByPk(req.user.uuid, {
             attributes: { exclude: ['password_hash', 'password_algo'] },
+            include: [
+                {
+                    model: DriverProfile,
+                    as: 'driverProfile',
+                    required: false,
+                }
+            ],
         });
 
-        if (!driver) {
-            return res.status(404).json({
-                error: 'Driver not found',
-                message: 'Driver profile not found',
-            });
-        }
+        if (!driver) return res.status(404).json({ error: 'Driver not found' });
 
-        res.status(200).json({
-            message: 'Driver profile retrieved',
-            data: { driver },
-        });
+        res.status(200).json({ message: 'Driver profile retrieved', data: { driver } });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Profile Error:', error);
+        console.error('❌ [DRIVER] getProfile error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Update Profile
  * PUT /api/driver/profile
+ * ✅ FIX BE Broken Feature #2: Replaced stub with real validation + DB update.
  */
 exports.updateProfile = async (req, res, next) => {
     try {
-        console.log('✏️ [DRIVER-CONTROLLER] Update Profile Request');
+        console.log('✏️  [DRIVER] updateProfile — Driver:', req.user.uuid);
 
-        res.status(200).json({
-            message: 'Profile updated successfully',
-            data: {},
+        const {
+            // Account fields
+            first_name, last_name, email,
+            // DriverProfile fields
+            vehicle_make_model, vehicle_color, vehicle_year,
+            vehicle_plate, vehicle_type,
+        } = req.body;
+
+        const accountUpdates = {};
+        if (first_name !== undefined) accountUpdates.first_name = first_name.trim();
+        if (last_name  !== undefined) accountUpdates.last_name  = last_name.trim();
+        if (email      !== undefined) accountUpdates.email      = email.trim().toLowerCase();
+
+        const profileUpdates = {};
+        if (vehicle_make_model !== undefined) profileUpdates.vehicle_make_model = vehicle_make_model;
+        if (vehicle_color      !== undefined) profileUpdates.vehicle_color      = vehicle_color;
+        if (vehicle_year       !== undefined) profileUpdates.vehicle_year       = parseInt(vehicle_year);
+        if (vehicle_plate      !== undefined) profileUpdates.vehicle_plate      = vehicle_plate.toUpperCase().trim();
+        if (vehicle_type       !== undefined) profileUpdates.vehicle_type       = vehicle_type;
+
+        if (!Object.keys(accountUpdates).length && !Object.keys(profileUpdates).length) {
+            return res.status(400).json({ error: 'No updatable fields provided' });
+        }
+
+        if (Object.keys(accountUpdates).length) {
+            await Account.update(accountUpdates, { where: { uuid: req.user.uuid } });
+        }
+
+        if (Object.keys(profileUpdates).length) {
+            await DriverProfile.update(profileUpdates, { where: { account_id: req.user.uuid } });
+        }
+
+        // Return full updated profile
+        const updated = await Account.findByPk(req.user.uuid, {
+            attributes: { exclude: ['password_hash', 'password_algo'] },
+            include: [{ model: DriverProfile, as: 'driverProfile', required: false }],
         });
 
+        console.log('✅ [DRIVER] Profile updated successfully');
+        res.status(200).json({ message: 'Profile updated successfully', data: { driver: updated } });
+
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Update Profile Error:', error);
+        console.error('❌ [DRIVER] updateProfile error:', error);
         next(error);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────
 /**
- * Get Ratings
  * GET /api/driver/ratings
+ * ✅ FIX BE Broken Feature #3: Replaced hardcoded 4.8 stub with real Rating query.
  */
 exports.getRatings = async (req, res, next) => {
     try {
-        console.log('⭐ [DRIVER-CONTROLLER] Get Ratings Request');
+        console.log('⭐ [DRIVER] getRatings — Driver:', req.user.uuid);
+        const { page = 1, limit = 20 } = req.query;
+        const driverId = req.user.uuid;
+        const offset   = (parseInt(page) - 1) * parseInt(limit);
+
+        const { count, rows: ratings } = await Rating.findAndCountAll({
+            where: {
+                ratedUser:  driverId,
+                ratingType: 'PASSENGER_TO_DRIVER',
+            },
+            include: [
+                {
+                    model: Account,
+                    as: 'rater',
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    required: false,
+                }
+            ],
+            order:  [['createdAt', 'DESC']],
+            limit:  parseInt(limit),
+            offset,
+        });
+
+        // Calculate real average
+        const average = count
+            ? parseFloat((ratings.reduce((s, r) => s + r.rating, 0) / count).toFixed(2))
+            : 0;
+
+        // Star distribution (1–5)
+        const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        for (const r of ratings) {
+            const star = Math.round(r.rating);
+            if (distribution[star] !== undefined) distribution[star]++;
+        }
+
+        console.log(`✅ [DRIVER] getRatings — ${count} ratings, avg: ${average}`);
 
         res.status(200).json({
             message: 'Ratings retrieved',
             data: {
-                averageRating: 4.8,
-                totalRatings: 0,
-                ratings: [],
+                averageRating: average,
+                totalRatings:  count,
+                distribution,
+                ratings: ratings.map(r => ({
+                    id:        r.id,
+                    rating:    r.rating,
+                    review:    r.review || null,
+                    createdAt: r.createdAt,
+                    rater: r.rater ? {
+                        uuid:      r.rater.uuid,
+                        firstName: r.rater.first_name,
+                        lastName:  r.rater.last_name,
+                        avatar:    r.rater.avatar_url,
+                    } : null,
+                })),
+                pagination: {
+                    total:      count,
+                    page:       parseInt(page),
+                    limit:      parseInt(limit),
+                    totalPages: Math.ceil(count / parseInt(limit)),
+                },
             },
         });
 
     } catch (error) {
-        console.error('❌ [DRIVER-CONTROLLER] Get Ratings Error:', error);
+        console.error('❌ [DRIVER] getRatings error:', error);
         next(error);
     }
 };

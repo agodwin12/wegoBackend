@@ -1,4 +1,5 @@
-// src/models/VehicleRental.js
+// wegobackend/src/models/VehicleRental.js
+
 const { DataTypes, Model } = require('sequelize');
 const sequelize = require('../config/database');
 
@@ -7,22 +8,20 @@ class VehicleRental extends Model {}
 VehicleRental.init(
     {
         id: {
-            type: DataTypes.STRING(36), // UUID string
+            type: DataTypes.STRING(36),
             primaryKey: true,
         },
 
-        // Passenger renting the vehicle
         userId: {
-            type: DataTypes.CHAR(36), // matches Account.uuid
+            type: DataTypes.CHAR(36),
             allowNull: false,
             references: { model: 'accounts', key: 'uuid' },
             onUpdate: 'CASCADE',
             onDelete: 'CASCADE',
         },
 
-        // Vehicle being rented
         vehicleId: {
-            type: DataTypes.STRING(36), // matches Vehicle.id
+            type: DataTypes.STRING(36),
             allowNull: false,
             references: { model: 'vehicles', key: 'id' },
             onUpdate: 'CASCADE',
@@ -53,9 +52,32 @@ VehicleRental.init(
             defaultValue: 'unpaid',
         },
 
-        // Admin approver
+        // ✅ NEW: Payment Method
+        paymentMethod: {
+            type: DataTypes.ENUM('orange_money', 'mtn_momo', 'card', 'cash', 'bank_transfer'),
+            allowNull: true,
+        },
+
+        // ✅ NEW: Transaction Reference
+        transactionRef: {
+            type: DataTypes.STRING(100),
+            allowNull: true,
+        },
+
+        // ✅ NEW: Admin Notes
+        adminNotes: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+        },
+
+        // ✅ NEW: Rejection/Cancellation Reason
+        cancellationReason: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+        },
+
         approvedByAdminId: {
-            type: DataTypes.CHAR(36), // matches Account.uuid
+            type: DataTypes.CHAR(36),
             allowNull: true,
             references: { model: 'accounts', key: 'uuid' },
             onUpdate: 'CASCADE',

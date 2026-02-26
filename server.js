@@ -39,6 +39,7 @@ app.use((req, res, next) => {
 
 const startServer = async () => {
     try {
+        // Start cleanup cron job
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🚀 WEGO API - Starting up...');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');

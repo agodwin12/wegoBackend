@@ -10,6 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.937.0",
     "@sendgrid/mail": "^8.1.5",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
@@ -17,6 +18,7 @@
     "cors": "^2.8.5",
     "dayjs": "^1.11.18",
     "dotenv": "^17.2.2",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "express-rate-limit": "6.11.2",
     "express-validator": "^7.2.1",
@@ -27,7 +29,10 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "mysql2": "3.14.4",
+    "node-cron": "^4.2.1",
     "nodemailer": "^7.0.9",
+    "path": "^0.12.7",
+    "pdfkit": "^0.17.2",
     "sequelize": "6.37.7",
     "sharp": "^0.34.3",
     "socket.io": "^4.8.1",
@@ -36,6 +41,6 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.11"
   }
 }

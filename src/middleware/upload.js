@@ -1,56 +1,14 @@
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
+const { uploadToR2, deleteFromR2 } = require("../utils/r2Upload");
 
 /* ================================
-   CREATE UPLOAD DIRECTORIES
-================================= */
-const uploadDirs = {
-    profiles: path.join(__dirname, "../../uploads/profiles"),
-    documents: path.join(__dirname, "../../uploads/documents"),
-    vehicles: path.join(__dirname, "../../uploads/vehicles"),
-};
-
-Object.values(uploadDirs).forEach((dir) => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-        console.log(`✅ Created directory: ${dir}`);
-    }
-});
-
-/* ================================
-   STORAGE ENGINES
+   STORAGE CONFIGURATION
+   Using memoryStorage for R2 upload
 ================================= */
 
-// Profile Picture Storage
-const profileStorage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDirs.profiles),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname);
-        cb(null, `profile-${uniqueSuffix}${ext}`);
-    }
-});
-
-// Driver Document Storage
-const documentStorage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDirs.documents),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname);
-        cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
-    }
-});
-
-// Vehicle Photo Storage
-const vehicleStorage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDirs.vehicles),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname);
-        cb(null, `vehicle-${uniqueSuffix}${ext}`);
-    }
-});
+// Memory storage - files stored in memory as Buffer for R2 upload
+const memoryStorage = multer.memoryStorage();
 
 /* ================================
    FILE FILTERS (FIXED)
@@ -93,59 +51,224 @@ const documentFilter = (req, file, cb) => {
 ================================= */
 
 const uploadProfile = multer({
-    storage: profileStorage,
+    storage: memoryStorage,
     fileFilter: imageFilter,
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
 const uploadDocuments = multer({
-    storage: documentStorage,
+    storage: memoryStorage,
     fileFilter: documentFilter,
     limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
 
 const uploadVehicle = multer({
-    storage: vehicleStorage,
+    storage: memoryStorage,
     fileFilter: imageFilter,
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
 /* ================================
-   HELPERS
+   R2 UPLOAD HELPERS
 ================================= */
 
-const deleteFile = (filePath) => {
-    try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-            console.log(`🗑️ Deleted file: ${filePath}`);
-            return true;
-        }
-    } catch (err) {
-        console.error("❌ Error deleting file:", err);
+/**
+ * Upload single file to R2
+ * @param {Object} file - Multer file object with buffer
+ * @param {string} folder - R2 folder (profiles, documents, vehicles)
+ * @returns {Promise<string>} - Public URL
+ */
+const uploadFileToR2 = async (file, folder = "uploads") => {
+    if (!file || !file.buffer) {
+        throw new Error("No file buffer provided");
     }
-    return false;
+
+    const mimeType = file.mimetype || "application/octet-stream";
+    return await uploadToR2(file.buffer, file.originalname, folder, mimeType);
 };
 
+/**
+ * Upload profile picture to R2
+ * @param {Object} file - Multer file object
+ * @returns {Promise<string>} - Public URL
+ */
+const uploadProfileToR2 = async (file) => {
+    return await uploadFileToR2(file, "profiles");
+};
+
+/**
+ * Upload document to R2
+ * @param {Object} file - Multer file object
+ * @returns {Promise<string>} - Public URL
+ */
+const uploadDocumentToR2 = async (file) => {
+    return await uploadFileToR2(file, "documents");
+};
+
+/**
+ * Upload vehicle photo to R2
+ * @param {Object} file - Multer file object
+ * @returns {Promise<string>} - Public URL
+ */
+const uploadVehicleToR2 = async (file) => {
+    return await uploadFileToR2(file, "vehicles");
+};
+
+/**
+ * Upload multiple files to R2
+ * @param {Array} files - Array of multer file objects
+ * @param {string} folder - R2 folder
+ * @returns {Promise<Array<string>>} - Array of public URLs
+ */
+const uploadMultipleFilesToR2 = async (files, folder = "uploads") => {
+    if (!files || files.length === 0) {
+        return [];
+    }
+
+    const uploadPromises = files.map((file) => uploadFileToR2(file, folder));
+    return await Promise.all(uploadPromises);
+};
+
+/**
+ * Delete file from R2
+ * @param {string} fileUrl - Full public URL
+ * @returns {Promise<boolean>}
+ */
+const deleteFile = async (fileUrl) => {
+    try {
+        if (!fileUrl) return false;
+
+        const result = await deleteFromR2(fileUrl);
+        if (result) {
+            console.log(`🗑️ Deleted file from R2: ${fileUrl}`);
+        }
+        return result;
+    } catch (err) {
+        console.error("❌ Error deleting file from R2:", err);
+        return false;
+    }
+};
+
+/**
+ * Delete multiple files from R2
+ * @param {Array<string>} fileUrls - Array of public URLs
+ * @returns {Promise<boolean>}
+ */
+const deleteMultipleFiles = async (fileUrls) => {
+    if (!fileUrls || fileUrls.length === 0) return true;
+
+    const deletePromises = fileUrls.map((url) => deleteFile(url));
+    const results = await Promise.all(deletePromises);
+    return results.every((result) => result === true);
+};
+
+/* ================================
+   BACKWARD COMPATIBILITY HELPERS
+================================= */
+
+/**
+ * Get file URL (for backward compatibility)
+ * Now returns the full R2 URL
+ */
 const getFileUrl = (filename, type = "profile") => {
     if (!filename) return null;
-    return `/uploads/${type}s/${filename}`;
+
+    // If it's already a full URL, return it
+    if (filename.startsWith("http")) return filename;
+
+    // Otherwise, construct R2 URL
+    return `${process.env.R2_PUBLIC_URL}/${type}s/${filename}`;
 };
 
+/**
+ * Get filename from URL
+ */
 const getFilenameFromUrl = (url) => {
     if (!url) return null;
     return path.basename(url);
 };
 
 /* ================================
+   MIDDLEWARE FOR AUTO R2 UPLOAD
+================================= */
+
+const upload = multer({
+    storage: memoryStorage,
+    fileFilter: imageFilter,
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
+
+
+/**
+ * Middleware to automatically upload files to R2 after multer processing
+ * Use after multer middleware
+ */
+const autoUploadToR2 = (folderName) => {
+    return async (req, res, next) => {
+        try {
+            // Handle single file
+            if (req.file) {
+                req.file.r2Url = await uploadFileToR2(req.file, folderName);
+                console.log(`✅ Uploaded to R2: ${req.file.r2Url}`);
+            }
+
+            // Handle multiple files
+            if (req.files) {
+                if (Array.isArray(req.files)) {
+                    // req.files is array
+                    req.files = await Promise.all(
+                        req.files.map(async (file) => {
+                            file.r2Url = await uploadFileToR2(file, folderName);
+                            console.log(`✅ Uploaded to R2: ${file.r2Url}`);
+                            return file;
+                        })
+                    );
+                } else {
+                    // req.files is object (multiple fields)
+                    for (const fieldName in req.files) {
+                        req.files[fieldName] = await Promise.all(
+                            req.files[fieldName].map(async (file) => {
+                                file.r2Url = await uploadFileToR2(file, folderName);
+                                console.log(`✅ Uploaded to R2: ${file.r2Url}`);
+                                return file;
+                            })
+                        );
+                    }
+                }
+            }
+
+            next();
+        } catch (error) {
+            console.error("❌ R2 Upload Error:", error);
+            next(error);
+        }
+    };
+};
+
+/* ================================
    EXPORTS
 ================================= */
 module.exports = {
+    // Multer middleware (same as before)
     uploadProfile,
     uploadDocuments,
     uploadVehicle,
+
+    // R2 upload functions
+    uploadFileToR2,
+    uploadProfileToR2,
+    uploadDocumentToR2,
+    uploadVehicleToR2,
+    uploadMultipleFilesToR2,
+
+    // Delete functions
     deleteFile,
+    deleteMultipleFiles,
+
+    // Helper functions (backward compatible)
     getFileUrl,
     getFilenameFromUrl,
-    uploadDirs,
+    upload,
+    // Middleware
+    autoUploadToR2,
 };
