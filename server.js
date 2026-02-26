@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // ═══════════════════════════════════════════════════════════════════════
-// CREATE  SERVER
+// CREATE  SERVE
 // ═══════════════════════════════════════════════════════════════════════
 
 const server = http.createServer(app);
