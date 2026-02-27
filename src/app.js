@@ -63,6 +63,8 @@ const userSupportRoutes = require('./routes/supportRoutes');
 // Public APIs (Mobile Dashboard)
 const promotionRoutes = require('./routes/public/promotions.routes');
 const statsRoutes = require('./routes/public/stats.routes');
+const activityRoutes = require('./routes/activity/activity.routes');
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT JOBS
@@ -118,6 +120,7 @@ app.use('/api/preferences', preferencesRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/users/stats', statsRoutes);
 
+
 // ───────────────────────────────────────────────────────────────────────
 // Ride Booking
 // ───────────────────────────────────────────────────────────────────────
@@ -150,6 +153,8 @@ app.use('/api/services/disputes', serviceDisputeRoutes);
 // Support
 // ───────────────────────────────────────────────────────────────────────
 app.use('/api/user/support', userSupportRoutes);
+app.use('/api/activity', activityRoutes);
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE REGISTRATION - BACKOFFICE ROUTES (Admin Only)

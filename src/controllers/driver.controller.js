@@ -1,10 +1,111 @@
-// src/controllers/driver.controller.js
+/// src/controllers/driver.controller.js
 
 const { Account, DriverProfile, Trip, TripEvent, Rating } = require('../models');
 const { Op } = require('sequelize');
 const { v4: uuidv4 } = require('uuid');
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets/index');
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPER — Build full driver info (used in acceptTrip socket emit)
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Fetches Account + DriverProfile for a driverUuid and returns a
+ * fully-structured object that Flutter's DriverArrivingScreen expects.
+ * All key aliases are included so Flutter can read regardless of which
+ * field name it tries (snake_case, camelCase, short form, long form).
+ */
+async function buildFullDriverInfo(driverUuid, driverLocation = null) {
+    console.log(`\n🔧 [DRIVER_INFO] Building full driver info for: ${driverUuid}`);
+
+    const [account, profile] = await Promise.all([
+        Account.findOne({
+            where:      { uuid: driverUuid },
+            attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+        }),
+        DriverProfile.findOne({
+            where:      { account_id: driverUuid },
+            attributes: [
+                'rating_avg',
+                'rating_count',
+                'vehicle_type',
+                'vehicle_plate',
+                'vehicle_make_model',
+                'vehicle_color',
+                'vehicle_year',
+                'vehicle_photo_url',
+                'avatar_url',
+            ],
+        }),
+    ]);
+
+    const firstName = account?.first_name || '';
+    const lastName  = account?.last_name  || '';
+    const fullName  = `${firstName} ${lastName}`.trim() || 'Driver';
+
+    const info = {
+        // ── Identity ──────────────────────────────────────────────────
+        id:        driverUuid,
+        uuid:      driverUuid,
+        name:      fullName,
+        firstName,
+        lastName,
+
+        // ── Contact (Flutter reads both 'phone' and 'phone_e164') ─────
+        phone:      account?.phone_e164 || '',
+        phone_e164: account?.phone_e164 || '',
+
+        // ── Avatar (Flutter reads both 'avatar' and 'avatar_url') ─────
+        avatar:    profile?.avatar_url || account?.avatar_url || null,
+        avatar_url:profile?.avatar_url || account?.avatar_url || null,
+
+        // ── Rating (Flutter reads 'rating', 'rating_avg', 'ratingAvg')
+        rating:      profile?.rating_avg   ?? 5.0,
+        rating_avg:  profile?.rating_avg   ?? 5.0,
+        ratingAvg:   profile?.rating_avg   ?? 5.0,
+        ratingCount: profile?.rating_count ?? 0,
+
+        // ── Location ──────────────────────────────────────────────────
+        location: driverLocation || null,
+
+        // ── Vehicle ───────────────────────────────────────────────────
+        // Flutter's _vehicleInfo getter tries multiple key names,
+        // so we provide all aliases.
+        vehicle: {
+            // type
+            type:        profile?.vehicle_type       || 'Economy',
+            vehicleType: profile?.vehicle_type       || 'Economy',
+
+            // plate
+            plate:        profile?.vehicle_plate     || '',
+            vehiclePlate: profile?.vehicle_plate     || '',
+
+            // make/model
+            makeModel:          profile?.vehicle_make_model || '',
+            vehicle_make_model: profile?.vehicle_make_model || '',
+            vehicleMakeModel:   profile?.vehicle_make_model || '',
+
+            // color
+            color:        profile?.vehicle_color     || '',
+            vehicleColor: profile?.vehicle_color     || '',
+
+            // year
+            year:        profile?.vehicle_year       || '',
+            vehicleYear: profile?.vehicle_year       || '',
+
+            // photo
+            photo:             profile?.vehicle_photo_url || null,
+            vehicle_photo_url: profile?.vehicle_photo_url || null,
+        },
+    };
+
+    console.log(`✅ [DRIVER_INFO] Built for ${fullName}:`);
+    console.log(`   Vehicle: ${info.vehicle.makeModel} | ${info.vehicle.color} | ${info.vehicle.plate}`);
+    console.log(`   Rating: ${info.rating} | Phone: ${info.phone}`);
+
+    return info;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // DRIVER STATUS CONTROLLERS
@@ -42,13 +143,12 @@ exports.reportNoShow = async (req, res, next) => {
             });
         }
 
-        trip.status      = 'NO_SHOW';
+        trip.status       = 'NO_SHOW';
         trip.cancelReason = reason || 'Passenger did not show up';
         trip.canceledBy   = 'DRIVER';
         trip.canceledAt   = new Date();
         await trip.save();
 
-        // Clean up Redis
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
         await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
         await redisClient.del(`driver:active_trip:${req.user.uuid}`);
@@ -83,7 +183,6 @@ exports.goOnline = async (req, res, next) => {
             return res.status(400).json({ error: 'Validation error', message: 'Invalid coordinates' });
         }
 
-        // Update last known location in DB (Account.status stays 'ACTIVE' — never change it)
         const driver = await Account.findByPk(req.user.uuid);
         if (driver) {
             if (driver.lastLatitude  !== undefined) driver.lastLatitude  = lat;
@@ -91,12 +190,10 @@ exports.goOnline = async (req, res, next) => {
             await driver.save();
         }
 
-        // Redis GEO index (for nearby driver search)
         await redisClient.geoadd(REDIS_KEYS.DRIVERS_GEO, parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
         await redisClient.sadd(REDIS_KEYS.ONLINE_DRIVERS, req.user.uuid.toString());
         await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
 
-        // Redis JSON location (for trip acceptance)
         await redisHelpers.setJson(`driver:location:${req.user.uuid}`, {
             driverId:    req.user.uuid,
             lat:         parseFloat(lat),
@@ -105,7 +202,6 @@ exports.goOnline = async (req, res, next) => {
             lastUpdated: new Date().toISOString(),
         }, 3600);
 
-        // Redis metadata — ONLINE status lives here only
         await redisClient.setex(
             REDIS_KEYS.DRIVER_META(req.user.uuid),
             3600,
@@ -164,16 +260,33 @@ exports.updateLocation = async (req, res, next) => {
             return res.status(400).json({ error: 'Validation error', message: 'lat and lng are required' });
         }
 
-        await redisClient.geoadd('drivers:locations', parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
+        // ✅ Use REDIS_KEYS.DRIVERS_GEO (consistent with goOnline)
+        await redisClient.geoadd(REDIS_KEYS.DRIVERS_GEO, parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
         await redisHelpers.setJson(`driver:location:${req.user.uuid}`, {
             driverId:    req.user.uuid,
             lat:         parseFloat(lat),
             lng:         parseFloat(lng),
-            heading:     heading || 0,
-            speed:       speed   || 0,
+            heading:     heading  || 0,
+            speed:       speed    || 0,
             accuracy:    accuracy || 0,
             lastUpdated: new Date().toISOString(),
         }, 3600);
+
+        // Emit real-time location update to passenger if driver has active trip
+        const activeTripData = await redisHelpers.getJson(`driver:active_trip:${req.user.uuid}`);
+        if (activeTripData?.tripId) {
+            const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTripData.tripId));
+            if (tripData?.passengerId) {
+                const io = getIO();
+                io.to(`passenger:${tripData.passengerId}`).emit('driver:location_update', {
+                    tripId:  activeTripData.tripId,
+                    lat:     parseFloat(lat),
+                    lng:     parseFloat(lng),
+                    heading: heading || 0,
+                    speed:   speed   || 0,
+                });
+            }
+        }
 
         res.status(200).json({
             message: 'Location updated successfully',
@@ -187,22 +300,13 @@ exports.updateLocation = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * GET /api/driver/status
- * ✅ FIX STEP 4: Read is_online from Redis metadata, NOT from Account.status.
- * Account.status is always 'ACTIVE'. Online state only lives in Redis.
- */
 exports.getStatus = async (req, res, next) => {
     try {
         console.log('📊 [DRIVER] getStatus — Driver:', req.user.uuid);
 
-        // ✅ FIX STEP 4: Read from Redis metadata key, not Account.status
-        const metadataKey = `driver:${req.user.uuid}:metadata`;
-        const rawMeta     = await redisClient.get(metadataKey);
-        const meta        = rawMeta ? JSON.parse(rawMeta) : null;
-        const is_online   = meta?.status === 'ONLINE';
-
-        // Get last known location from Redis JSON (more accurate than DB)
+        const rawMeta      = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
+        const meta         = rawMeta ? JSON.parse(rawMeta) : null;
+        const is_online    = meta?.status === 'ONLINE';
         const locationData = await redisHelpers.getJson(`driver:location:${req.user.uuid}`);
 
         console.log(`✅ [DRIVER] getStatus — is_online: ${is_online} (from Redis)`);
@@ -240,10 +344,10 @@ exports.getCurrentTrip = async (req, res, next) => {
             },
             include: [
                 {
-                    model: Account,
-                    as: 'passenger',
+                    model:      Account,
+                    as:         'passenger',
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                    required: false,
+                    required:   false,
                 }
             ],
             order: [['createdAt', 'DESC']],
@@ -265,8 +369,11 @@ exports.getCurrentTrip = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────
 /**
  * POST /api/driver/trips/:tripId/accept
- * ✅ FIX STEP 5: io.emit('trip:taken') → replaced with targeted emit
- *               to only the drivers who were originally notified about this trip.
+ *
+ * ✅ FIX: STEP 13 now calls buildFullDriverInfo() and sends complete
+ *         driver + vehicle details in the trip:driver_assigned event
+ *         so Flutter's DriverArrivingScreen can display name, plate,
+ *         make/model, color, year, photo, rating, and phone.
  */
 exports.acceptTrip = async (req, res, next) => {
     const { tripId }  = req.params;
@@ -286,9 +393,9 @@ exports.acceptTrip = async (req, res, next) => {
         if (!lockAcquired) {
             console.log('❌ [ACCEPT-TRIP] Lock failed — another driver is processing');
             return res.status(409).json({
-                error: true,
+                error:   true,
                 message: 'Trip is being accepted by another driver',
-                code: 'TRIP_LOCKED'
+                code:    'TRIP_LOCKED'
             });
         }
         console.log('✅ [ACCEPT-TRIP] Lock acquired');
@@ -310,9 +417,9 @@ exports.acceptTrip = async (req, res, next) => {
         if (!trip) {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(404).json({
-                error: true,
+                error:   true,
                 message: 'Trip not found or already expired',
-                code: 'TRIP_NOT_FOUND'
+                code:    'TRIP_NOT_FOUND'
             });
         }
 
@@ -320,19 +427,19 @@ exports.acceptTrip = async (req, res, next) => {
         if (trip.status !== 'SEARCHING') {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(409).json({
-                error: true,
+                error:   true,
                 message: 'This trip is no longer available',
-                code: 'TRIP_NOT_AVAILABLE',
-                data: { currentStatus: trip.status, acceptedBy: trip.driverId || null }
+                code:    'TRIP_NOT_AVAILABLE',
+                data:    { currentStatus: trip.status, acceptedBy: trip.driverId || null }
             });
         }
 
         if (trip.driverId && trip.driverId !== driverId) {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(409).json({
-                error: true,
+                error:   true,
                 message: 'Trip already accepted by another driver',
-                code: 'TRIP_ALREADY_ACCEPTED'
+                code:    'TRIP_ALREADY_ACCEPTED'
             });
         }
 
@@ -341,14 +448,14 @@ exports.acceptTrip = async (req, res, next) => {
         if (!driverLocationData) {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(400).json({
-                error: true,
+                error:   true,
                 message: 'Driver location not available. Please ensure you are online.',
-                code: 'DRIVER_LOCATION_MISSING'
+                code:    'DRIVER_LOCATION_MISSING'
             });
         }
         const driverLocation = {
             lat: parseFloat(driverLocationData.lat),
-            lng: parseFloat(driverLocationData.lng)
+            lng: parseFloat(driverLocationData.lng),
         };
 
         // ── STEP 6: Update Redis trip ──────────────────────────────────
@@ -392,9 +499,9 @@ exports.acceptTrip = async (req, res, next) => {
             console.error('❌ [ACCEPT-TRIP] DB save error:', dbError.message);
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(500).json({
-                error: true,
+                error:   true,
                 message: 'Failed to save trip',
-                code: 'DATABASE_ERROR',
+                code:    'DATABASE_ERROR',
                 details: dbError.message
             });
         }
@@ -426,7 +533,7 @@ exports.acceptTrip = async (req, res, next) => {
         // ── STEP 10: Clean driver offer queues ────────────────────────
         const offerKeys = await redisClient.keys('driver:pending_offers:*');
         for (const key of offerKeys) {
-            const offers = await redisHelpers.getJson(key) || [];
+            const offers   = await redisHelpers.getJson(key) || [];
             if (Array.isArray(offers)) {
                 const filtered = offers.filter(o => o.tripId !== tripId);
                 if (filtered.length !== offers.length) {
@@ -444,31 +551,28 @@ exports.acceptTrip = async (req, res, next) => {
         if (!passengerAccount) {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(404).json({
-                error: true,
+                error:   true,
                 message: 'Passenger account not found',
-                code: 'PASSENGER_NOT_FOUND'
+                code:    'PASSENGER_NOT_FOUND'
             });
         }
 
         // ── STEP 12: Fetch passenger rating ───────────────────────────
-        // ✅ FIXED: using snake_case field names + stars column
         let passengerRating = null;
         try {
             const passengerRatingRows = await Rating.findAll({
                 where: {
-                    rated_user:  trip.passengerId,        // ✅ snake_case matches DB
-                    rating_type: 'DRIVER_TO_PASSENGER',   // ✅ snake_case matches DB
+                    rated_user:  trip.passengerId,
+                    rating_type: 'DRIVER_TO_PASSENGER',
                 },
-                attributes: ['stars'],                    // ✅ 'stars' not 'rating'
+                attributes: ['stars'],
             });
-
             if (passengerRatingRows.length) {
-                const total = passengerRatingRows.reduce((sum, r) => sum + r.stars, 0); // ✅ r.stars
+                const total = passengerRatingRows.reduce((sum, r) => sum + r.stars, 0);
                 passengerRating = parseFloat((total / passengerRatingRows.length).toFixed(1));
             }
             console.log('✅ [ACCEPT-TRIP] Passenger rating fetched:', passengerRating);
         } catch (ratingError) {
-            // Non-fatal — rating fetch failure should NOT block trip acceptance
             console.warn('⚠️  [ACCEPT-TRIP] Rating fetch failed (non-fatal):', ratingError.message);
         }
 
@@ -494,17 +598,62 @@ exports.acceptTrip = async (req, res, next) => {
         };
 
         // ── STEP 13: Emit socket events ────────────────────────────────
+        // ✅ FIX: Build full driver info so Flutter DriverArrivingScreen
+        //         can display name, vehicle plate, make/model, color,
+        //         year, photo, rating and phone — exactly like Uber/Yango.
         const io = getIO();
 
-        // Notify passenger their driver is matched
+        let fullDriverInfo;
+        try {
+            fullDriverInfo = await buildFullDriverInfo(driverId, driverLocation);
+        } catch (profileError) {
+            // Non-fatal — fall back to minimal info so trip still proceeds
+            console.warn('⚠️  [ACCEPT-TRIP] buildFullDriverInfo failed, using minimal info:', profileError.message);
+            fullDriverInfo = {
+                id:         driverId,
+                uuid:       driverId,
+                name:       driverName,
+                firstName:  req.user.first_name || '',
+                lastName:   req.user.last_name  || '',
+                phone:      req.user.phone_e164 || '',
+                phone_e164: req.user.phone_e164 || '',
+                avatar:     null,
+                avatar_url: null,
+                rating:     5.0,
+                rating_avg: 5.0,
+                ratingAvg:  5.0,
+                location:   driverLocation,
+                vehicle: {
+                    type:               'Economy',
+                    vehicleType:        'Economy',
+                    plate:              '',
+                    vehiclePlate:       '',
+                    makeModel:          '',
+                    vehicle_make_model: '',
+                    vehicleMakeModel:   '',
+                    color:              '',
+                    vehicleColor:       '',
+                    year:               '',
+                    vehicleYear:        '',
+                    photo:              null,
+                    vehicle_photo_url:  null,
+                },
+            };
+        }
+
+        console.log('\n📡 [ACCEPT-TRIP] Emitting trip:driver_assigned to passenger:', trip.passengerId);
+        console.log('   Driver:', fullDriverInfo.name);
+        console.log('   Vehicle:', fullDriverInfo.vehicle.makeModel, '|', fullDriverInfo.vehicle.color, '|', fullDriverInfo.vehicle.plate);
+
+        // Notify passenger — full driver + vehicle details
         io.to(`passenger:${trip.passengerId}`).emit('trip:driver_assigned', {
             tripId:    trip.id,
-            driver:    { id: driverId, name: driverName, location: driverLocation },
+            driver:    fullDriverInfo,
             trip:      updatedTrip,
             timestamp: new Date().toISOString(),
         });
 
-        // Notify accepting driver with full passenger info
+        // Notify accepting driver — full passenger + trip details
         io.to(`driver:${driverId}`).emit('trip:matched', {
             tripId:    trip.id,
             trip:      updatedTrip,
@@ -513,10 +662,10 @@ exports.acceptTrip = async (req, res, next) => {
         });
 
         // Notify other drivers who received this offer that it is taken
-        const tripOffersKey   = REDIS_KEYS.TRIP_OFFERS
+        const tripOffersKey  = REDIS_KEYS.TRIP_OFFERS
             ? REDIS_KEYS.TRIP_OFFERS(tripId)
             : `trip:offers:${tripId}`;
-        const tripOffersData  = await redisHelpers.getJson(tripOffersKey);
+        const tripOffersData = await redisHelpers.getJson(tripOffersKey);
         const notifiedDrivers = tripOffersData?.drivers || tripOffersData?.notifiedDrivers || [];
 
         for (const notifiedDriverId of notifiedDrivers) {
@@ -575,7 +724,7 @@ exports.declineTrip = async (req, res, next) => {
     console.log('🚫 [DRIVER] declineTrip — Trip:', tripId, '| Driver:', driverId);
 
     try {
-        const offers  = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
+        const offers   = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
         const filtered = offers.filter(o => o.tripId !== tripId);
         await redisHelpers.setJson(`driver:pending_offers:${driverId}`, filtered, 3600);
 
@@ -596,11 +745,6 @@ exports.declineTrip = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * POST /api/driver/trips/:tripId/arrived
- * ✅ FIX BE Data Integrity #1: Status guard — must be DRIVER_EN_ROUTE
- * ✅ FIX BE Data Integrity #2: Sync Redis ACTIVE_TRIP after DB save
- */
 exports.arrivedAtPickup = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -608,24 +752,22 @@ exports.arrivedAtPickup = async (req, res, next) => {
         const { tripId } = req.params;
 
         const trip = await Trip.findByPk(tripId);
-        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
-        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
+        if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
-        // ✅ FIX BE Data Integrity #1: Status transition guard
         const allowedPrev = ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE'];
         if (!allowedPrev.includes(trip.status)) {
             return res.status(400).json({
-                error: 'Invalid status transition',
-                message: `Cannot mark arrived from status: ${trip.status}. Must be one of: ${allowedPrev.join(', ')}`,
+                error:         'Invalid status transition',
+                message:       `Cannot mark arrived from status: ${trip.status}. Must be one of: ${allowedPrev.join(', ')}`,
                 currentStatus: trip.status,
             });
         }
 
-        trip.status   = 'DRIVER_ARRIVED';
+        trip.status    = 'DRIVER_ARRIVED';
         trip.arrivedAt = new Date();
         await trip.save();
 
-        // ✅ FIX BE Data Integrity #2: Keep Redis in sync with DB status
         await redisHelpers.setJson(
             REDIS_KEYS.ACTIVE_TRIP(tripId),
             { ...trip.toJSON(), status: 'DRIVER_ARRIVED' },
@@ -649,11 +791,6 @@ exports.arrivedAtPickup = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * POST /api/driver/trips/:tripId/start
- * ✅ FIX BE Data Integrity #1: Status guard — must be DRIVER_ARRIVED
- * ✅ FIX BE Data Integrity #2: Sync Redis ACTIVE_TRIP after DB save
- */
 exports.startTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -661,14 +798,13 @@ exports.startTrip = async (req, res, next) => {
         const { tripId } = req.params;
 
         const trip = await Trip.findByPk(tripId);
-        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
-        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
+        if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
-        // ✅ FIX BE Data Integrity #1: Status guard — passenger must be boarded
         if (trip.status !== 'DRIVER_ARRIVED') {
             return res.status(400).json({
-                error: 'Invalid status transition',
-                message: `Cannot start trip from status: ${trip.status}. Driver must be DRIVER_ARRIVED first.`,
+                error:         'Invalid status transition',
+                message:       `Cannot start trip from status: ${trip.status}. Driver must be DRIVER_ARRIVED first.`,
                 currentStatus: trip.status,
             });
         }
@@ -677,7 +813,6 @@ exports.startTrip = async (req, res, next) => {
         trip.tripStartedAt = new Date();
         await trip.save();
 
-        // ✅ FIX BE Data Integrity #2: Sync Redis
         await redisHelpers.setJson(
             REDIS_KEYS.ACTIVE_TRIP(tripId),
             { ...trip.toJSON(), status: 'IN_PROGRESS' },
@@ -701,27 +836,21 @@ exports.startTrip = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * POST /api/driver/trips/:tripId/complete
- * ✅ FIX BE Data Integrity #1: Status guard — must be IN_PROGRESS
- * ✅ FIX BE Data Integrity #3: Clean up Redis keys on completion
- */
 exports.completeTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🏁 [DRIVER] completeTrip — Trip:', req.params.tripId);
-        const { tripId }    = req.params;
-        const { final_fare, notes } = req.body;
+        const { tripId }              = req.params;
+        const { final_fare, notes }   = req.body;
 
         const trip = await Trip.findByPk(tripId);
-        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
-        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
+        if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
-        // ✅ FIX BE Data Integrity #1: Status guard
         if (trip.status !== 'IN_PROGRESS') {
             return res.status(400).json({
-                error: 'Invalid status transition',
-                message: `Cannot complete trip from status: ${trip.status}. Trip must be IN_PROGRESS.`,
+                error:         'Invalid status transition',
+                message:       `Cannot complete trip from status: ${trip.status}. Trip must be IN_PROGRESS.`,
                 currentStatus: trip.status,
             });
         }
@@ -734,7 +863,7 @@ exports.completeTrip = async (req, res, next) => {
 
         console.log('✅ [DRIVER] Trip COMPLETED — Final fare:', trip.fareFinal);
 
-        // ✅ FIX BE Data Integrity #3: Clean ALL Redis keys for this trip
+        // Clean ALL Redis keys for this trip
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
         await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
         await redisClient.del(`driver:active_trip:${req.user.uuid}`);
@@ -742,16 +871,17 @@ exports.completeTrip = async (req, res, next) => {
         await redisClient.del(`trip:accepting:${tripId}`);
         await redisClient.del(`trip:no_expire:${tripId}`);
 
-        // Reset driver metadata — they're available for new trips
-        const rawMeta = await redisClient.get(`driver:${req.user.uuid}:metadata`);
+        // Reset driver to available
+        const rawMeta = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
         if (rawMeta) {
-            const meta = JSON.parse(rawMeta);
+            const meta   = JSON.parse(rawMeta);
             meta.isAvailable = true;
             meta.lastUpdated = new Date().toISOString();
-            await redisClient.setex(`driver:${req.user.uuid}:metadata`, 3600, JSON.stringify(meta));
+            await redisClient.setex(REDIS_KEYS.DRIVER_META(req.user.uuid), 3600, JSON.stringify(meta));
         }
+        await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
 
-        console.log('✅ [DRIVER] Redis cleaned after completion');
+        console.log('✅ [DRIVER] Redis cleaned after completion, driver set available');
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:completed', {
@@ -779,40 +909,40 @@ exports.cancelTrip = async (req, res, next) => {
         if (!reason) return res.status(400).json({ error: 'Validation error', message: 'Cancellation reason is required' });
 
         const trip = await Trip.findByPk(tripId);
-        if (!trip)                             return res.status(404).json({ error: 'Trip not found' });
-        if (trip.driverId !== req.user.uuid)   return res.status(403).json({ error: 'Access denied' });
+        if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
+        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
         const cancelable = ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
         if (!cancelable.includes(trip.status)) {
             return res.status(400).json({
-                error: 'Cannot cancel',
+                error:   'Cannot cancel',
                 message: `Trip in ${trip.status} status cannot be canceled`,
             });
         }
 
-        trip.status     = 'CANCELED';
+        trip.status       = 'CANCELED';
         trip.cancelReason = reason;
-        trip.canceledBy = 'DRIVER';
-        trip.canceledAt = new Date();
+        trip.canceledBy   = 'DRIVER';
+        trip.canceledAt   = new Date();
         await trip.save();
 
-        // Clean Redis
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
         await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
         await redisClient.del(`driver:active_trip:${req.user.uuid}`);
 
-        // Reset driver availability
-        const rawMeta = await redisClient.get(`driver:${req.user.uuid}:metadata`);
+        // Reset driver to available
+        const rawMeta = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
         if (rawMeta) {
-            const meta = JSON.parse(rawMeta);
+            const meta   = JSON.parse(rawMeta);
             meta.isAvailable = true;
             meta.lastUpdated = new Date().toISOString();
-            await redisClient.setex(`driver:${req.user.uuid}:metadata`, 3600, JSON.stringify(meta));
+            await redisClient.setex(REDIS_KEYS.DRIVER_META(req.user.uuid), 3600, JSON.stringify(meta));
         }
+        await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
 
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', {
-            tripId:    trip.id,
+            tripId:     trip.id,
             canceledBy: 'DRIVER',
             reason,
         });
@@ -832,9 +962,9 @@ exports.cancelTrip = async (req, res, next) => {
 
 exports.getStats = async (req, res, next) => {
     try {
-        const driverId = req.user.uuid;
-        const today    = new Date(); today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+        const driverId  = req.user.uuid;
+        const today     = new Date(); today.setHours(0, 0, 0, 0);
+        const tomorrow  = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
         const weekStart = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
 
         const baseWhere = { driverId, status: 'COMPLETED' };
@@ -851,9 +981,9 @@ exports.getStats = async (req, res, next) => {
         res.status(200).json({
             message: 'Driver stats retrieved successfully',
             data: {
-                today:  { trips: todayTrips,  earnings: todayEarnings  || 0 },
-                week:   { trips: weekTrips,   earnings: weekEarnings   || 0 },
-                total:  { trips: totalTrips,  earnings: totalEarnings  || 0 },
+                today: { trips: todayTrips,  earnings: todayEarnings  || 0 },
+                week:  { trips: weekTrips,   earnings: weekEarnings   || 0 },
+                total: { trips: totalTrips,  earnings: totalEarnings  || 0 },
             },
         });
 
@@ -864,28 +994,22 @@ exports.getStats = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * GET /api/driver/earnings
- * ✅ FIX BE Broken Feature #1: Replaced stub with real DB query.
- * Returns per-trip breakdown grouped by today / this week / all time.
- */
 exports.getEarnings = async (req, res, next) => {
     try {
         console.log('💰 [DRIVER] getEarnings — Driver:', req.user.uuid);
         const { period = 'week' } = req.query;
         const driverId = req.user.uuid;
 
-        const now       = new Date();
-        const today     = new Date(now); today.setHours(0, 0, 0, 0);
-        const tomorrow  = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-        const weekStart = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
+        const now        = new Date();
+        const today      = new Date(now); today.setHours(0, 0, 0, 0);
+        const tomorrow   = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+        const weekStart  = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
         let dateFilter = {};
-        if (period === 'today') dateFilter = { [Op.gte]: today, [Op.lt]: tomorrow };
+        if      (period === 'today') dateFilter = { [Op.gte]: today, [Op.lt]: tomorrow };
         else if (period === 'week')  dateFilter = { [Op.gte]: weekStart };
         else if (period === 'month') dateFilter = { [Op.gte]: monthStart };
-        // 'all' — no date filter
 
         const where = {
             driverId,
@@ -901,7 +1025,6 @@ exports.getEarnings = async (req, res, next) => {
 
         const total = trips.reduce((sum, t) => sum + (t.fareFinal || t.fareEstimate || 0), 0);
 
-        // Summary by day for charting
         const byDay = {};
         for (const t of trips) {
             if (!t.tripCompletedAt) continue;
@@ -952,10 +1075,10 @@ exports.getTripHistory = async (req, res, next) => {
             where,
             include: [
                 {
-                    model: Account,
-                    as: 'passenger',
+                    model:      Account,
+                    as:         'passenger',
                     attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                    required: false,
+                    required:   false,
                 }
             ],
             limit:  parseInt(limit),
@@ -1005,8 +1128,8 @@ exports.getProfile = async (req, res, next) => {
             attributes: { exclude: ['password_hash', 'password_algo'] },
             include: [
                 {
-                    model: DriverProfile,
-                    as: 'driverProfile',
+                    model:    DriverProfile,
+                    as:       'driverProfile',
                     required: false,
                 }
             ],
@@ -1023,18 +1146,12 @@ exports.getProfile = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * PUT /api/driver/profile
- * ✅ FIX BE Broken Feature #2: Replaced stub with real validation + DB update.
- */
 exports.updateProfile = async (req, res, next) => {
     try {
         console.log('✏️  [DRIVER] updateProfile — Driver:', req.user.uuid);
 
         const {
-            // Account fields
             first_name, last_name, email,
-            // DriverProfile fields
             vehicle_make_model, vehicle_color, vehicle_year,
             vehicle_plate, vehicle_type,
         } = req.body;
@@ -1058,12 +1175,10 @@ exports.updateProfile = async (req, res, next) => {
         if (Object.keys(accountUpdates).length) {
             await Account.update(accountUpdates, { where: { uuid: req.user.uuid } });
         }
-
         if (Object.keys(profileUpdates).length) {
             await DriverProfile.update(profileUpdates, { where: { account_id: req.user.uuid } });
         }
 
-        // Return full updated profile
         const updated = await Account.findByPk(req.user.uuid, {
             attributes: { exclude: ['password_hash', 'password_algo'] },
             include: [{ model: DriverProfile, as: 'driverProfile', required: false }],
@@ -1079,10 +1194,6 @@ exports.updateProfile = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-/**
- * GET /api/driver/ratings
- * ✅ FIX BE Broken Feature #3: Replaced hardcoded 4.8 stub with real Rating query.
- */
 exports.getRatings = async (req, res, next) => {
     try {
         console.log('⭐ [DRIVER] getRatings — Driver:', req.user.uuid);
@@ -1097,10 +1208,10 @@ exports.getRatings = async (req, res, next) => {
             },
             include: [
                 {
-                    model: Account,
-                    as: 'rater',
+                    model:      Account,
+                    as:         'rater',
                     attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                    required: false,
+                    required:   false,
                 }
             ],
             order:  [['createdAt', 'DESC']],
@@ -1108,12 +1219,10 @@ exports.getRatings = async (req, res, next) => {
             offset,
         });
 
-        // Calculate real average
         const average = count
             ? parseFloat((ratings.reduce((s, r) => s + r.rating, 0) / count).toFixed(2))
             : 0;
 
-        // Star distribution (1–5)
         const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
         for (const r of ratings) {
             const star = Math.round(r.rating);
