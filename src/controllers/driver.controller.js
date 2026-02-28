@@ -2,6 +2,7 @@
 
 const { Account, DriverProfile, Trip, TripEvent, Rating } = require('../models');
 const { Op } = require('sequelize');
+const earningsEngine = require('../services/earningsEngineService');
 const { v4: uuidv4 } = require('uuid');
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets/index');
@@ -835,18 +836,25 @@ exports.startTrip = async (req, res, next) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────
+
+
 exports.completeTrip = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🏁 [DRIVER] completeTrip — Trip:', req.params.tripId);
-        const { tripId }              = req.params;
-        const { final_fare, notes }   = req.body;
 
+        const { tripId }            = req.params;
+        const { final_fare, notes } = req.body;
+
+        // ── STEP 1: Load and validate trip ────────────────────────────
         const trip = await Trip.findByPk(tripId);
-        if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
-        if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
+        if (!trip) {
+            return res.status(404).json({ error: 'Trip not found' });
+        }
+        if (trip.driverId !== req.user.uuid) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
         if (trip.status !== 'IN_PROGRESS') {
             return res.status(400).json({
                 error:         'Invalid status transition',
@@ -855,42 +863,104 @@ exports.completeTrip = async (req, res, next) => {
             });
         }
 
-        trip.status          = 'COMPLETED';
-        trip.tripCompletedAt = new Date();
-        if (final_fare) trip.fareFinal = final_fare;
-        if (notes)      trip.notes     = notes;
-        await trip.save();
+        // ── STEP 2: Open a single DB transaction ──────────────────────
+        // The trip status update AND all earnings entries happen together.
+        // If anything fails, everything rolls back — no partial state.
+        const result = await sequelize.transaction(async (t) => {
 
-        console.log('✅ [DRIVER] Trip COMPLETED — Final fare:', trip.fareFinal);
+            // ── 2a. Mark trip COMPLETED ───────────────────────────────
+            trip.status          = 'COMPLETED';
+            trip.tripCompletedAt = new Date();
+            if (final_fare) trip.fareFinal = parseInt(final_fare, 10);
+            if (notes)      trip.notes     = notes;
+            await trip.save({ transaction: t });
 
-        // Clean ALL Redis keys for this trip
-        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-        await redisClient.del(`driver:active_trip:${req.user.uuid}`);
-        await redisClient.del(`trip:timeout:${tripId}`);
-        await redisClient.del(`trip:accepting:${tripId}`);
-        await redisClient.del(`trip:no_expire:${tripId}`);
+            console.log('✅ [DRIVER] Trip status → COMPLETED');
+            console.log('   Final fare:', trip.fareFinal || trip.fareEstimate, 'XAF');
 
-        // Reset driver to available
-        const rawMeta = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
-        if (rawMeta) {
-            const meta   = JSON.parse(rawMeta);
-            meta.isAvailable = true;
-            meta.lastUpdated = new Date().toISOString();
-            await redisClient.setex(REDIS_KEYS.DRIVER_META(req.user.uuid), 3600, JSON.stringify(meta));
-        }
-        await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
+            // ── 2b. Run earnings engine ───────────────────────────────
+            // This writes: TripReceipt + DriverWalletTransactions
+            //              + DriverWallet balance update
+            //              + Quest bonus awards (if any threshold crossed)
+            // Fully idempotent — safe if called twice for same trip.
+            const earningsResult = await earningsEngine.processTrip(trip, t);
 
-        console.log('✅ [DRIVER] Redis cleaned after completion, driver set available');
-
-        const io = getIO();
-        io.to(`passenger:${trip.passengerId}`).emit('trip:completed', {
-            tripId:      trip.id,
-            completedAt: trip.tripCompletedAt,
-            finalFare:   trip.fareFinal,
+            return { trip, earningsResult };
         });
 
-        res.status(200).json({ message: 'Trip completed successfully', data: { trip } });
+        // ── STEP 3: Clean up Redis (outside transaction — non-fatal) ──
+        try {
+            await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+            await redisClient.del(`passenger:active_trip:${result.trip.passengerId}`);
+            await redisClient.del(`driver:active_trip:${req.user.uuid}`);
+            await redisClient.del(`trip:timeout:${tripId}`);
+            await redisClient.del(`trip:accepting:${tripId}`);
+            await redisClient.del(`trip:no_expire:${tripId}`);
+        } catch (redisErr) {
+            // Redis cleanup failure should NOT fail the response —
+            // trip is already COMPLETED in DB with earnings posted.
+            console.warn('⚠️  [DRIVER] Redis cleanup error (non-fatal):', redisErr.message);
+        }
+
+        // ── STEP 4: Reset driver to available ─────────────────────────
+        try {
+            const rawMeta = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
+            if (rawMeta) {
+                const meta       = JSON.parse(rawMeta);
+                meta.isAvailable = true;
+                meta.lastUpdated = new Date().toISOString();
+                await redisClient.setex(
+                    REDIS_KEYS.DRIVER_META(req.user.uuid),
+                    3600,
+                    JSON.stringify(meta)
+                );
+            }
+            await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, req.user.uuid.toString());
+            console.log('✅ [DRIVER] Driver reset to available in Redis');
+        } catch (redisErr) {
+            console.warn('⚠️  [DRIVER] Driver availability reset error (non-fatal):', redisErr.message);
+        }
+
+        // ── STEP 5: Notify passenger via Socket.IO ────────────────────
+        try {
+            const io = getIO();
+            io.to(`passenger:${result.trip.passengerId}`).emit('trip:completed', {
+                tripId:      result.trip.id,
+                completedAt: result.trip.tripCompletedAt,
+                finalFare:   result.trip.fareFinal,
+            });
+        } catch (socketErr) {
+            console.warn('⚠️  [DRIVER] Socket emit error (non-fatal):', socketErr.message);
+        }
+
+        // ── STEP 6: Build response with earnings summary ───────────────
+        const { earningsResult } = result;
+        const earnings = earningsResult.alreadyProcessed
+            ? { note: 'Earnings already processed for this trip' }
+            : {
+                grossFare:         earningsResult.summary?.grossFare        || 0,
+                commissionAmount:  earningsResult.summary?.commissionAmount || 0,
+                bonusTotal:        earningsResult.summary?.bonusTotal       || 0,
+                driverNet:         earningsResult.summary?.driverNet        || 0,
+                questBonusTotal:   earningsResult.summary?.questBonusTotal  || 0,
+                questAwards:       earningsResult.questAwards?.map(a => ({
+                    programName:   a.name || 'Bonus',
+                    amount:        a.awardedAmount,
+                    periodKey:     a.periodKey,
+                })) || [],
+            };
+
+        console.log('✅ [DRIVER] completeTrip done');
+        console.log('   Driver net:', earnings.driverNet, 'XAF');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        return res.status(200).json({
+            message: 'Trip completed successfully',
+            data: {
+                trip:     result.trip,
+                earnings,
+            },
+        });
 
     } catch (error) {
         console.error('❌ [DRIVER] completeTrip error:', error);
@@ -1101,6 +1171,125 @@ exports.getTripHistory = async (req, res, next) => {
 
     } catch (error) {
         console.error('❌ [DRIVER] getTripHistory error:', error);
+        next(error);
+    }
+};
+
+
+
+exports.getAllTrips = async (req, res, next) => {
+    try {
+        const driverId = req.user.uuid;
+
+        const page  = Math.max(parseInt(req.query.page  || '1', 10), 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+        const offset = (page - 1) * limit;
+
+        // default statuses: completed + canceled
+        // allow override:
+        //  - status=COMPLETED
+        //  - status=CANCELED
+        //  - status=COMPLETED,CANCELED
+        //  - status=all  (returns all statuses)
+        const statusParam = (req.query.status || '').trim();
+
+        const where = { driverId };
+
+        if (statusParam && statusParam.toLowerCase() !== 'all') {
+            const statuses = statusParam.includes(',')
+                ? statusParam.split(',').map(s => s.trim()).filter(Boolean)
+                : [statusParam];
+
+            where.status = { [Op.in]: statuses };
+        } else if (!statusParam) {
+            where.status = { [Op.in]: ['COMPLETED', 'CANCELED'] };
+        }
+
+        // optional date range filter (by createdAt)
+        // ?from=2026-02-01&to=2026-02-27
+        const from = req.query.from ? new Date(req.query.from) : null;
+        const to   = req.query.to   ? new Date(req.query.to)   : null;
+
+        if (from && !isNaN(from.getTime()) && to && !isNaN(to.getTime())) {
+            where.createdAt = { [Op.between]: [from, to] };
+        } else if (from && !isNaN(from.getTime())) {
+            where.createdAt = { [Op.gte]: from };
+        } else if (to && !isNaN(to.getTime())) {
+            where.createdAt = { [Op.lte]: to };
+        }
+
+        const { count, rows } = await Trip.findAndCountAll({
+            where,
+            include: [
+                {
+                    model: Account,
+                    as: 'passenger',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                    required: false,
+                }
+            ],
+            order: [['createdAt', 'DESC']],
+            limit,
+            offset,
+        });
+
+        // small normalization for frontend convenience
+        const trips = rows.map(t => ({
+            id: t.id,
+            status: t.status,
+
+            pickup:  { lat: t.pickupLat,  lng: t.pickupLng,  address: t.pickupAddress },
+            dropoff: { lat: t.dropoffLat, lng: t.dropoffLng, address: t.dropoffAddress },
+
+            distanceM: t.distanceM,
+            durationS: t.durationS,
+
+            fareEstimate: t.fareEstimate,
+            fareFinal: t.fareFinal,
+
+            paymentMethod: t.paymentMethod,
+
+            matchedAt: t.matchedAt || null,
+            startedAt: t.tripStartedAt || null,
+            completedAt: t.tripCompletedAt || null,
+
+            canceledAt: t.canceledAt || null,
+            canceledBy: t.canceledBy || null,
+            cancelReason: t.cancelReason || null,
+
+            createdAt: t.createdAt,
+            updatedAt: t.updatedAt,
+
+            passenger: t.passenger ? {
+                uuid: t.passenger.uuid,
+                firstName: t.passenger.first_name,
+                lastName: t.passenger.last_name,
+                name: `${t.passenger.first_name || ''} ${t.passenger.last_name || ''}`.trim(),
+                phone: t.passenger.phone_e164,
+                avatar: t.passenger.avatar_url,
+            } : null,
+        }));
+
+        return res.status(200).json({
+            message: 'Driver trips retrieved',
+            data: {
+                trips,
+                filters: {
+                    status: statusParam || 'COMPLETED,CANCELED',
+                    from: req.query.from || null,
+                    to: req.query.to || null,
+                },
+                pagination: {
+                    total: count,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(count / limit),
+                }
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [DRIVER] getAllTrips error:', error);
         next(error);
     }
 };

@@ -140,6 +140,8 @@ router.get('/earnings', authenticate, requireDriverAny, driverController.getEarn
  */
 router.get('/trips/history', authenticate, requireDriverAny, driverController.getTripHistory);
 
+
+router.get('/trips', authenticate, requireDriverAny, driverController.getAllTrips);
 /**
  * @route   GET /api/driver/trips/:tripId
  * @desc    Get details of a specific trip

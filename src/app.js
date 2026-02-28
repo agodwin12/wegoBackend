@@ -65,6 +65,10 @@ const promotionRoutes = require('./routes/public/promotions.routes');
 const statsRoutes = require('./routes/public/stats.routes');
 const activityRoutes = require('./routes/activity/activity.routes');
 
+// driver earnings
+const driverEarningsRoutes = require('./routes/driverEarnings.routes');
+const adminEarningsRoutes = require('./routes/backoffice/adminEarnings.routes');
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT JOBS
@@ -166,6 +170,14 @@ app.use('/api/activity', activityRoutes);
 app.use('/api/backoffice/auth', backofficeAuthRoutes);
 app.use('/api/backoffice/employees', employeeRoutes);
 app.use('/api/employee/profile', employeeProfileRoutes);
+
+// ───────────────────────────────────────────────────────────────────────
+// driver earning
+// ───────────────────────────────────────────────────────────────────────
+app.use('/api/earnings/driver', driverEarningsRoutes);
+app.use('/api/admin/earnings', adminEarningsRoutes);
+
+
 
 // ───────────────────────────────────────────────────────────────────────
 // User Management
