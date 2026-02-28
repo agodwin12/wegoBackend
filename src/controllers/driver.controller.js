@@ -1,6 +1,6 @@
 /// src/controllers/driver.controller.js
 
-const { Account, DriverProfile, Trip, TripEvent, Rating } = require('../models');
+const { Account, DriverProfile, Trip, TripEvent, Rating, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const earningsEngine = require('../services/earningsEngineService');
 const { v4: uuidv4 } = require('uuid');
@@ -367,15 +367,7 @@ exports.getCurrentTrip = async (req, res, next) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────
-/**
- * POST /api/driver/trips/:tripId/accept
- *
- * ✅ FIX: STEP 13 now calls buildFullDriverInfo() and sends complete
- *         driver + vehicle details in the trip:driver_assigned event
- *         so Flutter's DriverArrivingScreen can display name, plate,
- *         make/model, color, year, photo, rating, and phone.
- */
+
 exports.acceptTrip = async (req, res, next) => {
     const { tripId }  = req.params;
     const driverId    = req.user.uuid;
