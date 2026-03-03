@@ -304,3 +304,221 @@ exports.getTripById = async (req, res) => {
         res.status(500).json({ message: 'Server error' });
     }
 };
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// PASSENGER TRIP HISTORY
+// GET /api/trips/history
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.getPassengerTripHistory = async (req, res) => {
+    try {
+        const passengerId = req.user.uuid;
+        const {
+            page = 1,
+            limit = 10,
+            status = ''
+        } = req.query;
+
+        const offset = (parseInt(page) - 1) * parseInt(limit);
+
+        const where = { passengerId };
+
+        if (status) {
+            // Support comma-separated: ?status=COMPLETED,CANCELED
+            const statuses = status.split(',').map(s => s.trim().toUpperCase());
+            where.status = statuses.length === 1 ? statuses[0] : { [Op.in]: statuses };
+        } else {
+            // Default: only show finished trips in history
+            where.status = { [Op.in]: ['COMPLETED', 'CANCELED'] };
+        }
+
+        const { count, rows: trips } = await Trip.findAndCountAll({
+            where,
+            include: [
+                {
+                    model: Account,
+                    as: 'driver',
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    required: false,
+                    include: [
+                        {
+                            model: DriverProfile,
+                            as: 'driver_profile',
+                            attributes: ['vehicle_make_model', 'vehicle_color', 'vehicle_type', 'rating_avg'],
+                            required: false
+                        }
+                    ]
+                }
+            ],
+            order: [['createdAt', 'DESC']],
+            limit: parseInt(limit),
+            offset,
+            distinct: true
+        });
+
+        const formatted = trips.map(trip => ({
+            id:              trip.id,
+            status:          trip.status,
+            pickup_address:  trip.pickupAddress,
+            dropoff_address: trip.dropoffAddress,
+            fare_estimate:   trip.fareEstimate,
+            fare_final:      trip.fareFinal,
+            payment_method:  trip.paymentMethod,
+            distance_m:      trip.distanceM,
+            duration_s:      trip.durationS,
+            vehicle_type:    trip.vehicleType,
+            canceled_by:     trip.canceledBy,
+            cancel_reason:   trip.cancelReason,
+            trip_started_at:   trip.tripStartedAt,
+            trip_completed_at: trip.tripCompletedAt,
+            created_at:      trip.createdAt,
+            driver: trip.driver ? {
+                uuid:       trip.driver.uuid,
+                first_name: trip.driver.first_name,
+                last_name:  trip.driver.last_name,
+                avatar_url: trip.driver.avatar_url,
+                vehicle_make_model: trip.driver.driver_profile?.vehicle_make_model || null,
+                vehicle_color:      trip.driver.driver_profile?.vehicle_color || null,
+                vehicle_type:       trip.driver.driver_profile?.vehicle_type || null,
+                rating_avg:         trip.driver.driver_profile?.rating_avg || null,
+            } : null,
+        }));
+
+        console.log(`✅ [TRIP HISTORY] Passenger ${passengerId} — ${trips.length} trips (page ${page})`);
+
+        res.status(200).json({
+            success: true,
+            data: formatted,
+            pagination: {
+                total:      count,
+                page:       parseInt(page),
+                limit:      parseInt(limit),
+                totalPages: Math.ceil(count / parseInt(limit)),
+                hasMore:    parseInt(page) < Math.ceil(count / parseInt(limit))
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [TRIP HISTORY] Error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch trip history' });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// PASSENGER TRIP DETAIL
+// GET /api/trips/:tripId/detail
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.getPassengerTripDetail = async (req, res) => {
+    try {
+        const passengerId = req.user.uuid;
+        const { tripId } = req.params;
+
+        const trip = await Trip.findOne({
+            where: { id: tripId, passengerId },
+            include: [
+                {
+                    model: Account,
+                    as: 'driver',
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url', 'phone_e164'],
+                    required: false,
+                    include: [
+                        {
+                            model: DriverProfile,
+                            as: 'driver_profile',
+                            attributes: [
+                                'vehicle_make_model',
+                                'vehicle_plate',
+                                'vehicle_color',
+                                'vehicle_type',
+                                'vehicle_year',
+                                'rating_avg',
+                                'rating_count'
+                            ],
+                            required: false
+                        }
+                    ]
+                }
+            ]
+        });
+
+        if (!trip) {
+            return res.status(404).json({ success: false, message: 'Trip not found' });
+        }
+
+        // Check if passenger already rated this trip
+        const { Rating } = require('../../models/index');
+        let hasRated = false;
+        let existingRating = null;
+
+        if (trip.driverId) {
+            const rating = await Rating.findOne({
+                where: {
+                    tripId:  trip.id,
+                    raterId: passengerId,
+                }
+            });
+            if (rating) {
+                hasRated = true;
+                existingRating = {
+                    stars:   rating.stars,
+                    comment: rating.comment,
+                };
+            }
+        }
+
+        console.log(`✅ [TRIP DETAIL] Trip ${tripId} fetched for passenger ${passengerId}`);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                id:              trip.id,
+                status:          trip.status,
+                pickup_address:  trip.pickupAddress,
+                dropoff_address: trip.dropoffAddress,
+                pickup_lat:      trip.pickupLat,
+                pickup_lng:      trip.pickupLng,
+                dropoff_lat:     trip.dropoffLat,
+                dropoff_lng:     trip.dropoffLng,
+                route_polyline:  trip.routePolyline,
+                fare_estimate:   trip.fareEstimate,
+                fare_final:      trip.fareFinal,
+                payment_method:  trip.paymentMethod,
+                distance_m:      trip.distanceM,
+                duration_s:      trip.durationS,
+                vehicle_type:    trip.vehicleType,
+                canceled_by:     trip.canceledBy,
+                cancel_reason:   trip.cancelReason,
+                driver_assigned_at:   trip.driverAssignedAt,
+                driver_en_route_at:   trip.driverEnRouteAt,
+                driver_arrived_at:    trip.driverArrivedAt,
+                trip_started_at:      trip.tripStartedAt,
+                trip_completed_at:    trip.tripCompletedAt,
+                canceled_at:          trip.canceledAt,
+                created_at:           trip.createdAt,
+                // Rating state — Flutter uses this to show/hide rate button
+                has_rated:       hasRated,
+                existing_rating: existingRating,
+                driver: trip.driver ? {
+                    uuid:       trip.driver.uuid,
+                    first_name: trip.driver.first_name,
+                    last_name:  trip.driver.last_name,
+                    avatar_url: trip.driver.avatar_url,
+                    phone:      trip.driver.phone_e164,
+                    vehicle_make_model: trip.driver.driver_profile?.vehicle_make_model || null,
+                    vehicle_plate:      trip.driver.driver_profile?.vehicle_plate || null,
+                    vehicle_color:      trip.driver.driver_profile?.vehicle_color || null,
+                    vehicle_type:       trip.driver.driver_profile?.vehicle_type || null,
+                    vehicle_year:       trip.driver.driver_profile?.vehicle_year || null,
+                    rating_avg:         trip.driver.driver_profile?.rating_avg || null,
+                    rating_count:       trip.driver.driver_profile?.rating_count || null,
+                } : null,
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [TRIP DETAIL] Error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch trip details' });
+    }
+};

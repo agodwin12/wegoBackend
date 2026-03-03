@@ -30,6 +30,8 @@ const serviceReportsAdminRoutes = require('./routes/backoffice/serviceReportsAdm
 const serviceListingAdminRoutes = require('./routes/backoffice/serviceListingAdmin.routes');
 const serviceDisputeAdminRoutes = require('./routes/backoffice/serviceDisputeAdmin.routes');
 const employeeProfileRoutes = require('./routes/backoffice/employeeProfile.routes');
+const adminEarningsRoutes = require('./routes/backoffice/adminEarnings.routes');
+const payoutRoutes = require('./routes/backoffice/payout.routes');
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT ROUTES - PUBLIC (MOBILE/WEB USERS)
@@ -44,11 +46,13 @@ const preferencesRoutes = require('./routes/preferencesRoutes');
 // Ride Booking
 const driverPublicRoutes = require('./routes/driver.routes');
 const tripPublicRoutes = require('./routes/trip.routes');
-const tripsPublicViewRoutes = require('./routes/public/trips.routes');  // ← NEW: Recent trips & details
+const tripsPublicViewRoutes = require('./routes/public/trips.routes');
 const rentalRoutes = require('./routes/rentalRoutes');
 const ratingRoutes = require('./routes/rating.routes');
 const chatRoutes = require('./routes/chat.routes');
 const fareRoutes = require('./routes/fareRoutes');
+const driverPayoutRoutes = require('./routes/driverPayout.routes');
+
 
 // Services Marketplace
 const serviceCategoryRoutes = require('./routes/serviceCategory.routes');
@@ -65,16 +69,15 @@ const promotionRoutes = require('./routes/public/promotions.routes');
 const statsRoutes = require('./routes/public/stats.routes');
 const activityRoutes = require('./routes/activity/activity.routes');
 
-// driver earnings
+// Driver Earnings
 const driverEarningsRoutes = require('./routes/driverEarnings.routes');
-const adminEarningsRoutes = require('./routes/backoffice/adminEarnings.routes');
-
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT JOBS
 // ═══════════════════════════════════════════════════════════════════════
 
 const { startCleanupJob } = require('./jobs/cleanup.job');
+const balanceSheetCron = require('./services/balanceSheetCron');
 
 // ═══════════════════════════════════════════════════════════════════════
 // MIDDLEWARE
@@ -101,7 +104,8 @@ app.get('/health', (req, res) => {
             ride_booking: 'active',
             services_marketplace: 'active',
             backoffice: 'active',
-            public_api: 'active'
+            public_api: 'active',
+            payout_system: 'active',                                     // ✅ NEW
         }
     });
 });
@@ -110,100 +114,74 @@ app.get('/health', (req, res) => {
 // ROUTE REGISTRATION - PUBLIC ROUTES (Mobile/Web Users)
 // ═══════════════════════════════════════════════════════════════════════
 
-// ───────────────────────────────────────────────────────────────────────
 // Authentication & User Management
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/users', profileRoutes);
 app.use('/api/profile/driver', driverProfileRoutes);
 app.use('/api/preferences', preferencesRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
 // Public Dashboard APIs (Mobile/Web)
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/users/stats', statsRoutes);
 
-
-// ───────────────────────────────────────────────────────────────────────
 // Ride Booking
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/driver', driverPublicRoutes);
+app.use('/api/request/payout/driver', driverPayoutRoutes);
 
-// ═══════════════════════════════════════════════════════════════════════
 // CRITICAL: TRIPS ROUTES - Order Matters!
-// ═══════════════════════════════════════════════════════════════════════
-// Mount the viewing routes (recent, details) at /api/trips
-// These routes handle: GET /api/trips/recent, GET /api/trips/:tripId
-app.use('/api/trips', tripsPublicViewRoutes);  // ← FIRST: Handles GET /recent, GET /:tripId
-
+app.use('/api/trips', tripsPublicViewRoutes);
 app.use('/api/trips', fareRoutes);
-app.use('/api/trips', tripPublicRoutes);  // ← SECOND: Handles POST, PATCH, DELETE
+app.use('/api/trips', tripPublicRoutes);
 
 app.use('/api/rentals', rentalRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/chat', chatRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
+
 // Services Marketplace (Public)
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/services/categories', serviceCategoryRoutes);
 app.use('/api/services/moderation', serviceListingRoutes);
 app.use('/api/services/requests', serviceRequestRoutes);
 app.use('/api/services/ratings', serviceRatingRoutes);
 app.use('/api/services/disputes', serviceDisputeRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
-// Support
-// ───────────────────────────────────────────────────────────────────────
+// Support & Activity
 app.use('/api/user/support', userSupportRoutes);
 app.use('/api/activity', activityRoutes);
-
 
 // ═══════════════════════════════════════════════════════════════════════
 // ROUTE REGISTRATION - BACKOFFICE ROUTES (Admin Only)
 // ═══════════════════════════════════════════════════════════════════════
 
-// ───────────────────────────────────────────────────────────────────────
 // Employee Management & Authentication
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/backoffice/auth', backofficeAuthRoutes);
 app.use('/api/backoffice/employees', employeeRoutes);
 app.use('/api/employee/profile', employeeProfileRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
-// driver earning
-// ───────────────────────────────────────────────────────────────────────
+// Earnings Engine
 app.use('/api/earnings/driver', driverEarningsRoutes);
 app.use('/api/admin/earnings', adminEarningsRoutes);
 
 
+app.use('/api/admin/payouts', payoutRoutes);                             // ✅ NEW
 
-// ───────────────────────────────────────────────────────────────────────
 // User Management
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/backoffice/passengers', passengerRoutes);
 app.use('/api/backoffice/drivers', driverRoutes);
 app.use('/api/backoffice/partners', partnerRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
 // Ride Booking Management
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/backoffice/trips', tripRoutes);
 app.use('/api/backoffice/vehicles', vehicleRoutes);
 app.use('/api/backoffice/vehicle-rentals', vehicleRentalRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
 // Business Operations
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/backoffice/pricing', pricingRoutes);
 app.use('/api/backoffice/coupons', couponRoutes);
 app.use('/api/backoffice/support', supportRoutes);
 app.use('/api/backoffice/upload', uploadRoutes);
 
-// ───────────────────────────────────────────────────────────────────────
 // Services Marketplace Management (Admin)
-// ───────────────────────────────────────────────────────────────────────
 app.use('/api/services/admin', serviceAdminRoutes);
 app.use('/api/services/admin/listings', serviceListingAdminRoutes);
 app.use('/api/services/admin/requests', serviceRequestAdminRoutes);
@@ -211,6 +189,7 @@ app.use('/api/services/admin/payments', servicePaymentAdminRoutes);
 app.use('/api/services/admin/providers', serviceProviderAdminRoutes);
 app.use('/api/services/admin/disputes', serviceDisputeAdminRoutes);
 app.use('/api/services/admin/reports', serviceReportsAdminRoutes);
+
 // ═══════════════════════════════════════════════════════════════════════
 // ERROR HANDLERS
 // ═══════════════════════════════════════════════════════════════════════
@@ -247,5 +226,6 @@ app.use((err, req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 startCleanupJob();
+balanceSheetCron.start();
 
 module.exports = app;

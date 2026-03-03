@@ -1,4 +1,4 @@
-// backend/src/models/index.js
+// src/models/index.js
 
 const sequelize = require('../config/database');
 
@@ -46,58 +46,66 @@ const ServiceRating   = require('./ServiceRating');
 const ServiceDispute  = require('./ServiceDispute');
 
 // ═══════════════════════════════════════════════════════════════════════
-// MODEL IMPORTS — EARNINGS ENGINE  ✅ NEW
+// MODEL IMPORTS — EARNINGS ENGINE
 // ═══════════════════════════════════════════════════════════════════════
 
-const TripReceipt            = require('./TripReceipt');
-const DriverWallet           = require('./DriverWallet');
+const TripReceipt             = require('./TripReceipt');
+const DriverWallet            = require('./DriverWallet');
 const DriverWalletTransaction = require('./DriverWalletTransaction');
-const EarningRule            = require('./EarningRule');
+const EarningRule             = require('./EarningRule');
 const { BonusProgram, BonusAward } = require('./BonusProgramAndAward');
+
+// ═══════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — PAYOUT SYSTEM  ✅ NEW
+// ═══════════════════════════════════════════════════════════════════════
+
+const DailyBalanceSheet = require('./DailyBalanceSheet');
+const PayoutRequest     = require('./PayoutRequest');
+const DebtPayment       = require('./DebtPayment');
 
 // ═══════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — ACCOUNT
 // ═══════════════════════════════════════════════════════════════════════
 
-// SupportTicket ↔ Account (User)
-SupportTicket.belongsTo(Account, { foreignKey: 'user_id',    targetKey: 'uuid', as: 'user' });
-Account.hasMany(SupportTicket,   { foreignKey: 'user_id',    sourceKey: 'uuid', as: 'supportTickets' });
+// SupportTicket ↔ Account
+SupportTicket.belongsTo(Account,  { foreignKey: 'user_id',    targetKey: 'uuid', as: 'user' });
+Account.hasMany(SupportTicket,    { foreignKey: 'user_id',    sourceKey: 'uuid', as: 'supportTickets' });
 
-// SupportTicket ↔ Employee (Assigned Agent)
+// SupportTicket ↔ Employee
 SupportTicket.belongsTo(Employee, { foreignKey: 'assigned_to', as: 'employee' });
 Employee.hasMany(SupportTicket,   { foreignKey: 'assigned_to', as: 'assignedTickets' });
 
-// 1️⃣ Account ↔ PassengerProfile (1:1)
-Account.hasOne(PassengerProfile,        { foreignKey: 'account_id', as: 'passenger_profile', onDelete: 'CASCADE' });
-PassengerProfile.belongsTo(Account,     { foreignKey: 'account_id', as: 'account' });
+// Account ↔ PassengerProfile (1:1)
+Account.hasOne(PassengerProfile,    { foreignKey: 'account_id', as: 'passenger_profile', onDelete: 'CASCADE' });
+PassengerProfile.belongsTo(Account, { foreignKey: 'account_id', as: 'account' });
 
-// 2️⃣ Account ↔ DriverProfile (1:1)
-Account.hasOne(DriverProfile,           { foreignKey: 'account_id', as: 'driver_profile', onDelete: 'CASCADE' });
-DriverProfile.belongsTo(Account,        { foreignKey: 'account_id', as: 'account' });
+// Account ↔ DriverProfile (1:1)
+Account.hasOne(DriverProfile,    { foreignKey: 'account_id', as: 'driver_profile', onDelete: 'CASCADE' });
+DriverProfile.belongsTo(Account, { foreignKey: 'account_id', as: 'account' });
 
-// 3️⃣ Account ↔ VerificationCode (1:N)
-Account.hasMany(VerificationCode,       { foreignKey: 'account_uuid', as: 'verificationCodes', onDelete: 'CASCADE' });
-VerificationCode.belongsTo(Account,     { foreignKey: 'account_uuid', as: 'account' });
+// Account ↔ VerificationCode (1:N)
+Account.hasMany(VerificationCode,    { foreignKey: 'account_uuid', as: 'verificationCodes', onDelete: 'CASCADE' });
+VerificationCode.belongsTo(Account,  { foreignKey: 'account_uuid', as: 'account' });
 
-// 4️⃣ Account ↔ DriverDocument (1:N)
-Account.hasMany(DriverDocument,         { foreignKey: 'account_id', as: 'driverDocuments', onDelete: 'CASCADE' });
-DriverDocument.belongsTo(Account,       { foreignKey: 'account_id', as: 'account' });
+// Account ↔ DriverDocument (1:N)
+Account.hasMany(DriverDocument,    { foreignKey: 'account_id', as: 'driverDocuments', onDelete: 'CASCADE' });
+DriverDocument.belongsTo(Account,  { foreignKey: 'account_id', as: 'account' });
 
-// 5️⃣ Account ↔ DriverLocation (1:1)
-Account.hasOne(DriverLocation,          { foreignKey: 'driver_id', as: 'driverLocation', onDelete: 'CASCADE' });
-DriverLocation.belongsTo(Account,       { foreignKey: 'driver_id', as: 'driverAccount' });
+// Account ↔ DriverLocation (1:1)
+Account.hasOne(DriverLocation,    { foreignKey: 'driver_id', as: 'driverLocation', onDelete: 'CASCADE' });
+DriverLocation.belongsTo(Account, { foreignKey: 'driver_id', as: 'driverAccount' });
 
-// 6️⃣ Account ↔ Employee (1:1)
-Account.hasOne(Employee,                { foreignKey: 'accountId', as: 'employee', onDelete: 'CASCADE' });
-Employee.belongsTo(Account,             { foreignKey: 'accountId', as: 'account' });
+// Account ↔ Employee (1:1)
+Account.hasOne(Employee,    { foreignKey: 'accountId', as: 'employee', onDelete: 'CASCADE' });
+Employee.belongsTo(Account, { foreignKey: 'accountId', as: 'account' });
 
-// 7️⃣ Account ↔ PartnerProfile (1:1)
-Account.hasOne(PartnerProfile,          { foreignKey: 'accountId', sourceKey: 'uuid', as: 'partner_profile', onDelete: 'CASCADE' });
-PartnerProfile.belongsTo(Account,       { foreignKey: 'accountId', targetKey: 'uuid', as: 'account' });
+// Account ↔ PartnerProfile (1:1)
+Account.hasOne(PartnerProfile,    { foreignKey: 'accountId', sourceKey: 'uuid', as: 'partner_profile', onDelete: 'CASCADE' });
+PartnerProfile.belongsTo(Account, { foreignKey: 'accountId', targetKey: 'uuid', as: 'account' });
 
-// 8️⃣ Account ↔ RefreshToken (1:N)
-Account.hasMany(RefreshToken,           { foreignKey: 'account_uuid', sourceKey: 'uuid', as: 'refresh_tokens', onDelete: 'CASCADE' });
-RefreshToken.belongsTo(Account,         { foreignKey: 'account_uuid', targetKey: 'uuid', as: 'account' });
+// Account ↔ RefreshToken (1:N)
+Account.hasMany(RefreshToken,    { foreignKey: 'account_uuid', sourceKey: 'uuid', as: 'refresh_tokens', onDelete: 'CASCADE' });
+RefreshToken.belongsTo(Account,  { foreignKey: 'account_uuid', targetKey: 'uuid', as: 'account' });
 
 // ═══════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — EMPLOYEE
@@ -144,24 +152,24 @@ TripEvent.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 Trip.hasMany(ChatMessage,   { foreignKey: 'tripId', as: 'messages', onDelete: 'CASCADE' });
 ChatMessage.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
-Trip.hasOne(Payment,      { foreignKey: 'tripId', as: 'payment',  onDelete: 'CASCADE' });
-Payment.belongsTo(Trip,   { foreignKey: 'tripId', as: 'trip' });
+Trip.hasOne(Payment,    { foreignKey: 'tripId', as: 'payment', onDelete: 'CASCADE' });
+Payment.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
 Trip.hasMany(Rating, { foreignKey: 'trip_id', as: 'ratings', onDelete: 'CASCADE' });
 
-// ── Trip ↔ TripReceipt (1:1) ✅ NEW ───────────────────────────────────
-Trip.hasOne(TripReceipt,       { foreignKey: 'tripId', as: 'receipt', onDelete: 'RESTRICT' });
-TripReceipt.belongsTo(Trip,    { foreignKey: 'tripId', as: 'trip' });
+// Trip ↔ TripReceipt (1:1)
+Trip.hasOne(TripReceipt,    { foreignKey: 'tripId', as: 'receipt', onDelete: 'RESTRICT' });
+TripReceipt.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
 // ═══════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — RATING
 // ═══════════════════════════════════════════════════════════════════════
 
-Rating.belongsTo(Trip,    { foreignKey: 'trip_id',   as: 'trip' });
-Rating.belongsTo(Account, { foreignKey: 'rated_by',  as: 'rater',  targetKey: 'uuid' });
-Account.hasMany(Rating,   { foreignKey: 'rated_by',  sourceKey: 'uuid', as: 'ratingsGiven' });
-Rating.belongsTo(Account, { foreignKey: 'rated_user',as: 'rated',  targetKey: 'uuid' });
-Account.hasMany(Rating,   { foreignKey: 'rated_user',sourceKey: 'uuid', as: 'ratingsReceived' });
+Rating.belongsTo(Trip,    { foreignKey: 'trip_id',    as: 'trip' });
+Rating.belongsTo(Account, { foreignKey: 'rated_by',   as: 'rater',  targetKey: 'uuid' });
+Account.hasMany(Rating,   { foreignKey: 'rated_by',   sourceKey: 'uuid', as: 'ratingsGiven' });
+Rating.belongsTo(Account, { foreignKey: 'rated_user', as: 'rated',  targetKey: 'uuid' });
+Account.hasMany(Rating,   { foreignKey: 'rated_user', sourceKey: 'uuid', as: 'ratingsReceived' });
 
 // ═══════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — CHAT
@@ -177,11 +185,11 @@ Account.hasMany(ChatMessage,   { foreignKey: 'toUserId',   sourceKey: 'uuid', as
 // ASSOCIATIONS — VEHICLE
 // ═══════════════════════════════════════════════════════════════════════
 
-Vehicle.belongsTo(Account,       { foreignKey: 'partnerId',  as: 'partner',   targetKey: 'uuid' });
-Account.hasMany(Vehicle,         { foreignKey: 'partnerId',  sourceKey: 'uuid', as: 'ownedVehicles' });
+Vehicle.belongsTo(Account,        { foreignKey: 'partnerId',  as: 'partner',   targetKey: 'uuid' });
+Account.hasMany(Vehicle,          { foreignKey: 'partnerId',  sourceKey: 'uuid', as: 'ownedVehicles' });
 
-Vehicle.belongsTo(VehicleCategory,  { foreignKey: 'categoryId', as: 'category' });
-VehicleCategory.hasMany(Vehicle,    { foreignKey: 'categoryId', as: 'vehicles' });
+Vehicle.belongsTo(VehicleCategory,   { foreignKey: 'categoryId', as: 'category' });
+VehicleCategory.hasMany(Vehicle,     { foreignKey: 'categoryId', as: 'vehicles' });
 
 if (Driver) {
     Driver.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
@@ -192,17 +200,17 @@ if (Driver) {
 // ASSOCIATIONS — VEHICLE RENTAL
 // ═══════════════════════════════════════════════════════════════════════
 
-VehicleRental.belongsTo(Account,  { foreignKey: 'userId',               as: 'user',              targetKey: 'uuid' });
-Account.hasMany(VehicleRental,    { foreignKey: 'userId',               sourceKey: 'uuid',        as: 'rentals' });
+VehicleRental.belongsTo(Account, { foreignKey: 'userId',              as: 'user',              targetKey: 'uuid' });
+Account.hasMany(VehicleRental,   { foreignKey: 'userId',              sourceKey: 'uuid',        as: 'rentals' });
 
-VehicleRental.belongsTo(Vehicle,  { foreignKey: 'vehicleId',            as: 'vehicle' });
-Vehicle.hasMany(VehicleRental,    { foreignKey: 'vehicleId',            as: 'rentals' });
+VehicleRental.belongsTo(Vehicle, { foreignKey: 'vehicleId',           as: 'vehicle' });
+Vehicle.hasMany(VehicleRental,   { foreignKey: 'vehicleId',           as: 'rentals' });
 
-VehicleRental.belongsTo(Account,  { foreignKey: 'handledByEmployeeId',  as: 'handledByEmployee', targetKey: 'uuid' });
-Account.hasMany(VehicleRental,    { foreignKey: 'handledByEmployeeId',  sourceKey: 'uuid',        as: 'handledRentals' });
+VehicleRental.belongsTo(Account, { foreignKey: 'handledByEmployeeId', as: 'handledByEmployee', targetKey: 'uuid' });
+Account.hasMany(VehicleRental,   { foreignKey: 'handledByEmployeeId', sourceKey: 'uuid',        as: 'handledRentals' });
 
-VehicleRental.belongsTo(Account,  { foreignKey: 'approvedByAdminId',    as: 'approvedByAdmin',   targetKey: 'uuid' });
-Account.hasMany(VehicleRental,    { foreignKey: 'approvedByAdminId',    sourceKey: 'uuid',        as: 'approvedRentals' });
+VehicleRental.belongsTo(Account, { foreignKey: 'approvedByAdminId',   as: 'approvedByAdmin',   targetKey: 'uuid' });
+Account.hasMany(VehicleRental,   { foreignKey: 'approvedByAdminId',   sourceKey: 'uuid',        as: 'approvedRentals' });
 
 // ═══════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — PAYMENT
@@ -224,8 +232,8 @@ Employee.hasMany(Vehicle,   { foreignKey: 'verifiedByEmployeeId', as: 'verifiedV
 // ASSOCIATIONS — SERVICES MARKETPLACE
 // ═══════════════════════════════════════════════════════════════════════
 
-ServiceCategory.hasMany(ServiceCategory,  { foreignKey: 'parent_id', as: 'subcategories' });
-ServiceCategory.belongsTo(ServiceCategory,{ foreignKey: 'parent_id', as: 'parent' });
+ServiceCategory.hasMany(ServiceCategory,   { foreignKey: 'parent_id', as: 'subcategories' });
+ServiceCategory.belongsTo(ServiceCategory, { foreignKey: 'parent_id', as: 'parent' });
 
 ServiceCategory.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator' });
 Employee.hasMany(ServiceCategory,   { foreignKey: 'created_by', as: 'createdServiceCategories' });
@@ -233,8 +241,8 @@ Employee.hasMany(ServiceCategory,   { foreignKey: 'created_by', as: 'createdServ
 ServiceCategory.belongsTo(Employee, { foreignKey: 'updated_by', as: 'updater' });
 Employee.hasMany(ServiceCategory,   { foreignKey: 'updated_by', as: 'updatedServiceCategories' });
 
-ServiceCategory.hasMany(ServiceListing,  { foreignKey: 'category_id', as: 'listings' });
-ServiceListing.belongsTo(ServiceCategory,{ foreignKey: 'category_id', as: 'category' });
+ServiceCategory.hasMany(ServiceListing,   { foreignKey: 'category_id', as: 'listings' });
+ServiceListing.belongsTo(ServiceCategory, { foreignKey: 'category_id', as: 'category' });
 
 ServiceListing.belongsTo(Account, { foreignKey: 'provider_id', targetKey: 'uuid', as: 'provider' });
 Account.hasMany(ServiceListing,   { foreignKey: 'provider_id', sourceKey: 'uuid', as: 'serviceListings' });
@@ -245,8 +253,8 @@ Employee.hasMany(ServiceListing,   { foreignKey: 'approved_by', as: 'approvedSer
 ServiceListing.belongsTo(Employee, { foreignKey: 'rejected_by', as: 'rejecter' });
 Employee.hasMany(ServiceListing,   { foreignKey: 'rejected_by', as: 'rejectedServiceListings' });
 
-ServiceListing.hasMany(ServiceRequest,  { foreignKey: 'listing_id', as: 'requests' });
-ServiceRequest.belongsTo(ServiceListing,{ foreignKey: 'listing_id', as: 'listing' });
+ServiceListing.hasMany(ServiceRequest,   { foreignKey: 'listing_id', as: 'requests' });
+ServiceRequest.belongsTo(ServiceListing, { foreignKey: 'listing_id', as: 'listing' });
 
 ServiceRequest.belongsTo(Account, { foreignKey: 'provider_id', targetKey: 'uuid', as: 'provider' });
 Account.hasMany(ServiceRequest,   { foreignKey: 'provider_id', sourceKey: 'uuid', as: 'serviceRequestsAsProvider' });
@@ -256,7 +264,7 @@ Account.hasMany(ServiceRequest,   { foreignKey: 'customer_id', sourceKey: 'uuid'
 
 ServiceRequest.belongsTo(Account, { foreignKey: 'cancelled_by', targetKey: 'uuid', as: 'canceller' });
 
-ServiceRequest.hasOne(ServiceRating,  { foreignKey: 'request_id', as: 'rating' });
+ServiceRequest.hasOne(ServiceRating,   { foreignKey: 'request_id', as: 'rating' });
 ServiceRating.belongsTo(ServiceRequest,{ foreignKey: 'request_id', as: 'request' });
 
 ServiceRating.belongsTo(Account, { foreignKey: 'provider_id', targetKey: 'uuid', as: 'provider' });
@@ -287,85 +295,143 @@ ServiceDispute.belongsTo(Employee, { foreignKey: 'resolved_by', as: 'resolver' }
 Employee.hasMany(ServiceDispute,   { foreignKey: 'resolved_by', as: 'resolvedServiceDisputes' });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ASSOCIATIONS — EARNINGS ENGINE  ✅ NEW
+// ASSOCIATIONS — EARNINGS ENGINE
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── DriverWallet ↔ Account (1:1) ──────────────────────────────────────
-Account.hasOne(DriverWallet,     { foreignKey: 'driverId', sourceKey: 'uuid', as: 'wallet', onDelete: 'RESTRICT' });
-DriverWallet.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+// DriverWallet ↔ Account (1:1)
+Account.hasOne(DriverWallet,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'wallet', onDelete: 'RESTRICT' });
+DriverWallet.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
 
-// ── DriverWallet ↔ Employee (frozen by) ───────────────────────────────
+// DriverWallet ↔ Employee (frozenBy)
 DriverWallet.belongsTo(Employee, { foreignKey: 'frozenBy', as: 'frozenByEmployee' });
 Employee.hasMany(DriverWallet,   { foreignKey: 'frozenBy', as: 'frozenWallets' });
 
-// ── DriverWalletTransaction ↔ DriverWallet (1:N) ─────────────────────
-DriverWallet.hasMany(DriverWalletTransaction,        { foreignKey: 'walletId', as: 'transactions', onDelete: 'RESTRICT' });
-DriverWalletTransaction.belongsTo(DriverWallet,      { foreignKey: 'walletId', as: 'wallet' });
+// DriverWallet ↔ DriverWalletTransaction (1:N)
+DriverWallet.hasMany(DriverWalletTransaction,   { foreignKey: 'walletId', as: 'transactions', onDelete: 'RESTRICT' });
+DriverWalletTransaction.belongsTo(DriverWallet, { foreignKey: 'walletId', as: 'wallet' });
 
-// ── DriverWalletTransaction ↔ Account (driver) ────────────────────────
-Account.hasMany(DriverWalletTransaction,             { foreignKey: 'driverId', sourceKey: 'uuid', as: 'walletTransactions' });
-DriverWalletTransaction.belongsTo(Account,           { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+// DriverWalletTransaction ↔ Account (driver)
+Account.hasMany(DriverWalletTransaction,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'walletTransactions' });
+DriverWalletTransaction.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
 
-// ── DriverWalletTransaction ↔ Trip ────────────────────────────────────
-Trip.hasMany(DriverWalletTransaction,                { foreignKey: 'tripId', as: 'walletEntries' });
-DriverWalletTransaction.belongsTo(Trip,              { foreignKey: 'tripId', as: 'trip' });
+// DriverWalletTransaction ↔ Trip
+Trip.hasMany(DriverWalletTransaction,    { foreignKey: 'tripId', as: 'walletEntries' });
+DriverWalletTransaction.belongsTo(Trip,  { foreignKey: 'tripId', as: 'trip' });
 
-// ── DriverWalletTransaction ↔ TripReceipt ─────────────────────────────
-TripReceipt.hasMany(DriverWalletTransaction,         { foreignKey: 'receiptId', as: 'walletEntries' });
-DriverWalletTransaction.belongsTo(TripReceipt,       { foreignKey: 'receiptId', as: 'receipt' });
+// DriverWalletTransaction ↔ TripReceipt
+TripReceipt.hasMany(DriverWalletTransaction,    { foreignKey: 'receiptId', as: 'walletEntries' });
+DriverWalletTransaction.belongsTo(TripReceipt,  { foreignKey: 'receiptId', as: 'receipt' });
 
-// ── DriverWalletTransaction ↔ EarningRule ─────────────────────────────
-EarningRule.hasMany(DriverWalletTransaction,         { foreignKey: 'ruleId', as: 'walletEntries' });
-DriverWalletTransaction.belongsTo(EarningRule,       { foreignKey: 'ruleId', as: 'rule' });
+// DriverWalletTransaction ↔ EarningRule
+EarningRule.hasMany(DriverWalletTransaction,    { foreignKey: 'ruleId', as: 'walletEntries' });
+DriverWalletTransaction.belongsTo(EarningRule,  { foreignKey: 'ruleId', as: 'rule' });
 
-// ── DriverWalletTransaction ↔ BonusProgram ────────────────────────────
-BonusProgram.hasMany(DriverWalletTransaction,        { foreignKey: 'bonusProgramId', as: 'walletEntries' });
-DriverWalletTransaction.belongsTo(BonusProgram,      { foreignKey: 'bonusProgramId', as: 'bonusProgram' });
+// DriverWalletTransaction ↔ BonusProgram
+BonusProgram.hasMany(DriverWalletTransaction,    { foreignKey: 'bonusProgramId', as: 'walletEntries' });
+DriverWalletTransaction.belongsTo(BonusProgram,  { foreignKey: 'bonusProgramId', as: 'bonusProgram' });
 
-// ── DriverWalletTransaction ↔ BonusAward ──────────────────────────────
-BonusAward.hasOne(DriverWalletTransaction,           { foreignKey: 'bonusAwardId', as: 'walletEntry' });
-DriverWalletTransaction.belongsTo(BonusAward,        { foreignKey: 'bonusAwardId', as: 'bonusAward' });
+// DriverWalletTransaction ↔ BonusAward
+BonusAward.hasOne(DriverWalletTransaction,    { foreignKey: 'bonusAwardId', as: 'walletEntry' });
+DriverWalletTransaction.belongsTo(BonusAward, { foreignKey: 'bonusAwardId', as: 'bonusAward' });
 
-// ── DriverWalletTransaction ↔ Employee (adjustedBy) ───────────────────
-Employee.hasMany(DriverWalletTransaction,            { foreignKey: 'adjustedBy', as: 'manualAdjustments' });
-DriverWalletTransaction.belongsTo(Employee,          { foreignKey: 'adjustedBy', as: 'adjustedByEmployee' });
+// DriverWalletTransaction ↔ Employee (adjustedBy)
+Employee.hasMany(DriverWalletTransaction,    { foreignKey: 'adjustedBy', as: 'manualAdjustments' });
+DriverWalletTransaction.belongsTo(Employee,  { foreignKey: 'adjustedBy', as: 'adjustedByEmployee' });
 
-// ── TripReceipt ↔ Account (driver) ────────────────────────────────────
-Account.hasMany(TripReceipt,                         { foreignKey: 'driverId', sourceKey: 'uuid', as: 'tripReceipts' });
-TripReceipt.belongsTo(Account,                       { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+// TripReceipt ↔ Account (driver)
+Account.hasMany(TripReceipt,    { foreignKey: 'driverId',    sourceKey: 'uuid', as: 'tripReceipts' });
+TripReceipt.belongsTo(Account,  { foreignKey: 'driverId',    targetKey: 'uuid', as: 'driver' });
 
-// ── TripReceipt ↔ Account (passenger) ────────────────────────────────
-TripReceipt.belongsTo(Account,                       { foreignKey: 'passengerId', targetKey: 'uuid', as: 'passenger' });
+// TripReceipt ↔ Account (passenger)
+TripReceipt.belongsTo(Account,  { foreignKey: 'passengerId', targetKey: 'uuid', as: 'passenger' });
 
-// ── TripReceipt ↔ EarningRule (commission rule used) ─────────────────
-EarningRule.hasMany(TripReceipt,                     { foreignKey: 'commissionRuleId', as: 'receipts' });
-TripReceipt.belongsTo(EarningRule,                   { foreignKey: 'commissionRuleId', as: 'commissionRule' });
+// TripReceipt ↔ EarningRule (commission rule used)
+EarningRule.hasMany(TripReceipt,    { foreignKey: 'commissionRuleId', as: 'receipts' });
+TripReceipt.belongsTo(EarningRule,  { foreignKey: 'commissionRuleId', as: 'commissionRule' });
 
-// ── EarningRule ↔ Employee (audit) ────────────────────────────────────
-Employee.hasMany(EarningRule, { foreignKey: 'createdBy', as: 'createdEarningRules' });
-EarningRule.belongsTo(Employee, { foreignKey: 'createdBy', as: 'creator' });
+// EarningRule ↔ Employee (audit)
+Employee.hasMany(EarningRule,    { foreignKey: 'createdBy', as: 'createdEarningRules' });
+EarningRule.belongsTo(Employee,  { foreignKey: 'createdBy', as: 'creator' });
 
-Employee.hasMany(EarningRule, { foreignKey: 'updatedBy', as: 'updatedEarningRules' });
-EarningRule.belongsTo(Employee, { foreignKey: 'updatedBy', as: 'updater' });
+Employee.hasMany(EarningRule,    { foreignKey: 'updatedBy', as: 'updatedEarningRules' });
+EarningRule.belongsTo(Employee,  { foreignKey: 'updatedBy', as: 'updater' });
 
-// ── BonusProgram ↔ Employee (audit) ───────────────────────────────────
-Employee.hasMany(BonusProgram, { foreignKey: 'createdBy', as: 'createdBonusPrograms' });
-BonusProgram.belongsTo(Employee, { foreignKey: 'createdBy', as: 'creator' });
+// BonusProgram ↔ Employee (audit)
+Employee.hasMany(BonusProgram,    { foreignKey: 'createdBy', as: 'createdBonusPrograms' });
+BonusProgram.belongsTo(Employee,  { foreignKey: 'createdBy', as: 'creator' });
 
-Employee.hasMany(BonusProgram, { foreignKey: 'updatedBy', as: 'updatedBonusPrograms' });
-BonusProgram.belongsTo(Employee, { foreignKey: 'updatedBy', as: 'updater' });
+Employee.hasMany(BonusProgram,    { foreignKey: 'updatedBy', as: 'updatedBonusPrograms' });
+BonusProgram.belongsTo(Employee,  { foreignKey: 'updatedBy', as: 'updater' });
 
-// ── BonusAward ↔ Account (driver) ─────────────────────────────────────
+// BonusAward ↔ Account (driver)
 Account.hasMany(BonusAward,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'bonusAwards' });
 BonusAward.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
 
-// ── BonusAward ↔ Trip (which trip triggered the award) ────────────────
-Trip.hasMany(BonusAward,       { foreignKey: 'triggerTripId', as: 'triggeredAwards' });
-BonusAward.belongsTo(Trip,     { foreignKey: 'triggerTripId', as: 'triggerTrip' });
+// BonusAward ↔ Trip (trigger trip)
+Trip.hasMany(BonusAward,    { foreignKey: 'triggerTripId', as: 'triggeredAwards' });
+BonusAward.belongsTo(Trip,  { foreignKey: 'triggerTripId', as: 'triggerTrip' });
 
-// NOTE: BonusProgram ↔ BonusAward (1:N) is already defined inside
-// BonusProgramAndAward.js via BonusProgram.hasMany(BonusAward) —
-// no need to repeat it here.
+// NOTE: BonusProgram ↔ BonusAward (1:N) is defined inside BonusProgramAndAward.js
+
+// ═══════════════════════════════════════════════════════════════════════
+// ASSOCIATIONS — PAYOUT SYSTEM  ✅ NEW
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── DailyBalanceSheet ↔ Account (driver) ──────────────────────────────
+Account.hasMany(DailyBalanceSheet,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'balanceSheets', onDelete: 'RESTRICT' });
+DailyBalanceSheet.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+
+// ── DailyBalanceSheet ↔ Employee (closedBy) ───────────────────────────
+DailyBalanceSheet.belongsTo(Employee, { foreignKey: 'closedBy', as: 'closedByEmployee' });
+Employee.hasMany(DailyBalanceSheet,   { foreignKey: 'closedBy', as: 'closedBalanceSheets' });
+
+// ── PayoutRequest ↔ Account (driver) ──────────────────────────────────
+Account.hasMany(PayoutRequest,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'payoutRequests', onDelete: 'RESTRICT' });
+PayoutRequest.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+
+// ── PayoutRequest ↔ DailyBalanceSheet ─────────────────────────────────
+DailyBalanceSheet.hasMany(PayoutRequest,    { foreignKey: 'balanceSheetId', as: 'payoutRequests' });
+PayoutRequest.belongsTo(DailyBalanceSheet,  { foreignKey: 'balanceSheetId', as: 'balanceSheet' });
+
+// ── PayoutRequest ↔ Employee (initiatedByEmployeeId) ──────────────────
+PayoutRequest.belongsTo(Employee, { foreignKey: 'initiatedByEmployeeId', as: 'initiatedByEmployee' });
+Employee.hasMany(PayoutRequest,   { foreignKey: 'initiatedByEmployeeId', as: 'initiatedPayouts' });
+
+// ── PayoutRequest ↔ Employee (processedBy) ────────────────────────────
+PayoutRequest.belongsTo(Employee, { foreignKey: 'processedBy', as: 'processedByEmployee' });
+Employee.hasMany(PayoutRequest,   { foreignKey: 'processedBy', as: 'processedPayouts' });
+
+// ── PayoutRequest ↔ Employee (confirmedBy) ────────────────────────────
+PayoutRequest.belongsTo(Employee, { foreignKey: 'confirmedBy', as: 'confirmedByEmployee' });
+Employee.hasMany(PayoutRequest,   { foreignKey: 'confirmedBy', as: 'confirmedPayouts' });
+
+// ── PayoutRequest ↔ Employee (rejectedBy) ─────────────────────────────
+PayoutRequest.belongsTo(Employee, { foreignKey: 'rejectedBy', as: 'rejectedByPayoutEmployee' });
+Employee.hasMany(PayoutRequest,   { foreignKey: 'rejectedBy', as: 'rejectedPayouts' });
+
+// ── PayoutRequest ↔ Employee (cancelledBy) ────────────────────────────
+PayoutRequest.belongsTo(Employee, { foreignKey: 'cancelledBy', as: 'cancelledByEmployee' });
+Employee.hasMany(PayoutRequest,   { foreignKey: 'cancelledBy', as: 'cancelledPayouts' });
+
+// ── DebtPayment ↔ Account (driver) ────────────────────────────────────
+Account.hasMany(DebtPayment,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'debtPayments', onDelete: 'RESTRICT' });
+DebtPayment.belongsTo(Account,  { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
+
+// ── DebtPayment ↔ DailyBalanceSheet ───────────────────────────────────
+DailyBalanceSheet.hasMany(DebtPayment,    { foreignKey: 'balanceSheetId', as: 'debtPayments' });
+DebtPayment.belongsTo(DailyBalanceSheet,  { foreignKey: 'balanceSheetId', as: 'balanceSheet' });
+
+// ── DebtPayment ↔ Employee (handledByEmployeeId) ──────────────────────
+DebtPayment.belongsTo(Employee, { foreignKey: 'handledByEmployeeId', as: 'handledByEmployee' });
+Employee.hasMany(DebtPayment,   { foreignKey: 'handledByEmployeeId', as: 'handledDebtPayments' });
+
+// ── DebtPayment ↔ Employee (verifiedBy) ───────────────────────────────
+DebtPayment.belongsTo(Employee, { foreignKey: 'verifiedBy', as: 'verifiedByEmployee' });
+Employee.hasMany(DebtPayment,   { foreignKey: 'verifiedBy', as: 'verifiedDebtPayments' });
+
+// ── DebtPayment ↔ Employee (rejectedBy) ───────────────────────────────
+DebtPayment.belongsTo(Employee, { foreignKey: 'rejectedBy', as: 'rejectedByDebtEmployee' });
+Employee.hasMany(DebtPayment,   { foreignKey: 'rejectedBy', as: 'rejectedDebtPayments' });
 
 // ═══════════════════════════════════════════════════════════════════════
 // EXPORTS
@@ -419,11 +485,16 @@ module.exports = {
     DriverLocation,
     IdempotencyKey,
 
-    // ── Earnings Engine ✅ NEW ────────────────────────────────────────
+    // ── Earnings Engine ───────────────────────────────────────────────
     TripReceipt,
     DriverWallet,
     DriverWalletTransaction,
     EarningRule,
     BonusProgram,
     BonusAward,
+
+    // ── Payout System  ✅ NEW ─────────────────────────────────────────
+    DailyBalanceSheet,
+    PayoutRequest,
+    DebtPayment,
 };

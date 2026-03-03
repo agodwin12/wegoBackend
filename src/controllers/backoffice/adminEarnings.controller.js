@@ -4,33 +4,21 @@
 // ADMIN EARNINGS CONTROLLER (Backoffice)
 // ═══════════════════════════════════════════════════════════════════════
 //
-// Accessible only to: super_admin, admin, manager
-// (enforced via requireEmployeeRole in the routes file)
+// Column mapping reference (FINAL — confirmed from model files):
 //
-// Earning Rules endpoints:
-//   GET    /api/admin/earnings/rules          → list all rules
-//   POST   /api/admin/earnings/rules          → create a rule
-//   PUT    /api/admin/earnings/rules/:id      → update a rule
-//   DELETE /api/admin/earnings/rules/:id      → deactivate a rule
-//
-// Bonus Programs endpoints:
-//   GET    /api/admin/earnings/programs       → list all programs
-//   POST   /api/admin/earnings/programs       → create a program
-//   PUT    /api/admin/earnings/programs/:id   → update a program
-//   DELETE /api/admin/earnings/programs/:id   → deactivate a program
-//
-// Driver earnings read-only:
-//   GET    /api/admin/earnings/drivers        → list drivers + wallet summary
-//   GET    /api/admin/earnings/drivers/:uuid  → one driver full detail
-//   GET    /api/admin/earnings/overview       → platform-wide revenue stats
+//   TripReceipt   underscored:false  → driverNet, grossFare, commissionAmount (camelCase)
+//   Account       underscored:true   → first_name, last_name, avatar_url, phone_e164, user_type
+//   DriverProfile underscored:true   → rating_avg, vehicle_make_model, vehicle_plate, status
+//                                      (NO totalTrips, NO isOnline, NO vehicleMake/vehicleModel separately)
+//   Employee      (no underscored)   → first_name, last_name, email (snake_case, defined literally)
 //
 // ═══════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-const { v4: uuidv4 } = require('uuid');
-const { Op }         = require('sequelize');
-const earningsEngine = require('../../services/earningsEngineService');
+const { v4: uuidv4 }           = require('uuid');
+const { Op, fn, col, literal } = require('sequelize');
+const earningsEngine           = require('../../services/earningsEngineService');
 
 const {
     EarningRule,
@@ -43,13 +31,18 @@ const {
     DriverProfile,
 } = require('../../models');
 
+// Employee columns: id, first_name, last_name, email (snake_case, defined literally in model)
+const EMPLOYEE_ATTRS = ['id', 'first_name', 'last_name', 'email'];
+
+// DriverProfile columns we need (underscored:true → snake_case in DB)
+const DRIVER_PROFILE_ATTRS = ['account_id', 'rating_avg', 'vehicle_make_model', 'vehicle_plate', 'status'];
+
 // ═══════════════════════════════════════════════════════════════════════
 // ── EARNING RULES ──────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
  * GET /api/admin/earnings/rules
- * List all earning rules (active and inactive)
  */
 exports.listRules = async (req, res, next) => {
     try {
@@ -59,8 +52,8 @@ exports.listRules = async (req, res, next) => {
         const rules = await EarningRule.findAll({
             order: [['priority', 'DESC'], ['createdAt', 'DESC']],
             include: [
-                { association: 'creator', attributes: ['id', 'firstName', 'lastName', 'email'] },
-                { association: 'updater', attributes: ['id', 'firstName', 'lastName', 'email'] },
+                { association: 'creator', attributes: EMPLOYEE_ATTRS },
+                { association: 'updater', attributes: EMPLOYEE_ATTRS },
             ],
         });
 
@@ -77,18 +70,6 @@ exports.listRules = async (req, res, next) => {
 
 /**
  * POST /api/admin/earnings/rules
- * Create a new earning rule
- *
- * Body:
- *   name        string   required
- *   type        string   required  COMMISSION_PERCENT | BONUS_FLAT | BONUS_MULTIPLIER | PENALTY
- *   value       number   required  e.g. 0.10 for 10% commission, 500 for 500 XAF flat bonus
- *   appliesTo   string   optional  RIDE | RENTAL | ALL (default: ALL)
- *   priority    number   optional  higher = evaluated first (default: 0)
- *   conditions  object   optional  { city, hour_from, hour_to, day_of_week, min_fare, ... }
- *   validFrom   string   optional  ISO date YYYY-MM-DD
- *   validTo     string   optional  ISO date YYYY-MM-DD
- *   description string   optional
  */
 exports.createRule = async (req, res, next) => {
     try {
@@ -101,7 +82,6 @@ exports.createRule = async (req, res, next) => {
             conditions, validFrom, validTo, description,
         } = req.body;
 
-        // ── Validation ────────────────────────────────────────────────
         if (!name || !name.trim()) {
             return res.status(400).json({ success: false, message: 'Rule name is required.' });
         }
@@ -119,7 +99,6 @@ exports.createRule = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Value must be a positive number.' });
         }
 
-        // Commission must be between 0 and 1 (it's a rate, e.g. 0.10 = 10%)
         if (type === 'COMMISSION_PERCENT' && (parsedValue < 0 || parsedValue > 1)) {
             return res.status(400).json({
                 success: false,
@@ -127,10 +106,9 @@ exports.createRule = async (req, res, next) => {
             });
         }
 
-        const validAppliesTo = ['RIDE', 'RENTAL', 'ALL'];
+        const validAppliesTo    = ['RIDE', 'RENTAL', 'ALL'];
         const resolvedAppliesTo = (appliesTo && validAppliesTo.includes(appliesTo)) ? appliesTo : 'ALL';
 
-        // ── Create ────────────────────────────────────────────────────
         const rule = await EarningRule.create({
             id:          uuidv4(),
             name:        name.trim(),
@@ -140,14 +118,13 @@ exports.createRule = async (req, res, next) => {
             appliesTo:   resolvedAppliesTo,
             priority:    parseInt(priority || 0, 10),
             conditions:  conditions || {},
-            validFrom:   validFrom   || null,
-            validTo:     validTo     || null,
+            validFrom:   validFrom  || null,
+            validTo:     validTo    || null,
             isActive:    true,
             createdBy:   req.user.id,
             updatedBy:   req.user.id,
         });
 
-        // Invalidate Redis cache so the engine picks up the new rule immediately
         await earningsEngine.invalidateRulesCache();
 
         console.log(`✅ [ADMIN EARNINGS] Rule created: "${rule.name}" (${rule.id})`);
@@ -167,7 +144,6 @@ exports.createRule = async (req, res, next) => {
 
 /**
  * PUT /api/admin/earnings/rules/:id
- * Update an existing earning rule
  */
 exports.updateRule = async (req, res, next) => {
     try {
@@ -185,14 +161,13 @@ exports.updateRule = async (req, res, next) => {
             conditions, validFrom, validTo, description, isActive,
         } = req.body;
 
-        // Only update fields that were sent
         if (name        !== undefined) rule.name        = name.trim();
         if (description !== undefined) rule.description = description?.trim() || null;
         if (isActive    !== undefined) rule.isActive    = Boolean(isActive);
         if (priority    !== undefined) rule.priority    = parseInt(priority, 10);
         if (conditions  !== undefined) rule.conditions  = conditions;
-        if (validFrom   !== undefined) rule.validFrom   = validFrom   || null;
-        if (validTo     !== undefined) rule.validTo     = validTo     || null;
+        if (validFrom   !== undefined) rule.validFrom   = validFrom  || null;
+        if (validTo     !== undefined) rule.validTo     = validTo    || null;
         if (appliesTo   !== undefined) rule.appliesTo   = appliesTo;
 
         if (type !== undefined) {
@@ -220,7 +195,6 @@ exports.updateRule = async (req, res, next) => {
         rule.updatedBy = req.user.id;
         await rule.save();
 
-        // Invalidate cache
         await earningsEngine.invalidateRulesCache();
 
         console.log(`✅ [ADMIN EARNINGS] Rule updated: "${rule.name}" (${rule.id})`);
@@ -240,7 +214,6 @@ exports.updateRule = async (req, res, next) => {
 
 /**
  * DELETE /api/admin/earnings/rules/:id
- * Soft-delete (deactivate) a rule — never hard delete for audit integrity
  */
 exports.deleteRule = async (req, res, next) => {
     try {
@@ -279,7 +252,6 @@ exports.deleteRule = async (req, res, next) => {
 
 /**
  * GET /api/admin/earnings/programs
- * List all bonus programs
  */
 exports.listPrograms = async (req, res, next) => {
     try {
@@ -289,13 +261,10 @@ exports.listPrograms = async (req, res, next) => {
         const programs = await BonusProgram.findAll({
             order: [['displayOrder', 'ASC'], ['createdAt', 'DESC']],
             include: [
-                { association: 'creator', attributes: ['id', 'firstName', 'lastName', 'email'] },
-                { association: 'updater', attributes: ['id', 'firstName', 'lastName', 'email'] },
+                { association: 'creator', attributes: EMPLOYEE_ATTRS },
+                { association: 'updater', attributes: EMPLOYEE_ATTRS },
             ],
         });
-
-        // For each program, attach award counts for current period
-        const today = new Date().toISOString().split('T')[0];
 
         const programsWithStats = await Promise.all(programs.map(async (p) => {
             const periodKey    = BonusProgram.getPeriodKey(p.period);
@@ -304,9 +273,9 @@ exports.listPrograms = async (req, res, next) => {
 
             return {
                 ...p.toJSON(),
-                currentPeriodKey:       periodKey,
-                currentPeriodAwards:    awardsCount,
-                totalAmountAwarded:     totalAwarded,
+                currentPeriodKey:    periodKey,
+                currentPeriodAwards: awardsCount,
+                totalAmountAwarded:  totalAwarded,
             };
         }));
 
@@ -323,19 +292,6 @@ exports.listPrograms = async (req, res, next) => {
 
 /**
  * POST /api/admin/earnings/programs
- * Create a new bonus program
- *
- * Body:
- *   name         string  required
- *   type         string  required  DAILY_TRIPS | WEEKLY_TRIPS | MONTHLY_TRIPS | DAILY_EARNINGS | ...
- *   period       string  required  DAILY | WEEKLY | MONTHLY | LIFETIME
- *   targetValue  number  required  e.g. 10 trips or 50000 XAF
- *   bonusAmount  number  required  XAF to award when target hit
- *   description  string  optional
- *   iconEmoji    string  optional  default 🏆
- *   displayOrder number  optional
- *   validFrom    string  optional
- *   validTo      string  optional
  */
 exports.createProgram = async (req, res, next) => {
     try {
@@ -348,7 +304,6 @@ exports.createProgram = async (req, res, next) => {
             description, iconEmoji, displayOrder, validFrom, validTo,
         } = req.body;
 
-        // ── Validation ────────────────────────────────────────────────
         if (!name?.trim()) {
             return res.status(400).json({ success: false, message: 'Program name is required.' });
         }
@@ -382,7 +337,6 @@ exports.createProgram = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'bonusAmount must be a positive integer (XAF).' });
         }
 
-        // ── Create ────────────────────────────────────────────────────
         const program = await BonusProgram.create({
             id:           uuidv4(),
             name:         name.trim(),
@@ -419,7 +373,6 @@ exports.createProgram = async (req, res, next) => {
 
 /**
  * PUT /api/admin/earnings/programs/:id
- * Update a bonus program
  */
 exports.updateProgram = async (req, res, next) => {
     try {
@@ -483,7 +436,6 @@ exports.updateProgram = async (req, res, next) => {
 
 /**
  * DELETE /api/admin/earnings/programs/:id
- * Soft-delete (deactivate) — no hard delete, preserves award history
  */
 exports.deleteProgram = async (req, res, next) => {
     try {
@@ -521,8 +473,6 @@ exports.deleteProgram = async (req, res, next) => {
 
 /**
  * GET /api/admin/earnings/drivers
- * List all drivers with their wallet summary
- * Query: page, limit, search (name/phone), status (wallet status)
  */
 exports.listDriverWallets = async (req, res, next) => {
     try {
@@ -537,12 +487,13 @@ exports.listDriverWallets = async (req, res, next) => {
         const walletWhere = {};
         if (req.query.status) walletWhere.status = req.query.status.toUpperCase();
 
-        const accountWhere = { userType: 'driver' };
+        // Account: underscored:true → snake_case
+        const accountWhere = { user_type: 'DRIVER' };
         if (search) {
             accountWhere[Op.or] = [
-                { firstName: { [Op.like]: `%${search}%` } },
-                { lastName:  { [Op.like]: `%${search}%` } },
-                { phone:     { [Op.like]: `%${search}%` } },
+                { first_name: { [Op.like]: `%${search}%` } },
+                { last_name:  { [Op.like]: `%${search}%` } },
+                { phone_e164: { [Op.like]: `%${search}%` } },
             ];
         }
 
@@ -552,14 +503,17 @@ exports.listDriverWallets = async (req, res, next) => {
                 {
                     model:      Account,
                     as:         'driver',
-                    attributes: ['uuid', 'firstName', 'lastName', 'phone', 'profilePhotoUrl', 'status'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url', 'status'],
                     where:      accountWhere,
                     required:   true,
                     include: [
                         {
-                            model:      DriverProfile,
-                            as:         'driver_profile',
-                            attributes: ['ratingAvg', 'totalTrips', 'isOnline', 'vehicleMake', 'vehicleModel'],
+                            model:    DriverProfile,
+                            as:       'driver_profile',
+                            // ✅ DriverProfile: underscored:true → snake_case
+                            // Actual columns: rating_avg, vehicle_make_model, vehicle_plate, status
+                            // NO totalTrips, NO isOnline, NO vehicleMake/vehicleModel separately
+                            attributes: DRIVER_PROFILE_ATTRS,
                             required:   false,
                         },
                     ],
@@ -570,30 +524,32 @@ exports.listDriverWallets = async (req, res, next) => {
             offset,
         });
 
-        const formatted = wallets.map(w => ({
-            walletId:        w.id,
-            walletStatus:    w.status,
-            balance:         w.balance,
-            totalEarned:     w.totalEarned,
-            totalCommission: w.totalCommission,
-            totalBonuses:    w.totalBonuses,
-            totalPayouts:    w.totalPayouts,
-            lastPayoutAt:    w.lastPayoutAt,
-            currency:        w.currency,
-            driver: {
-                uuid:        w.driver.uuid,
-                name:        `${w.driver.firstName} ${w.driver.lastName}`,
-                phone:       w.driver.phone,
-                photo:       w.driver.profilePhotoUrl,
-                status:      w.driver.status,
-                rating:      w.driver.driver_profile?.ratingAvg || 0,
-                totalTrips:  w.driver.driver_profile?.totalTrips || 0,
-                isOnline:    w.driver.driver_profile?.isOnline || false,
-                vehicle:     w.driver.driver_profile
-                    ? `${w.driver.driver_profile.vehicleMake || ''} ${w.driver.driver_profile.vehicleModel || ''}`.trim()
-                    : null,
-            },
-        }));
+        const formatted = wallets.map(w => {
+            const dp = w.driver.driver_profile;
+            return {
+                walletId:        w.id,
+                walletStatus:    w.status,
+                balance:         w.balance,
+                totalEarned:     w.totalEarned,
+                totalCommission: w.totalCommission,
+                totalBonuses:    w.totalBonuses,
+                totalPayouts:    w.totalPayouts,
+                lastPayoutAt:    w.lastPayoutAt,
+                currency:        w.currency,
+                driver: {
+                    uuid:       w.driver.uuid,
+                    name:       `${w.driver.first_name || ''} ${w.driver.last_name || ''}`.trim(),
+                    phone:      w.driver.phone_e164,
+                    photo:      w.driver.avatar_url,
+                    status:     w.driver.status,
+                    // ✅ use snake_case field names from DriverProfile
+                    rating:     dp ? parseFloat(dp.rating_avg  || 0) : 0,
+                    isOnline:   dp ? dp.status === 'online'          : false,
+                    vehicle:    dp ? (dp.vehicle_make_model || '').trim() : null,
+                    plate:      dp ? (dp.vehicle_plate      || null)      : null,
+                },
+            };
+        });
 
         console.log(`✅ [ADMIN EARNINGS] ${count} driver wallets found`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -614,13 +570,11 @@ exports.listDriverWallets = async (req, res, next) => {
 
 /**
  * GET /api/admin/earnings/drivers/:uuid
- * Full earnings detail for one driver — wallet + receipts + transactions
- * Query: period (today | week | month | all — default: month)
  */
 exports.getDriverEarningsDetail = async (req, res, next) => {
     try {
-        const { uuid }   = req.params;
-        const period     = req.query.period || 'month';
+        const { uuid } = req.params;
+        const period   = req.query.period || 'month';
 
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log(`🔍 [ADMIN EARNINGS] getDriverEarningsDetail: ${uuid}`);
@@ -631,13 +585,14 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
                 {
                     model:      Account,
                     as:         'driver',
-                    attributes: ['uuid', 'firstName', 'lastName', 'phone', 'profilePhotoUrl'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
                     include: [
                         {
-                            model:    DriverProfile,
-                            as:       'driver_profile',
-                            attributes: ['ratingAvg', 'totalTrips', 'vehicleMake', 'vehicleModel', 'vehiclePlate'],
-                            required: false,
+                            model:      DriverProfile,
+                            as:         'driver_profile',
+                            // ✅ snake_case — DriverProfile underscored:true
+                            attributes: DRIVER_PROFILE_ATTRS,
+                            required:   false,
                         },
                     ],
                 },
@@ -648,18 +603,16 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Driver wallet not found.' });
         }
 
-        // Period receipts
-        const dateFilter  = _buildDateFilter(period);
+        const dateFilter   = _buildDateFilter(period);
         const receiptWhere = { driverId: uuid };
         if (dateFilter) receiptWhere.createdAt = dateFilter;
 
-        const receipts    = await TripReceipt.findAll({
+        const receipts = await TripReceipt.findAll({
             where: receiptWhere,
             order: [['createdAt', 'DESC']],
             limit: 50,
         });
 
-        // Period transactions
         const txWhere = { driverId: uuid };
         if (dateFilter) txWhere.createdAt = dateFilter;
 
@@ -669,11 +622,13 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
             limit: 100,
         });
 
-        // Period aggregates
-        const periodGross      = receipts.reduce((s, r) => s + r.grossFare,       0);
-        const periodCommission = receipts.reduce((s, r) => s + r.commissionAmount, 0);
-        const periodBonuses    = receipts.reduce((s, r) => s + r.bonusTotal,       0);
-        const periodNet        = receipts.reduce((s, r) => s + r.driverNet,        0);
+        // JS reduce — avoids col() naming issues entirely
+        const periodGross      = receipts.reduce((s, r) => s + (r.grossFare        || 0), 0);
+        const periodCommission = receipts.reduce((s, r) => s + (r.commissionAmount || 0), 0);
+        const periodBonuses    = receipts.reduce((s, r) => s + (r.bonusTotal       || 0), 0);
+        const periodNet        = receipts.reduce((s, r) => s + (r.driverNet        || 0), 0);
+
+        const dp = wallet.driver.driver_profile;
 
         console.log(`✅ [ADMIN EARNINGS] Detail loaded: ${receipts.length} receipts`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -694,15 +649,14 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
                     frozenReason:    wallet.frozenReason || null,
                 },
                 driver: {
-                    uuid:       wallet.driver.uuid,
-                    name:       `${wallet.driver.firstName} ${wallet.driver.lastName}`,
-                    phone:      wallet.driver.phone,
-                    photo:      wallet.driver.profilePhotoUrl,
-                    rating:     wallet.driver.driver_profile?.ratingAvg  || 0,
-                    totalTrips: wallet.driver.driver_profile?.totalTrips || 0,
-                    vehicle:    wallet.driver.driver_profile
-                        ? `${wallet.driver.driver_profile.vehicleMake || ''} ${wallet.driver.driver_profile.vehicleModel || ''} (${wallet.driver.driver_profile.vehiclePlate || ''})`.trim()
-                        : null,
+                    uuid:     wallet.driver.uuid,
+                    name:     `${wallet.driver.first_name || ''} ${wallet.driver.last_name || ''}`.trim(),
+                    phone:    wallet.driver.phone_e164,
+                    photo:    wallet.driver.avatar_url,
+                    rating:   dp ? parseFloat(dp.rating_avg || 0) : 0,
+                    isOnline: dp ? dp.status === 'online'         : false,
+                    vehicle:  dp ? (dp.vehicle_make_model || '').trim() : null,
+                    plate:    dp ? (dp.vehicle_plate      || null)      : null,
                 },
                 period,
                 periodSummary: {
@@ -712,17 +666,17 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
                     bonuses:    periodBonuses,
                     net:        periodNet,
                 },
-                receipts:     receipts.map(r => ({
-                    id:              r.id,
-                    tripId:          r.tripId,
-                    grossFare:       r.grossFare,
-                    commissionRate:  r.commissionRate,
-                    commissionAmount:r.commissionAmount,
-                    bonusTotal:      r.bonusTotal,
-                    driverNet:       r.driverNet,
-                    paymentMethod:   r.paymentMethod,
-                    status:          r.status,
-                    createdAt:       r.createdAt,
+                receipts: receipts.map(r => ({
+                    id:               r.id,
+                    tripId:           r.tripId,
+                    grossFare:        r.grossFare,
+                    commissionRate:   r.commissionRate,
+                    commissionAmount: r.commissionAmount,
+                    bonusTotal:       r.bonusTotal,
+                    driverNet:        r.driverNet,
+                    paymentMethod:    r.paymentMethod,
+                    status:           r.status,
+                    createdAt:        r.createdAt,
                 })),
                 transactions: transactions.map(tx => ({
                     id:           tx.id,
@@ -743,8 +697,6 @@ exports.getDriverEarningsDetail = async (req, res, next) => {
 
 /**
  * GET /api/admin/earnings/overview
- * Platform-wide revenue stats — total commission earned, bonuses paid, etc.
- * Query: period (today | week | month | all — default: month)
  */
 exports.getOverview = async (req, res, next) => {
     try {
@@ -767,33 +719,41 @@ exports.getOverview = async (req, res, next) => {
             frozenWallets,
         ] = await Promise.all([
             TripReceipt.count({ where: receiptWhere }),
-            TripReceipt.sum('grossFare',       { where: receiptWhere }),
-            TripReceipt.sum('commissionAmount',{ where: receiptWhere }),
-            TripReceipt.sum('bonusTotal',      { where: receiptWhere }),
-            TripReceipt.sum('driverNet',       { where: receiptWhere }),
-            DriverWallet.count({ where: { status: 'ACTIVE'  } }),
-            DriverWallet.count({ where: { status: 'FROZEN'  } }),
+            TripReceipt.sum('grossFare',        { where: receiptWhere }),
+            TripReceipt.sum('commissionAmount', { where: receiptWhere }),
+            TripReceipt.sum('bonusTotal',       { where: receiptWhere }),
+            TripReceipt.sum('driverNet',        { where: receiptWhere }),
+            DriverWallet.count({ where: { status: 'ACTIVE' } }),
+            DriverWallet.count({ where: { status: 'FROZEN' } }),
         ]);
 
-        // Top 5 earners for the period
+        // ── Top 5 earners ─────────────────────────────────────────────
+        // TripReceipt.driverNet — camelCase (underscored:false)
+        // Account columns       — snake_case (underscored:true)
         const topEarners = await TripReceipt.findAll({
             where:      receiptWhere,
             attributes: [
                 'driverId',
-                [require('sequelize').fn('SUM', require('sequelize').col('driver_net')), 'periodNet'],
-                [require('sequelize').fn('COUNT', require('sequelize').col('id')),       'tripCount'],
+                [fn('SUM', col('TripReceipt.driverNet')), 'periodNet'],
+                [fn('COUNT', col('TripReceipt.id')),      'tripCount'],
             ],
             include: [
                 {
                     model:      Account,
                     as:         'driver',
-                    attributes: ['firstName', 'lastName', 'profilePhotoUrl'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
                     required:   true,
                 },
             ],
-            group:   ['driverId', 'driver.uuid', 'driver.first_name', 'driver.last_name', 'driver.profile_photo_url'],
-            order:   [[require('sequelize').literal('periodNet'), 'DESC']],
-            limit:   5,
+            group: [
+                'TripReceipt.driverId',
+                'driver.uuid',
+                'driver.first_name',
+                'driver.last_name',
+                'driver.avatar_url',
+            ],
+            order:    [[literal('periodNet'), 'DESC']],
+            limit:    5,
             subQuery: false,
         });
 
@@ -807,8 +767,8 @@ exports.getOverview = async (req, res, next) => {
                 revenue: {
                     totalTrips:      totalTrips      || 0,
                     totalGrossFare:  Math.round(totalGrossFare  || 0),
-                    totalCommission: Math.round(totalCommission || 0),  // WEGO revenue
-                    totalBonuses:    Math.round(totalBonuses    || 0),  // WEGO cost
+                    totalCommission: Math.round(totalCommission || 0),
+                    totalBonuses:    Math.round(totalBonuses    || 0),
                     totalDriverNet:  Math.round(totalDriverNet  || 0),
                     netWegoRevenue:  Math.round((totalCommission || 0) - (totalBonuses || 0)),
                 },
@@ -818,11 +778,11 @@ exports.getOverview = async (req, res, next) => {
                     total:  activeWallets + frozenWallets,
                 },
                 topEarners: topEarners.map(e => ({
-                    driverId:   e.driverId,
-                    name:       `${e.driver.firstName} ${e.driver.lastName}`,
-                    photo:      e.driver.profilePhotoUrl,
-                    periodNet:  Math.round(parseFloat(e.getDataValue('periodNet')  || 0)),
-                    tripCount:  parseInt(e.getDataValue('tripCount') || 0, 10),
+                    driverId:  e.driverId,
+                    name:      `${e.driver.first_name || ''} ${e.driver.last_name || ''}`.trim(),
+                    photo:     e.driver.avatar_url || null,
+                    periodNet: Math.round(parseFloat(e.getDataValue('periodNet') || 0)),
+                    tripCount: parseInt(e.getDataValue('tripCount') || 0, 10),
                 })),
             },
         });
@@ -838,9 +798,9 @@ exports.getOverview = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 function _buildDateFilter(period) {
-    const now       = new Date();
-    const today     = new Date(now); today.setUTCHours(0, 0, 0, 0);
-    const tomorrow  = new Date(today); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    const now      = new Date();
+    const today    = new Date(now); today.setUTCHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
 
     const weekStart = new Date(today);
     const day       = weekStart.getUTCDay() || 7;
