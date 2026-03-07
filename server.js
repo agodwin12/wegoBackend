@@ -113,7 +113,7 @@ const startServer = async () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 const gracefulShutdown = async (signal) => {
-    console.log(`\n\n📴 [SHUTDOWN] ${signal} received, starting graceful shutdown...`);
+    console.log(`\n\n📴 [SHUTDOWN] ${signal} received, starting  shutdown...`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     try {
