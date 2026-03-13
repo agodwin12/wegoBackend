@@ -2,7 +2,7 @@
 
 const { Server } = require('socket.io');
 const jwt        = require('jsonwebtoken');
-const { redisClient, storeUserSocket, removeUserSocket, setDriverOffline, REDIS_KEYS, redisHelpers } = require('../config/redis');
+const { redisClient, storeUserSocket, removeUserSocket, REDIS_KEYS, redisHelpers } = require('../config/redis');
 const {
     handleDriverOnline,
     handleDriverOffline,
@@ -16,7 +16,6 @@ const {
     handleTripCancel,
 } = require('./driverHandlers');
 
-// ✅ FIX: Use models/index.js (same as every other file) — no individual requires
 const { ChatMessage, Trip, Account } = require('../models');
 const { Op } = require('sequelize');
 
@@ -39,7 +38,6 @@ function setupSocketIO(server) {
         },
         pingTimeout:  60000,
         pingInterval: 25000,
-        // Allow up to 3s for client to reconnect before cleaning up
         connectTimeout: 45000,
     });
 
@@ -47,7 +45,6 @@ function setupSocketIO(server) {
 
     // ═══════════════════════════════════════════════════════════
     // AUTH MIDDLEWARE
-    // Runs BEFORE connection — socket.userId/userType set here
     // ═══════════════════════════════════════════════════════════
 
     io.use(async (socket, next) => {
@@ -86,26 +83,20 @@ function setupSocketIO(server) {
         console.log('   Type:  ', socket.userType);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        // ── ✅ FIX STEP 17: Join rooms BEFORE storing socket in Redis ──
-        // Rationale: if we stored in Redis first and a broadcast arrived
-        // in the ~1ms gap before join(), the message would be lost.
-        // Room membership is synchronous; Redis is async.
+        // Join rooms BEFORE storing socket in Redis
         socket.join(`user:${socket.userId}`);
         if (socket.userType === 'DRIVER')    socket.join(`driver:${socket.userId}`);
         if (socket.userType === 'PASSENGER') socket.join(`passenger:${socket.userId}`);
 
         console.log(`✅ [SOCKET] Rooms joined for ${socket.userId}: user, ${socket.userType.toLowerCase()}`);
 
-        // NOW store socket ID in Redis (rooms already joined, no gap)
         try {
             await storeUserSocket(socket.userId, socket.id);
             console.log(`✅ [SOCKET] Redis socket stored: ${socket.userId} → ${socket.id}`);
         } catch (redisErr) {
-            // Non-fatal — direct socket delivery still works
             console.error('⚠️  [SOCKET] Redis socket store failed:', redisErr.message);
         }
 
-        // Confirm to client
         socket.emit('connection:success', {
             socketId:  socket.id,
             userId:    socket.userId,
@@ -114,11 +105,7 @@ function setupSocketIO(server) {
             timestamp: new Date().toISOString(),
         });
 
-        // ── ✅ FIX: Replay any missed events on reconnect ──────────────
-        // If the driver was backgrounded (Android killed the process) they
-        // may have missed trip:new_request, trip:matched, etc.
-        // On reconnect we check Redis for an active trip offer or active trip
-        // and re-send the relevant event so the UI recovers automatically.
+        // Replay missed events on reconnect
         if (socket.userType === 'DRIVER') {
             await _replayMissedDriverEvents(socket).catch(e =>
                 console.warn('⚠️  [SOCKET] replayMissedDriverEvents failed (non-fatal):', e.message)
@@ -147,7 +134,7 @@ function setupSocketIO(server) {
 
             socket.on('driver:en_route', (data) => handleDriverEnRoute(socket, data, io));
             socket.on('driver:arrived',  (data) => handleDriverArrived(socket, data, io));
-            socket.on('trip:arrived',    (data) => handleDriverArrived(socket, data, io)); // alias
+            socket.on('trip:arrived',    (data) => handleDriverArrived(socket, data, io));
 
             socket.on('trip:start',    (data) => handleTripStart(socket, data, io));
             socket.on('trip:complete', (data) => handleTripComplete(socket, data, io));
@@ -160,7 +147,6 @@ function setupSocketIO(server) {
 
         if (socket.userType === 'PASSENGER') {
 
-            // ✅ FIX: Passenger trip cancel — was a TODO stub
             socket.on('trip:cancel', async (data) => {
                 try {
                     const { tripId, reason } = data || {};
@@ -172,8 +158,6 @@ function setupSocketIO(server) {
                         return socket.emit('trip:cancel:error', { message: 'tripId is required' });
                     }
 
-                    // Delegate to the shared cancel logic via HTTP-style call
-                    // (reuse the same Redis + DB logic without duplicating it here)
                     const { redisHelpers: rh, REDIS_KEYS: RK } = require('../config/redis');
                     const { redisClient: rc } = require('../config/redis');
                     const tripData = await rh.getJson(RK.ACTIVE_TRIP(tripId));
@@ -195,19 +179,17 @@ function setupSocketIO(server) {
                     const cancelPayload = { tripId, canceledBy: 'PASSENGER', reason: reason || 'Passenger canceled' };
 
                     if (tripData.status === 'SEARCHING') {
-                        // Not in DB yet — Redis only cleanup
                         await rc.del(RK.ACTIVE_TRIP(tripId));
                         await rc.del(`passenger:active_trip:${userId}`);
                         await rc.del(`trip:timeout:${tripId}`);
                     } else {
-                        // In DB — update status
-                        const { Trip: TripModel, TripEvent } = require('../models');
+                        const { Trip: TripModel } = require('../models');
                         const dbTrip = await TripModel.findByPk(tripId);
                         if (dbTrip) {
-                            dbTrip.status      = 'CANCELED';
-                            dbTrip.canceledBy  = 'PASSENGER';
+                            dbTrip.status       = 'CANCELED';
+                            dbTrip.canceledBy   = 'PASSENGER';
                             dbTrip.cancelReason = reason || null;
-                            dbTrip.canceledAt  = new Date();
+                            dbTrip.canceledAt   = new Date();
                             await dbTrip.save();
 
                             await rc.del(RK.ACTIVE_TRIP(tripId));
@@ -268,7 +250,7 @@ function setupSocketIO(server) {
                 const message = await ChatMessage.create({
                     tripId,
                     fromUserId: userId,
-                    text: text.trim(),
+                    text:       text.trim(),
                 });
 
                 const sender = await Account.findOne({
@@ -293,10 +275,7 @@ function setupSocketIO(server) {
                     createdAt: message.createdAt,
                 };
 
-                // Confirm to sender
                 socket.emit('chat:message_sent', { success: true, message: messageData });
-
-                // Deliver to recipient (user room + trip room)
                 io.to(`user:${recipientId}`).emit('chat:new_message', { tripId, message: messageData });
                 io.to(`trip:${tripId}`).emit('chat:new_message', { tripId, message: messageData });
 
@@ -308,7 +287,6 @@ function setupSocketIO(server) {
             }
         });
 
-        // ── Typing indicator ──────────────────────────────────────
         socket.on('chat:typing', async (data) => {
             try {
                 const { tripId, isTyping } = data || {};
@@ -327,7 +305,6 @@ function setupSocketIO(server) {
             }
         });
 
-        // ── Mark messages read ────────────────────────────────────
         socket.on('chat:mark_read', async (data) => {
             try {
                 const { tripId } = data || {};
@@ -346,8 +323,8 @@ function setupSocketIO(server) {
                 const recipientId = trip.driverId === userId ? trip.passengerId : trip.driverId;
                 io.to(`user:${recipientId}`).emit('chat:messages_read', {
                     tripId,
-                    readBy:  userId,
-                    readAt:  new Date(),
+                    readBy: userId,
+                    readAt: new Date(),
                 });
 
                 console.log(`✅ [CHAT] Messages marked read — trip: ${tripId}`);
@@ -357,7 +334,6 @@ function setupSocketIO(server) {
             }
         });
 
-        // ── Join / leave trip chat room ───────────────────────────
         socket.on('chat:join', async (data) => {
             try {
                 const { tripId } = data || {};
@@ -418,13 +394,21 @@ function setupSocketIO(server) {
                 console.warn('⚠️  [SOCKET] removeUserSocket failed:', e.message);
             }
 
+            // ✅ FIX: Do NOT call setDriverOffline on socket disconnect.
+            // The driver's geo index, ONLINE set and AVAILABLE set must
+            // persist through brief reconnects caused by Android backgrounding,
+            // network blips, or app lifecycle events.
+            //
+            // setDriverOffline() is only called when the driver explicitly
+            // taps "Go Offline" — that goes through handleDriverOffline()
+            // which is registered on the 'driver:offline' socket event.
+            //
+            // If we wiped the geo index here, the driver would disappear
+            // from GEORADIUS searches every time the socket briefly dropped,
+            // causing passengers to see "No drivers available" even when a
+            // driver is online and nearby.
             if (socket.userType === 'DRIVER') {
-                try {
-                    await setDriverOffline(socket.userId);
-                    console.log(`🔴 [SOCKET] Driver ${socket.userId} marked offline`);
-                } catch (error) {
-                    console.error('❌ [SOCKET] setDriverOffline error:', error.message);
-                }
+                console.log(`⚠️  [SOCKET] Driver ${socket.userId} socket disconnected — Redis state preserved for reconnect`);
             }
         });
 
@@ -438,8 +422,6 @@ function setupSocketIO(server) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // RECONNECT REPLAY — DRIVER
-// ✅ FIX: Re-emits any pending offer or active trip so a reconnecting
-//         driver's UI recovers without restarting the app.
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _replayMissedDriverEvents(socket) {
@@ -447,11 +429,9 @@ async function _replayMissedDriverEvents(socket) {
     console.log(`🔄 [SOCKET] Replaying missed events for driver ${driverId}`);
 
     try {
-        // Check if driver has a pending offer in their queue
         const pendingOffers = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
         if (Array.isArray(pendingOffers) && pendingOffers.length > 0) {
             for (const offer of pendingOffers) {
-                // Make sure the trip still exists and is still SEARCHING
                 const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(offer.tripId));
                 if (tripData && tripData.status === 'SEARCHING') {
                     socket.emit('trip:new_request', offer);
@@ -460,7 +440,6 @@ async function _replayMissedDriverEvents(socket) {
             }
         }
 
-        // Check if driver has an active trip in progress
         const activeTrip = await redisHelpers.getJson(`driver:active_trip:${driverId}`);
         if (activeTrip && activeTrip.tripId) {
             const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTrip.tripId));
@@ -482,8 +461,6 @@ async function _replayMissedDriverEvents(socket) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // RECONNECT REPLAY — PASSENGER
-// ✅ FIX: Re-emits current trip status on reconnect so passenger
-//         doesn't stay stuck on "Searching..." after background/kill.
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _replayMissedPassengerEvents(socket) {
@@ -498,7 +475,6 @@ async function _replayMissedPassengerEvents(socket) {
         if (!tripData) return;
 
         if (tripData.status === 'SEARCHING') {
-            // Still searching — remind them
             socket.emit('trip:state_sync', {
                 tripId:    activeTripRef.tripId,
                 status:    'SEARCHING',
@@ -506,7 +482,6 @@ async function _replayMissedPassengerEvents(socket) {
                 timestamp: new Date().toISOString(),
             });
         } else if (['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'].includes(tripData.status)) {
-            // Driver already assigned — re-send assignment event
             socket.emit('trip:driver_assigned', {
                 tripId:    activeTripRef.tripId,
                 driverId:  tripData.driverId,
@@ -527,7 +502,7 @@ async function _replayMissedPassengerEvents(socket) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function getIO() {
-    if (!io) throw new Error('Socket.IO not initiadlised — call setupSocketIO first');
+    if (!io) throw new Error('Socket.IO not initialised — call setupSocketIO first');
     return io;
 }
 

@@ -32,6 +32,7 @@ const serviceDisputeAdminRoutes = require('./routes/backoffice/serviceDisputeAdm
 const employeeProfileRoutes = require('./routes/backoffice/employeeProfile.routes');
 const adminEarningsRoutes = require('./routes/backoffice/adminEarnings.routes');
 const payoutRoutes = require('./routes/backoffice/payout.routes');
+const dashboardRoutes = require('./routes/backoffice/dashboard.routes');
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT ROUTES - PUBLIC (MOBILE/WEB USERS)
@@ -180,6 +181,7 @@ app.use('/api/backoffice/pricing', pricingRoutes);
 app.use('/api/backoffice/coupons', couponRoutes);
 app.use('/api/backoffice/support', supportRoutes);
 app.use('/api/backoffice/upload', uploadRoutes);
+app.use('/api/backoffice/dashboard', dashboardRoutes);
 
 // Services Marketplace Management (Admin)
 app.use('/api/services/admin', serviceAdminRoutes);

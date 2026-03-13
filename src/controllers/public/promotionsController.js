@@ -2,6 +2,7 @@
 
 const Coupon = require('../../models/Coupon');
 const { Op } = require('sequelize');
+const {CouponUsage, Trip} = require("../../models");
 
 /**
  * 🎁 GET ACTIVE PROMOTIONS FOR MOBILE USERS
@@ -276,6 +277,8 @@ exports.validateCoupon = async (req, res) => {
         });
     }
 };
+
+
 
 
 /**
