@@ -33,6 +33,16 @@ const employeeProfileRoutes = require('./routes/backoffice/employeeProfile.route
 const adminEarningsRoutes = require('./routes/backoffice/adminEarnings.routes');
 const payoutRoutes = require('./routes/backoffice/payout.routes');
 const dashboardRoutes = require('./routes/backoffice/dashboard.routes');
+const deliveryAdminRoutes = require('./routes/backoffice/deliveryAdmin.routes');
+const deliveryLiveRoutes = require('./routes/backoffice/deliveryLiveMonitor.routes');
+const deliveryDisputesRoutes = require('./routes/backoffice/deliveryDisputes.routes');
+const deliveryAnalyticsRoutes = require('./routes/backoffice/deliveryAnalytics.routes');
+const deliveryOverviewRoutes = require('./routes/backoffice/deliveryOverview.routes');
+const deliveryWalletsRoutes = require('./routes/backoffice/deliveryWallets.routes');
+const deliveryCategoriesRoutes = require('./routes/backoffice/deliveryCategories.routes');
+
+
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // IMPORT ROUTES - PUBLIC (MOBILE/WEB USERS)
@@ -54,7 +64,10 @@ const chatRoutes = require('./routes/chat.routes');
 const fareRoutes = require('./routes/fareRoutes');
 const driverPayoutRoutes = require('./routes/driverPayout.routes');
 
-
+//DELIVERY FEATURE
+const deliveryRoutes = require('./routes/delivery.routes');
+const deliveryAgentsRoutes = require('./routes/backoffice/deliveryAgents.routes');
+const deliveryHistoryRoutes = require('./routes/backoffice/deliveryHistory.routes');
 // Services Marketplace
 const serviceCategoryRoutes = require('./routes/serviceCategory.routes');
 const serviceListingRoutes = require('./routes/serviceListing.routes');
@@ -128,6 +141,19 @@ app.use('/api/users/stats', statsRoutes);
 // Ride Booking
 app.use('/api/driver', driverPublicRoutes);
 app.use('/api/request/payout/driver', driverPayoutRoutes);
+
+// DELIVERY FEATURE
+app.use('/api/deliveries', deliveryRoutes);
+app.use('/api/services/admin/delivery', deliveryAdminRoutes);
+app.use('/api/backoffice/delivery/agents', deliveryAgentsRoutes);
+app.use('/api/backoffice/delivery/live', deliveryLiveRoutes);
+app.use('/api/backoffice/delivery/history', deliveryHistoryRoutes);
+app.use('/api/backoffice/delivery/disputes', deliveryDisputesRoutes);
+app.use('/api/backoffice/delivery/analytics', deliveryAnalyticsRoutes);
+app.use('/api/backoffice/delivery/overview', deliveryOverviewRoutes);
+app.use('/api/backoffice/delivery', deliveryWalletsRoutes);
+app.use('/api/backoffice/delivery/categories', deliveryCategoriesRoutes);
+
 
 // CRITICAL: TRIPS ROUTES - Order Matters!
 app.use('/api/trips', tripsPublicViewRoutes);

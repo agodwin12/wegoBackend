@@ -2,7 +2,7 @@
 
 const locationService = require('./locationService');
 const { redisClient, REDIS_KEYS, redisHelpers } = require('../config/redis');
-const { Trip, TripEvent, Account, DriverProfile, Rating } = require('../models');
+const { Trip, TripEvent, Account, DriverProfile, Rating, Driver } = require('../models');
 const { v4: uuidv4 } = require('uuid');
 
 class TripMatchingService {
@@ -17,13 +17,11 @@ class TripMatchingService {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         // In-memory map of tripId → setTimeout handle
-        // Allows cancellation when a driver accepts
         this.activeTimeouts = new Map();
     }
 
     // ═══════════════════════════════════════════════════════════════════
     // BROADCAST TRIP TO NEARBY DRIVERS
-    // Called by tripController.createTrip immediately after saving to Redis
     // ═══════════════════════════════════════════════════════════════════
     async broadcastTripToDrivers(tripId, io) {
         try {
@@ -50,10 +48,11 @@ class TripMatchingService {
                 return { success: false, reason: 'Passenger not found' };
             }
 
-            // ✅ FIX: Real passenger rating instead of hardcoded 5.0
             const passengerRating = await this._getPassengerRating(trip.passengerId);
 
-            // ── Find nearby drivers ─────────────────────────────────────
+            // ── Find nearby drivers from Redis geospatial index ─────────
+            // NOTE: Redis returns ALL nearby online drivers regardless of mode.
+            // We filter by current_mode='ride' in the next step.
             const nearbyDrivers = await locationService.findNearbyDrivers(
                 parseFloat(trip.pickupLng),
                 parseFloat(trip.pickupLat),
@@ -67,7 +66,35 @@ class TripMatchingService {
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
-            console.log(`✅ [MATCHING] ${nearbyDrivers.length} drivers found — building offer...`);
+            console.log(`🔍 [MATCHING] ${nearbyDrivers.length} drivers found in radius — filtering by mode...`);
+
+            // ── ✅ FILTER: Only drivers in 'ride' mode ──────────────────
+            // Redis geo index contains ALL online drivers (ride + delivery).
+            // We must exclude delivery-mode drivers from ride requests.
+            const nearbyDriverIds = nearbyDrivers.map(d => d.driverId);
+
+            const rideReadyDrivers = await Driver.findAll({
+                where: {
+                    id:           nearbyDriverIds,
+                    current_mode: 'ride',   // ✅ KEY FILTER — exclude delivery mode drivers
+                },
+                attributes: ['id', 'current_mode'],
+            });
+
+            // Build a Set for O(1) lookup
+            const rideReadyIds = new Set(rideReadyDrivers.map(d => d.id));
+
+            // Keep only drivers who are in ride mode
+            const filteredDrivers = nearbyDrivers.filter(d => rideReadyIds.has(d.driverId));
+
+            console.log(`✅ [MATCHING] ${filteredDrivers.length}/${nearbyDrivers.length} drivers in ride mode`);
+
+            if (filteredDrivers.length === 0) {
+                console.log(`❌ [MATCHING] No ride-mode drivers available for trip ${tripId}`);
+                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+            }
 
             // ── Build trip offer payload ────────────────────────────────
             const baseTripOffer = {
@@ -87,7 +114,6 @@ class TripMatchingService {
                 distanceM:    trip.distanceM,
                 durationS:    trip.durationS,
                 fareEstimate: trip.fareEstimate,
-                // ✅ Both naming styles so Flutter can use either
                 fare_estimate: trip.fareEstimate,
                 distance:      trip.distanceM,
                 duration:      trip.durationS,
@@ -105,7 +131,7 @@ class TripMatchingService {
                     phone_e164: passengerAccount.phone_e164,
                     avatar:     passengerAccount.avatar_url,
                     avatar_url: passengerAccount.avatar_url,
-                    rating:     passengerRating,  // ✅ real rating
+                    rating:     passengerRating,
                 },
 
                 expiresAt: Date.now() + this.offerTtlMs,
@@ -113,10 +139,10 @@ class TripMatchingService {
                 timestamp: new Date().toISOString(),
             };
 
-            // ── Emit to each nearby driver ──────────────────────────────
+            // ── Emit to each filtered (ride-mode) driver ────────────────
             const notifiedDriverIds = [];
 
-            for (const driver of nearbyDrivers) {
+            for (const driver of filteredDrivers) {
                 const driverId = driver.driverId;
                 try {
                     const offerWithDistance = {
@@ -127,7 +153,6 @@ class TripMatchingService {
 
                     let emitted = false;
 
-                    // Try driver room (joined on login)
                     const driverRoom = `driver:${driverId}`;
                     if ((io.sockets.adapter.rooms.get(driverRoom)?.size || 0) > 0) {
                         io.to(driverRoom).emit('trip:new_request', offerWithDistance);
@@ -135,7 +160,6 @@ class TripMatchingService {
                         console.log(`   ✅ → room ${driverRoom}`);
                     }
 
-                    // Try user room (fallback)
                     const userRoom = `user:${driverId}`;
                     if ((io.sockets.adapter.rooms.get(userRoom)?.size || 0) > 0) {
                         io.to(userRoom).emit('trip:new_request', offerWithDistance);
@@ -143,7 +167,6 @@ class TripMatchingService {
                         console.log(`   ✅ → room ${userRoom}`);
                     }
 
-                    // Try direct socket ID (most reliable)
                     const socketId = await redisClient.get(REDIS_KEYS.USER_SOCKET(driverId));
                     if (socketId && io.sockets.sockets.get(socketId)) {
                         io.to(socketId).emit('trip:new_request', offerWithDistance);
@@ -163,18 +186,16 @@ class TripMatchingService {
                 }
             }
 
-            // ── Save list of notified drivers to Redis ──────────────────
-            // ✅ FIX: Unified key name — use 'drivers' AND 'notifiedDrivers' for compatibility
-            //         driver.controller.js reads tripOffersData?.drivers || tripOffersData?.notifiedDrivers
+            // ── Save notified drivers to Redis ──────────────────────────
             if (notifiedDriverIds.length > 0) {
                 const ttlSeconds = Math.ceil(this.offerTtlMs / 1000) + 60;
                 await redisHelpers.setJson(
                     REDIS_KEYS.TRIP_OFFERS(tripId),
                     {
-                        drivers:          notifiedDriverIds,  // ✅ what driver.controller reads
-                        notifiedDrivers:  notifiedDriverIds,  // ✅ backward compat for acceptTrip below
-                        broadcastAt:      Date.now(),
-                        expiresAt:        Date.now() + this.offerTtlMs,
+                        drivers:         notifiedDriverIds,
+                        notifiedDrivers: notifiedDriverIds,
+                        broadcastAt:     Date.now(),
+                        expiresAt:       Date.now() + this.offerTtlMs,
                     },
                     ttlSeconds
                 );
@@ -192,7 +213,6 @@ class TripMatchingService {
 
             this.activeTimeouts.set(tripId, timeoutId);
 
-            // Redis flag for cross-process visibility
             await redisClient.set(
                 `trip:timeout:${tripId}`,
                 '1',
@@ -201,9 +221,9 @@ class TripMatchingService {
 
             console.log(`✅ [MATCHING] Broadcast done — ${notifiedDriverIds.length} drivers notified`);
             return {
-                success:          notifiedDriverIds.length > 0,
-                driversNotified:  notifiedDriverIds.length,
-                drivers:          notifiedDriverIds,
+                success:         notifiedDriverIds.length > 0,
+                driversNotified: notifiedDriverIds.length,
+                drivers:         notifiedDriverIds,
                 ...(notifiedDriverIds.length === 0 && { reason: 'No drivers available' }),
             };
 
@@ -215,10 +235,7 @@ class TripMatchingService {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ACCEPT TRIP (called by matching service internally — NOT by driver.controller)
-    // NOTE: driver.controller.acceptTrip handles the main HTTP flow.
-    //       This method is kept for Socket.IO-driven acceptance (if wired).
-    //       ✅ FIX: Removed duplicate Trip.create — driver.controller already creates it.
+    // ACCEPT TRIP
     // ═══════════════════════════════════════════════════════════════════
     async acceptTrip(tripId, driverId, io) {
         const lockKey = REDIS_KEYS.TRIP_LOCK ? REDIS_KEYS.TRIP_LOCK(tripId) : `trip:lock:${tripId}`;
@@ -227,7 +244,6 @@ class TripMatchingService {
         try {
             console.log(`\n🤝 [MATCHING] acceptTrip(${tripId}, ${driverId})`);
 
-            // Acquire lock
             const lockAcquired = await redisClient.set(lockKey, lockValue, 'EX', 10, 'NX');
             if (!lockAcquired) {
                 console.log(`⚠️  [MATCHING] Trip ${tripId} locked by another process`);
@@ -243,6 +259,18 @@ class TripMatchingService {
                     return { success: false, reason: 'Trip no longer available' };
                 }
 
+                // ── ✅ VERIFY driver is still in ride mode at accept time ──
+                // Edge case: driver could switch mode between offer and accept
+                const driver = await Driver.findOne({
+                    where: { id: driverId },
+                    attributes: ['id', 'current_mode', 'status'],
+                });
+
+                if (!driver || driver.current_mode !== 'ride') {
+                    console.log(`⚠️  [MATCHING] Driver ${driverId} is no longer in ride mode — rejecting accept`);
+                    return { success: false, reason: 'Driver switched to delivery mode' };
+                }
+
                 // ── Clear timeout ───────────────────────────────────────
                 const timeoutId = this.activeTimeouts.get(tripId);
                 if (timeoutId) {
@@ -251,15 +279,13 @@ class TripMatchingService {
                     console.log(`✅ [MATCHING] JS timeout cleared for trip ${tripId}`);
                 }
                 await redisClient.del(`trip:timeout:${tripId}`);
-                console.log(`✅ [MATCHING] Redis timeout flag cleared`);
 
-                // ── Update Redis trip (DB write handled by driver.controller) ──
-                tripData.driverId = driverId;
-                tripData.status   = 'MATCHED';
+                // ── Update Redis trip ───────────────────────────────────
+                tripData.driverId  = driverId;
+                tripData.status    = 'MATCHED';
                 tripData.matchedAt = new Date().toISOString();
                 await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, 7200);
 
-                // Update driver status
                 await locationService.updateDriverStatus(driverId, 'busy', tripId);
 
                 // ── Notify other drivers their offer expired ────────────
@@ -280,13 +306,13 @@ class TripMatchingService {
 
                 await redisClient.del(offersKey);
 
-                // ── Fetch driver details for passenger notification ─────
+                // ── Fetch driver details ────────────────────────────────
                 const driverAccount = await Account.findOne({
-                    where: { uuid: driverId },
+                    where:      { uuid: driverId },
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
                 });
                 const driverProfile = await DriverProfile.findOne({
-                    where: { account_id: driverId },
+                    where:      { account_id: driverId },
                     attributes: [
                         'rating_avg', 'rating_count', 'vehicle_type', 'vehicle_plate',
                         'vehicle_make_model', 'vehicle_color', 'vehicle_year', 'vehicle_photo_url',
@@ -303,12 +329,12 @@ class TripMatchingService {
                     avatar:     driverAccount.avatar_url || driverProfile?.avatar_url,
                     rating:     driverProfile?.rating_avg || null,
                     vehicle: {
-                        type:      driverProfile?.vehicle_type      || null,
-                        plate:     driverProfile?.vehicle_plate     || null,
+                        type:      driverProfile?.vehicle_type       || null,
+                        plate:     driverProfile?.vehicle_plate      || null,
                         makeModel: driverProfile?.vehicle_make_model || null,
-                        color:     driverProfile?.vehicle_color     || null,
-                        year:      driverProfile?.vehicle_year      || null,
-                        photo:     driverProfile?.vehicle_photo_url || null,
+                        color:     driverProfile?.vehicle_color      || null,
+                        year:      driverProfile?.vehicle_year       || null,
+                        photo:     driverProfile?.vehicle_photo_url  || null,
                     },
                 } : { uuid: driverId, name: 'Driver' };
 
@@ -328,7 +354,7 @@ class TripMatchingService {
                     lastName:  passengerAccount.last_name,
                     phone:     passengerAccount.phone_e164,
                     avatar:    passengerAccount.avatar_url,
-                    rating:    passengerRating,  // ✅ real rating
+                    rating:    passengerRating,
                 } : { uuid: tripData.passengerId, name: 'Passenger' };
 
                 // ── Notify passenger ────────────────────────────────────
@@ -364,7 +390,6 @@ class TripMatchingService {
                 };
 
             } finally {
-                // Always release lock
                 const cur = await redisClient.get(lockKey);
                 if (cur === lockValue) await redisClient.del(lockKey);
             }
@@ -377,13 +402,11 @@ class TripMatchingService {
 
     // ═══════════════════════════════════════════════════════════════════
     // TRIP TIMEOUT HANDLER
-    // Fires when offerTtlMs elapses and no driver has accepted
     // ═══════════════════════════════════════════════════════════════════
     async _checkTripTimeout(tripId, io) {
         try {
             console.log(`⏰ [MATCHING] _checkTripTimeout(${tripId})`);
 
-            // If the timeout key was deleted, a driver accepted — don't do anything
             const timeoutExists = await redisClient.exists(`trip:timeout:${tripId}`);
             if (!timeoutExists) {
                 console.log(`✅ [MATCHING] Timeout key gone — trip ${tripId} was accepted`);
@@ -404,7 +427,6 @@ class TripMatchingService {
                 return;
             }
 
-            // No driver accepted — clean up and notify passenger
             console.log(`⏱️  [MATCHING] Trip ${tripId} timed out with no driver`);
 
             await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
@@ -414,7 +436,7 @@ class TripMatchingService {
 
             const noDriverPayload = {
                 tripId,
-                message: 'No drivers accepted your trip. Please try again.',
+                message:   'No drivers accepted your trip. Please try again.',
                 timestamp: new Date().toISOString(),
             };
 
@@ -436,7 +458,6 @@ class TripMatchingService {
 
     // ═══════════════════════════════════════════════════════════════════
     // HELPER: Real passenger rating from DB
-    // ✅ FIX: Replaces hardcoded 5.0 throughout the service
     // ═══════════════════════════════════════════════════════════════════
     async _getPassengerRating(passengerId) {
         try {
@@ -448,7 +469,7 @@ class TripMatchingService {
             const avg = rows.reduce((s, r) => s + r.rating, 0) / rows.length;
             return parseFloat(avg.toFixed(1));
         } catch {
-            return null; // Non-fatal — driver still sees the offer without passenger rating
+            return null;
         }
     }
 }

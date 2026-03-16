@@ -12,9 +12,19 @@ const { upload } = require('../middleware/upload');
 // ═══════════════════════════════════════════════════════════════════════
 
 // @route   GET /api/services/categories
-// @desc    Get all categories (with optional filters)
+// @desc    Get all categories (grouped with subcategories)
 // @access  Public
 router.get('/', serviceCategoryController.getAllCategories);
+
+// @route   GET /api/services/categories/parents
+// @desc    Get parent categories only
+// @access  Public
+router.get('/parents', serviceCategoryController.getParentCategories);
+
+// @route   GET /api/services/categories/:parentId/subcategories
+// @desc    Get subcategories by parent ID
+// @access  Public
+router.get('/:parentId/subcategories', serviceCategoryController.getSubcategories);
 
 // @route   GET /api/services/categories/:id
 // @desc    Get category by ID
@@ -26,7 +36,7 @@ router.get('/:id', serviceCategoryController.getCategoryById);
 // ═══════════════════════════════════════════════════════════════════════
 
 // @route   POST /api/services/categories
-// @desc    Create new category
+// @desc    Create new category or subcategory
 // @access  Employee (admin, super_admin)
 router.post(
     '/',
@@ -47,18 +57,8 @@ router.put(
     serviceCategoryController.updateCategory
 );
 
-// @route   DELETE /api/services/categories/:id
-// @desc    Delete category
-// @access  Employee (super_admin only)
-router.delete(
-    '/:id',
-    authenticateEmployee,
-    requireEmployeeRole('super_admin'),
-    serviceCategoryController.deleteCategory
-);
-
 // @route   PATCH /api/services/categories/:id/toggle-status
-// @desc    Toggle category active status
+// @desc    Toggle category active/inactive status
 // @access  Employee (admin, super_admin)
 router.patch(
     '/:id/toggle-status',
@@ -67,12 +67,14 @@ router.patch(
     serviceCategoryController.toggleStatus
 );
 
-
-router.post(
-    '/',
+// @route   DELETE /api/services/categories/:id
+// @desc    Delete category (soft delete)
+// @access  Employee (super_admin only)
+router.delete(
+    '/:id',
     authenticateEmployee,
-    requireEmployeeRole('super_admin', 'admin'),
-    upload.none(), // Subcategories don't have icons, just parse FormData
-    serviceCategoryController.createCategory
+    requireEmployeeRole('super_admin'),
+    serviceCategoryController.deleteCategory
 );
+
 module.exports = router;

@@ -688,43 +688,18 @@ exports.deleteCategory = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET ALL CATEGORIES FOR ADMIN (includes inactive, with pagination)
-// GET /api/admin/services/categories
+// GET ALL CATEGORIES (Public - with pagination)
+// GET /api/services/categories
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.getAllCategoriesAdmin = async (req, res) => {
+exports.getAllCategories = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const offset = (page - 1) * limit;
-        const { status, search } = req.query;
-
-        // Build where clause
-        const where = {};
-        if (status) {
-            where.status = status;
-        }
-        if (search) {
-            where[Op.or] = [
-                { name_en: { [Op.like]: `%${search}%` } },
-                { description_en: { [Op.like]: `%${search}%` } },
-            ];
-        }
 
         const { count, rows: categories } = await ServiceCategory.findAndCountAll({
-            where,
-            include: [
-                {
-                    model: Employee,
-                    as: 'creator',
-                    attributes: ['id', 'first_name', 'last_name', 'email'],
-                },
-                {
-                    model: Employee,
-                    as: 'updater',
-                    attributes: ['id', 'first_name', 'last_name', 'email'],
-                },
-            ],
+            where: { status: 'active' },
             limit,
             offset,
             order: [
@@ -734,14 +709,80 @@ exports.getAllCategoriesAdmin = async (req, res) => {
             ],
         });
 
+        // ─────────────────────────────────────────────────────────────────
+        // GET ACTIVE LISTING COUNTS IN ONE QUERY (not hardcoded 0)
+        // ─────────────────────────────────────────────────────────────────
+
+        const categoryIds = categories.map(cat => cat.id);
+
+        const listingCounts = await ServiceListing.findAll({
+            where: {
+                category_id: categoryIds,
+                status: 'active',
+            },
+            attributes: [
+                'category_id',
+                [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+            ],
+            group: ['category_id'],
+            raw: true,
+        });
+
+        // Build a map for quick lookup: { categoryId -> count }
+        const countMap = {};
+        listingCounts.forEach(row => {
+            countMap[row.category_id] = parseInt(row.count);
+        });
+
+        // ─────────────────────────────────────────────────────────────────
+        // GROUP INTO PARENT + SUBCATEGORIES
+        // ─────────────────────────────────────────────────────────────────
+
+        const parentCategories = categories.filter(cat => cat.parent_id === null);
+
+        const result = parentCategories.map(parent => {
+            const subcategories = categories.filter(cat => cat.parent_id === parent.id);
+
+            // Parent count = its own listings + all subcategory listings
+            const subcategoryIds = subcategories.map(s => s.id);
+            const parentListingCount = (countMap[parent.id] || 0) +
+                subcategoryIds.reduce((sum, subId) => sum + (countMap[subId] || 0), 0);
+
+            return {
+                id: parent.id,
+                name_en: parent.name_en,
+                name_fr: parent.name_fr,
+                description_en: parent.description_en,
+                description_fr: parent.description_fr,
+                icon_url: parent.icon_url,
+                display_order: parent.display_order,
+                is_active: parent.status === 'active',
+                active_listings_count: parentListingCount,
+                created_at: parent.created_at,
+                updated_at: parent.updated_at,
+                subcategories: subcategories.map(sub => ({
+                    id: sub.id,
+                    name_en: sub.name_en,
+                    name_fr: sub.name_fr,
+                    description_en: sub.description_en,
+                    description_fr: sub.description_fr,
+                    icon_url: sub.icon_url,
+                    parent_id: sub.parent_id,
+                    display_order: sub.display_order,
+                    is_active: sub.status === 'active',
+                    active_listings_count: countMap[sub.id] || 0,
+                    created_at: sub.created_at,
+                    updated_at: sub.updated_at,
+                }))
+            };
+        });
+
         const totalPages = Math.ceil(count / limit);
 
         res.status(200).json({
             success: true,
-            message: 'All categories retrieved successfully',
-            data: {
-                categories: categories  // ✅ FIXED: Wrapped in object
-            },
+            message: 'Categories retrieved successfully',
+            data: { categories: result },
             pagination: {
                 total: count,
                 page,
@@ -753,7 +794,7 @@ exports.getAllCategoriesAdmin = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [SERVICE_CATEGORY_CONTROLLER] Error in getAllCategoriesAdmin:', error);
+        console.error('❌ [SERVICE_CATEGORY_CONTROLLER] Error in getAllCategories:', error);
         res.status(500).json({
             success: false,
             message: 'Unable to retrieve categories. Please try again later.',
@@ -762,8 +803,224 @@ exports.getAllCategoriesAdmin = async (req, res) => {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// GET PARENT CATEGORIES ONLY (with pagination)
+// GET /api/services/categories/parents
+// ═══════════════════════════════════════════════════════════════════════
 
-// Add this function to backend/src/controllers/serviceCategory.controller.js
+exports.getParentCategories = async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const offset = (page - 1) * limit;
+
+        const { count, rows: categories } = await ServiceCategory.findAndCountAll({
+            where: {
+                parent_id: null,
+                status: 'active',
+            },
+            limit,
+            offset,
+            order: [['display_order', 'ASC'], ['name_en', 'ASC']],
+        });
+
+        // ─────────────────────────────────────────────────────────────────
+        // GET ACTIVE LISTING COUNTS FOR THESE PARENT CATEGORIES
+        // Includes listings in their subcategories too
+        // ─────────────────────────────────────────────────────────────────
+
+        const parentIds = categories.map(cat => cat.id);
+
+        // Get all subcategory IDs for these parents
+        const subcategories = await ServiceCategory.findAll({
+            where: {
+                parent_id: parentIds,
+                status: 'active',
+            },
+            attributes: ['id', 'parent_id'],
+            raw: true,
+        });
+
+        // All category IDs to count listings for
+        const allCategoryIds = [
+            ...parentIds,
+            ...subcategories.map(s => s.id),
+        ];
+
+        const listingCounts = await ServiceListing.findAll({
+            where: {
+                category_id: allCategoryIds,
+                status: 'active',
+            },
+            attributes: [
+                'category_id',
+                [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+            ],
+            group: ['category_id'],
+            raw: true,
+        });
+
+        // Build count map
+        const countMap = {};
+        listingCounts.forEach(row => {
+            countMap[row.category_id] = parseInt(row.count);
+        });
+
+        // Build subcategory map: parentId -> [subIds]
+        const subMap = {};
+        subcategories.forEach(sub => {
+            if (!subMap[sub.parent_id]) subMap[sub.parent_id] = [];
+            subMap[sub.parent_id].push(sub.id);
+        });
+
+        const result = categories.map(cat => {
+            const subIds = subMap[cat.id] || [];
+            const totalCount = (countMap[cat.id] || 0) +
+                subIds.reduce((sum, subId) => sum + (countMap[subId] || 0), 0);
+
+            return {
+                id: cat.id,
+                name_en: cat.name_en,
+                name_fr: cat.name_fr,
+                description_en: cat.description_en,
+                description_fr: cat.description_fr,
+                icon_url: cat.icon_url,
+                parent_id: null,
+                display_order: cat.display_order,
+                is_active: cat.status === 'active',
+                active_listings_count: totalCount,
+                created_at: cat.created_at,
+                updated_at: cat.updated_at,
+            };
+        });
+
+        const totalPages = Math.ceil(count / limit);
+
+        res.status(200).json({
+            success: true,
+            message: 'Parent categories retrieved successfully',
+            data: { categories: result },
+            pagination: {
+                total: count,
+                page,
+                limit,
+                totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1,
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [SERVICE_CATEGORY_CONTROLLER] Error in getParentCategories:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Unable to retrieve parent categories. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET SUBCATEGORIES BY PARENT ID (with pagination)
+// GET /api/services/categories/:parentId/subcategories
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.getSubcategories = async (req, res) => {
+    try {
+        const { parentId } = req.params;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const offset = (page - 1) * limit;
+
+        if (!parentId || isNaN(parentId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid parent category ID. Please provide a valid numeric ID.',
+            });
+        }
+
+        const parentCategory = await ServiceCategory.findByPk(parentId);
+        if (!parentCategory) {
+            return res.status(404).json({
+                success: false,
+                message: 'Parent category not found.',
+            });
+        }
+
+        const { count, rows: categories } = await ServiceCategory.findAndCountAll({
+            where: {
+                parent_id: parentId,
+                status: 'active',
+            },
+            limit,
+            offset,
+            order: [['display_order', 'ASC'], ['name_en', 'ASC']],
+        });
+
+        // ─────────────────────────────────────────────────────────────────
+        // GET ACTIVE LISTING COUNTS FOR THESE SUBCATEGORIES
+        // ─────────────────────────────────────────────────────────────────
+
+        const subcategoryIds = categories.map(cat => cat.id);
+
+        const listingCounts = await ServiceListing.findAll({
+            where: {
+                category_id: subcategoryIds,
+                status: 'active',
+            },
+            attributes: [
+                'category_id',
+                [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+            ],
+            group: ['category_id'],
+            raw: true,
+        });
+
+        const countMap = {};
+        listingCounts.forEach(row => {
+            countMap[row.category_id] = parseInt(row.count);
+        });
+
+        const result = categories.map(cat => ({
+            id: cat.id,
+            name_en: cat.name_en,
+            name_fr: cat.name_fr,
+            description_en: cat.description_en,
+            description_fr: cat.description_fr,
+            icon_url: cat.icon_url,
+            parent_id: cat.parent_id,
+            display_order: cat.display_order,
+            is_active: cat.status === 'active',
+            active_listings_count: countMap[cat.id] || 0,
+            created_at: cat.created_at,
+            updated_at: cat.updated_at,
+        }));
+
+        const totalPages = Math.ceil(count / limit);
+
+        res.status(200).json({
+            success: true,
+            message: 'Subcategories retrieved successfully',
+            data: { categories: result },
+            pagination: {
+                total: count,
+                page,
+                limit,
+                totalPages,
+                hasNext: page < totalPages,
+                hasPrev: page > 1,
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ [SERVICE_CATEGORY_CONTROLLER] Error in getSubcategories:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Unable to retrieve subcategories. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        });
+    }
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 // TOGGLE CATEGORY STATUS (Admin/Employee only)
@@ -777,7 +1034,23 @@ exports.toggleStatus = async (req, res) => {
 
         console.log('🔄 [SERVICE_CATEGORY] Toggling category status...');
         console.log('   Category ID:', id);
-        console.log('   New Status:', is_active);
+        console.log('   New is_active value:', is_active);
+
+        // Validate ID
+        if (!id || isNaN(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid category ID. Please provide a valid numeric ID.',
+            });
+        }
+
+        // Validate is_active field
+        if (is_active === undefined || is_active === null) {
+            return res.status(400).json({
+                success: false,
+                message: 'is_active field is required. Please provide true or false.',
+            });
+        }
 
         // Find category
         const category = await ServiceCategory.findByPk(id);
@@ -789,18 +1062,26 @@ exports.toggleStatus = async (req, res) => {
             });
         }
 
-        // Update active status
-        category.active = is_active;
-        await category.save();
+        // ✅ FIX: Use status ENUM ('active'/'inactive') not a boolean field
+        const newStatus = is_active === true || is_active === 'true' ? 'active' : 'inactive';
+
+        await category.update({ status: newStatus });
 
         console.log('✅ [SERVICE_CATEGORY] Status toggled successfully');
         console.log('   Category:', category.name_en);
-        console.log('   New Status:', category.active);
+        console.log('   New Status:', category.status);
 
         res.status(200).json({
             success: true,
-            message: 'Category status updated successfully',
-            data: category,
+            message: `Category ${newStatus === 'active' ? 'activated' : 'deactivated'} successfully`,
+            data: {
+                id: category.id,
+                name_en: category.name_en,
+                name_fr: category.name_fr,
+                status: category.status,
+                is_active: category.status === 'active',
+                updated_at: category.updated_at,
+            },
         });
 
     } catch (error) {

@@ -21,7 +21,7 @@ Account.init(
             primaryKey: true,
         },
         user_type: {
-            type: DataTypes.ENUM('PASSENGER', 'DRIVER', 'PARTNER', 'ADMIN', 'PARTNER'),
+            type: DataTypes.ENUM('PASSENGER', 'DRIVER', 'PARTNER', 'ADMIN', 'DELIVERY_AGENT'),
             allowNull: false,
         },
         email: {
