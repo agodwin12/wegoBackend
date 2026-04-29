@@ -2,7 +2,7 @@
 const { Op } = require('sequelize');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
-const { Account, PassengerProfile, DriverProfile, RefreshToken } = require('../models');
+const { Account, PassengerProfile, DriverProfile, RefreshToken, Driver, DeliveryWallet } = require('../models');
 const { redis } = require('../config/redis'); // Using YOUR existing Redis
 const { generateAccessToken, generateRefreshToken } = require('../utils/jwt');
 
@@ -45,7 +45,20 @@ async function findAccountByIdentifier(identifier) {
                     model: DriverProfile,
                     as: 'driver_profile',
                     required: false,
-                }
+                },
+                {
+                    model: Driver,
+                    as: 'driver_record',
+                    foreignKey: 'userId',
+                    required: false,
+                    include: [
+                        {
+                            model: DeliveryWallet,
+                            as: 'delivery_wallet',
+                            required: false,
+                        },
+                    ],
+                },
             ]
         });
 
@@ -72,6 +85,16 @@ async function findAccountByIdentifier(identifier) {
             console.log('🚗 [DRIVER PROFILE] Loaded');
             console.log('   License:', account.driver_profile.license_number);
             console.log('   Verification:', account.driver_profile.verification_state);
+        }
+
+        if (account.user_type === 'DELIVERY_AGENT' && account.driver_record) {
+            console.log('📦 [DELIVERY AGENT RECORD] Loaded');
+            console.log('   Driver ID:', account.driver_record.id);
+            console.log('   Mode:', account.driver_record.current_mode);
+            console.log('   Status:', account.driver_record.status);
+            if (account.driver_record.delivery_wallet) {
+                console.log('   Wallet Balance:', account.driver_record.delivery_wallet.balance);
+            }
         }
 
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -215,6 +238,35 @@ function canAccountLogin(account) {
         };
     }
 
+    // Delivery agents are created by backoffice — they skip OTP verification entirely.
+    // Their phone_verified is set to true at creation time, but we gate this explicitly
+    // here so the logic is clear and not accidentally bypassed for other user types.
+    if (account.user_type === 'DELIVERY_AGENT') {
+        // Wallet freeze check — a frozen wallet means the agent can't work
+        if (account.driver_record && account.driver_record.delivery_wallet) {
+            const walletStatus = account.driver_record.delivery_wallet.status;
+            if (walletStatus === 'frozen') {
+                console.log('❌ [LOGIN CHECK] Delivery agent wallet is FROZEN');
+                return {
+                    allowed: false,
+                    reason: 'WALLET_FROZEN',
+                    message: 'Your delivery wallet has been frozen. Please contact support.',
+                };
+            }
+            if (walletStatus === 'suspended') {
+                console.log('❌ [LOGIN CHECK] Delivery agent wallet is SUSPENDED');
+                return {
+                    allowed: false,
+                    reason: 'WALLET_SUSPENDED',
+                    message: 'Your delivery wallet has been suspended. Please contact support.',
+                };
+            }
+        }
+
+        console.log('✅ [LOGIN CHECK] Delivery agent can login');
+        return { allowed: true, reason: null, message: null };
+    }
+
     // Check phone verification (CRITICAL for OTP-based system)
     if (!account.phone_verified) {
         console.log('⚠️ [LOGIN CHECK] Phone not verified');
@@ -345,7 +397,20 @@ async function refreshAccessToken(refreshToken) {
                         model: DriverProfile,
                         as: 'driver_profile',
                         required: false
-                    }
+                    },
+                    {
+                        model: Driver,
+                        as: 'driver_record',
+                        foreignKey: 'userId',
+                        required: false,
+                        include: [
+                            {
+                                model: DeliveryWallet,
+                                as: 'delivery_wallet',
+                                required: false,
+                            },
+                        ],
+                    },
                 ]
             }]
         });
@@ -360,6 +425,19 @@ async function refreshAccessToken(refreshToken) {
         if (!account || account.status !== 'ACTIVE') {
             console.log('❌ [REFRESH] Account is not active');
             return { success: false, error: 'ACCOUNT_INACTIVE' };
+        }
+
+        // For delivery agents, also check wallet status
+        if (
+            account.user_type === 'DELIVERY_AGENT' &&
+            account.driver_record &&
+            account.driver_record.delivery_wallet
+        ) {
+            const ws = account.driver_record.delivery_wallet.status;
+            if (ws === 'frozen' || ws === 'suspended') {
+                console.log('❌ [REFRESH] Delivery agent wallet is', ws.toUpperCase());
+                return { success: false, error: 'WALLET_FROZEN' };
+            }
         }
 
         // Update last_used_at

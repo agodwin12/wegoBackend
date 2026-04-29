@@ -33,6 +33,16 @@ module.exports = (sequelize) => {
                 as:         'payoutRequests',
             });
 
+            // ⚠️  THIS is the ONE place this association is defined.
+            //     Never repeat DeliveryWallet.hasMany(DeliveryWalletTopUp) in
+            //     models/index.js — duplicate associations with the same alias
+            //     cause the "Account.hasOne called with something that's not a
+            //     subclass of Sequelize.Model" startup crash.
+            DeliveryWallet.hasMany(models.DeliveryWalletTopUp, {
+                foreignKey: 'wallet_id',
+                as:         'topUps',
+            });
+
             if (models.Employee) {
                 DeliveryWallet.belongsTo(models.Employee, {
                     foreignKey: 'frozen_by',

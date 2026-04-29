@@ -112,6 +112,136 @@ async function buildFullDriverInfo(driverUuid, driverLocation = null) {
 // DRIVER STATUS CONTROLLERS
 // ═══════════════════════════════════════════════════════════════════════
 
+exports.setStatus = async (req, res, next) => {
+    try {
+        const { status, lat, lng, heading } = req.body;
+
+        if (!status || !['online', 'offline'].includes(status)) {
+            return res.status(400).json({
+                error:   'Validation error',
+                message: 'status must be "online" or "offline"',
+            });
+        }
+
+        const driverUuid = req.user.uuid;
+        console.log(`\n${ status === 'online' ? '🟢' : '🔴' } [DRIVER] setStatus → ${status} | User: ${driverUuid}`);
+
+        if (status === 'online') {
+            // Location is required to go online
+            if (!lat || !lng) {
+                return res.status(400).json({
+                    error:   'Validation error',
+                    message: 'lat and lng are required to go online',
+                });
+            }
+
+            const parsedLat = parseFloat(lat);
+            const parsedLng = parseFloat(lng);
+
+            if (parsedLat < -90 || parsedLat > 90 || parsedLng < -180 || parsedLng > 180) {
+                return res.status(400).json({
+                    error:   'Validation error',
+                    message: 'Invalid coordinates',
+                });
+            }
+
+            // Update last known position on Account record
+            const account = await Account.findByPk(driverUuid);
+            if (account) {
+                account.lastLatitude  = parsedLat;
+                account.lastLongitude = parsedLng;
+                await account.save();
+            }
+
+            // Update Driver table status to 'online'
+            const { Driver } = require('../models');
+            await Driver.update(
+                { status: 'online', lat: parsedLat, lng: parsedLng },
+                { where: { userId: driverUuid } }
+            );
+
+            // Register in Redis geo index (used by delivery + ride matching)
+            await redisClient.geoadd(
+                REDIS_KEYS.DRIVERS_GEO,
+                parsedLng, parsedLat,
+                driverUuid.toString()
+            );
+            await redisClient.sadd(REDIS_KEYS.ONLINE_DRIVERS,    driverUuid.toString());
+            await redisClient.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, driverUuid.toString());
+
+            // Cache driver location for socket service
+            await redisHelpers.setJson(`driver:location:${driverUuid}`, {
+                driverId:    driverUuid,
+                lat:         parsedLat,
+                lng:         parsedLng,
+                heading:     heading || 0,
+                lastUpdated: new Date().toISOString(),
+            }, 3600);
+
+            // Cache driver metadata
+            await redisClient.setex(
+                REDIS_KEYS.DRIVER_META(driverUuid),
+                3600,
+                JSON.stringify({
+                    driverId:    driverUuid,
+                    status:      'ONLINE',
+                    isAvailable: true,
+                    firstName:   req.user.first_name,
+                    lastName:    req.user.last_name,
+                    phone:       req.user.phone_e164,
+                    userType:    req.user.user_type,
+                    lastUpdated: new Date().toISOString(),
+                })
+            );
+
+            console.log('✅ [DRIVER] setStatus → online | Redis updated');
+
+            return res.status(200).json({
+                success:   true,
+                message:   'You are now online',
+                data: {
+                    driver_id: driverUuid,
+                    is_online: true,
+                    location:  { lat: parsedLat, lng: parsedLng, heading: heading || 0 },
+                    timestamp: new Date().toISOString(),
+                },
+            });
+
+        } else {
+            // Going offline — clean Redis, update Driver table
+            const { Driver } = require('../models');
+            await Driver.update(
+                { status: 'offline' },
+                { where: { userId: driverUuid } }
+            );
+
+            await redisClient.zrem(REDIS_KEYS.DRIVERS_GEO,       driverUuid.toString());
+            await redisClient.srem(REDIS_KEYS.ONLINE_DRIVERS,     driverUuid.toString());
+            await redisClient.srem(REDIS_KEYS.AVAILABLE_DRIVERS,  driverUuid.toString());
+            await redisClient.del(REDIS_KEYS.DRIVER_META(driverUuid));
+            await redisClient.del(`driver:location:${driverUuid}`);
+
+            console.log('✅ [DRIVER] setStatus → offline | Redis cleaned');
+
+            return res.status(200).json({
+                success:   true,
+                message:   'You are now offline',
+                data: {
+                    driver_id: driverUuid,
+                    is_online: false,
+                    timestamp: new Date().toISOString(),
+                },
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ [DRIVER] setStatus error:', error.message);
+        next(error);
+    }
+};
+//
+
+
 exports.reportNoShow = async (req, res, next) => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

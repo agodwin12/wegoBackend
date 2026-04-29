@@ -21,6 +21,16 @@ const driverController = require('../controllers/driver.controller');
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
+ * @route   PUT /api/driver/status
+ * @desc    Toggle online/offline — accepts { status: 'online' | 'offline' }
+ *          Used by DeliveryAgentDashboard and DriverDashboard Flutter screens.
+ *          Works for both DRIVER and DELIVERY_AGENT user types.
+ * @access  Private (DRIVER or DELIVERY_AGENT)
+ * @body    { status: 'online' | 'offline', lat?: number, lng?: number }
+ */
+router.put('/status', authenticate, requireDriver, driverController.setStatus);
+
+/**
  * @route   POST /api/driver/online
  * @desc    Set driver status to ONLINE (available for trips)
  * @access  Private (Active Drivers only)

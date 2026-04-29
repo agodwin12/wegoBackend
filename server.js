@@ -26,6 +26,9 @@ const server = http.createServer(app);
 
 const setupSocketIO = require('./src/sockets');
 const io = setupSocketIO(server);
+const { setIO } = require('./src/sockets/exports');
+setIO(io);
+app.set('io', io);
 
 // Make io available in request object for routes
 app.use((req, res, next) => {

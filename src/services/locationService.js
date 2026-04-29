@@ -206,10 +206,12 @@ class LocationService {
             console.log(`🔄 [LOCATION] Updating driver ${driverId} status to: ${status}`);
 
             const metaKey = REDIS_KEYS.DRIVER_META(driverId);
-            const metadata = await redisHelpers.getJson(metaKey);
+            let metadata = await redisHelpers.getJson(metaKey);
 
             if (!metadata) {
-                throw new Error('Driver metadata not found. Driver might be offline.');
+                // Metadata expired or driver went offline — rebuild minimal record
+                console.warn(`⚠️ [LOCATION] No metadata for driver ${driverId}, rebuilding...`);
+                metadata = { heading: 0, speed: 0, lat: null, lng: null };
             }
 
             metadata.status = status;

@@ -62,6 +62,10 @@ async function getWallet(driverId) {
  * Post earnings for a completed delivery.
  * Handles both digital (MTN/Orange) and cash payment flows.
  *
+ * Retries up to MAX_RETRIES times on optimistic lock conflict.
+ * This prevents the race condition between confirmCommission and
+ * postDeliveryEarnings both updating the wallet row simultaneously.
+ *
  * Digital flow:
  *   1. Credit driver_payout → balance
  *   2. Log delivery_earning transaction
@@ -77,6 +81,31 @@ async function getWallet(driverId) {
  * @param {Transaction} [options.transaction] - Sequelize transaction to join
  */
 async function postDeliveryEarnings(deliveryId, options = {}) {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 200;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            return await _postDeliveryEarningsOnce(deliveryId, options);
+        } catch (error) {
+            const isConflict =
+                error.message?.includes('Record has changed since last read') ||
+                error.name === 'OptimisticLockError' ||
+                error.message?.includes('optimistic lock');
+
+            if (isConflict && attempt < MAX_RETRIES) {
+                console.warn(`⚠️ [DELIVERY EARNINGS] Optimistic lock conflict on attempt ${attempt}/${MAX_RETRIES} for delivery ${deliveryId} — retrying in ${RETRY_DELAY_MS * attempt}ms`);
+                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * attempt));
+                continue;
+            }
+
+            // Not a lock conflict, or out of retries — rethrow
+            throw error;
+        }
+    }
+}
+
+async function _postDeliveryEarningsOnce(deliveryId, options = {}) {
     const t = options.transaction || await sequelize.transaction();
     const ownTransaction = !options.transaction;
 
@@ -91,11 +120,11 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
             throw new Error(`Delivery ${deliveryId} has no driver assigned`);
         }
 
-        const driverPayout      = parseFloat(delivery.driver_payout      || 0);
-        const commissionAmount  = parseFloat(delivery.commission_amount   || 0);
-        const totalPrice        = parseFloat(delivery.total_price         || 0);
-        const paymentMethod     = delivery.payment_method;
-        const isCash            = paymentMethod === 'cash';
+        const driverPayout     = parseFloat(delivery.driver_payout     || 0);
+        const commissionAmount = parseFloat(delivery.commission_amount  || 0);
+        const totalPrice       = parseFloat(delivery.total_price        || 0);
+        const paymentMethod    = delivery.payment_method;
+        const isCash           = paymentMethod === 'cash';
 
         // ── Get or create wallet ──────────────────────────────────────────────
         const [wallet] = await DeliveryWallet.findOrCreate({
@@ -118,15 +147,14 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
             console.warn(`⚠️ [DELIVERY EARNINGS] Wallet ${wallet.id} is ${wallet.status} — earnings still recorded but flagged`);
         }
 
+        // ── Re-fetch wallet with fresh data to avoid stale reads ─────────────
+        // This is the key fix — always read the latest version inside the
+        // transaction rather than relying on the findOrCreate snapshot.
+        await wallet.reload({ transaction: t });
         const balanceBefore = parseFloat(wallet.balance);
 
         if (isCash) {
             // ── CASH PAYMENT FLOW ─────────────────────────────────────────────
-            // Agent physically collected totalPrice from sender
-            // They owe WEGO commissionAmount
-            // Their wallet balance does not change (they hold cash)
-
-            // 1. Log cash_collected
             await DeliveryWalletTransaction.create({
                 wallet_id:      wallet.id,
                 delivery_id:    deliveryId,
@@ -134,11 +162,10 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
                 payment_method: 'cash',
                 amount:         totalPrice,
                 balance_before: balanceBefore,
-                balance_after:  balanceBefore, // balance unchanged for cash
+                balance_after:  balanceBefore,
                 notes:          `Cash collected for delivery ${delivery.delivery_code}`,
             }, { transaction: t });
 
-            // 2. Log cash_commission_owed (creates a debt)
             await DeliveryWalletTransaction.create({
                 wallet_id:      wallet.id,
                 delivery_id:    deliveryId,
@@ -146,11 +173,10 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
                 payment_method: 'cash',
                 amount:         commissionAmount,
                 balance_before: balanceBefore,
-                balance_after:  balanceBefore, // balance unchanged — this is a debt record
+                balance_after:  balanceBefore,
                 notes:          `WEGO commission owed (cash) for ${delivery.delivery_code}`,
             }, { transaction: t });
 
-            // 3. Update wallet totals
             await wallet.increment({
                 total_cash_collected:  totalPrice,
                 total_commission_owed: commissionAmount,
@@ -160,12 +186,8 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
 
         } else {
             // ── DIGITAL PAYMENT FLOW (MTN / Orange Money) ─────────────────────
-            // driver_payout goes to balance
-            // commission_amount is already deducted (informational log)
-
             const balanceAfter = balanceBefore + driverPayout;
 
-            // 1. Credit driver payout to balance
             await DeliveryWalletTransaction.create({
                 wallet_id:      wallet.id,
                 delivery_id:    deliveryId,
@@ -177,7 +199,6 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
                 notes:          `Earning for delivery ${delivery.delivery_code}`,
             }, { transaction: t });
 
-            // 2. Log commission deduction (informational — already excluded from driver_payout)
             await DeliveryWalletTransaction.create({
                 wallet_id:      wallet.id,
                 delivery_id:    deliveryId,
@@ -185,11 +206,10 @@ async function postDeliveryEarnings(deliveryId, options = {}) {
                 payment_method: paymentMethod,
                 amount:         commissionAmount,
                 balance_before: balanceAfter,
-                balance_after:  balanceAfter, // already excluded — not a double deduction
+                balance_after:  balanceAfter,
                 notes:          `WEGO commission (${((commissionAmount / totalPrice) * 100).toFixed(1)}%) for ${delivery.delivery_code}`,
             }, { transaction: t });
 
-            // 3. Update wallet
             await wallet.increment({
                 balance:      driverPayout,
                 total_earned: driverPayout,
@@ -246,12 +266,10 @@ async function requestCashout(driverId, amount, paymentMethod, phoneNumber, agen
             throw new Error(`Insufficient balance. Available: ${available.toLocaleString()} XAF`);
         }
 
-        // Minimum cashout: 1,000 XAF
         if (amount < 1000) {
             throw new Error('Minimum cashout amount is 1,000 XAF');
         }
 
-        // Check no pending request already exists
         const existing = await DeliveryPayoutRequest.findOne({
             where: { driver_id: driverId, status: 'pending' },
             transaction: t,
@@ -261,10 +279,8 @@ async function requestCashout(driverId, amount, paymentMethod, phoneNumber, agen
             throw new Error(`You already have a pending cashout request (${existing.payout_code})`);
         }
 
-        // Lock amount in pending
         await wallet.increment({ pending_withdrawal: amount }, { transaction: t });
 
-        // Create request
         const request = await DeliveryPayoutRequest.create({
             payout_code:    DeliveryPayoutRequest.generatePayoutCode(),
             driver_id:      driverId,
@@ -305,7 +321,6 @@ async function cancelCashout(driverId, requestId) {
         if (!request) throw new Error('Cashout request not found');
         if (!request.canBeCancelled()) throw new Error('This request cannot be cancelled');
 
-        // Release the locked amount
         const wallet = await DeliveryWallet.findByPk(request.wallet_id, { transaction: t });
         await wallet.decrement({ pending_withdrawal: request.amount }, { transaction: t });
 
@@ -342,7 +357,7 @@ async function approveCashout(requestId, employeeId, paymentReference, adminNote
             throw new Error(`Cannot approve a ${request.status} request`);
         }
 
-        const wallet       = await DeliveryWallet.findByPk(request.wallet_id, { transaction: t });
+        const wallet        = await DeliveryWallet.findByPk(request.wallet_id, { transaction: t });
         const balanceBefore = wallet.balance;
         const balanceAfter  = balanceBefore - request.amount;
 
@@ -350,27 +365,24 @@ async function approveCashout(requestId, employeeId, paymentReference, adminNote
             throw new Error('Insufficient wallet balance to process this payout');
         }
 
-        // Create withdrawal transaction
         const txn = await DeliveryWalletTransaction.create({
-            wallet_id:             wallet.id,
-            delivery_id:           null,
-            type:                  'withdrawal',
-            payment_method:        request.payment_method,
-            amount:                request.amount,
-            balance_before:        balanceBefore,
-            balance_after:         balanceAfter,
-            notes:                 `Cashout ${request.payout_code}${paymentReference ? ` — ref: ${paymentReference}` : ''}`,
+            wallet_id:              wallet.id,
+            delivery_id:            null,
+            type:                   'withdrawal',
+            payment_method:         request.payment_method,
+            amount:                 request.amount,
+            balance_before:         balanceBefore,
+            balance_after:          balanceAfter,
+            notes:                  `Cashout ${request.payout_code}${paymentReference ? ` — ref: ${paymentReference}` : ''}`,
             created_by_employee_id: employeeId,
         }, { transaction: t });
 
-        // Deduct from wallet
         await wallet.update({
             balance:            balanceAfter,
             total_withdrawn:    wallet.total_withdrawn + request.amount,
             pending_withdrawal: Math.max(0, wallet.pending_withdrawal - request.amount),
         }, { transaction: t });
 
-        // Mark request completed
         await request.update({
             status:            'completed',
             processed_by:      employeeId,
@@ -409,7 +421,6 @@ async function rejectCashout(requestId, employeeId, reason) {
             throw new Error(`Cannot reject a ${request.status} request`);
         }
 
-        // Release locked amount
         const wallet = await DeliveryWallet.findByPk(request.wallet_id, { transaction: t });
         await wallet.decrement({ pending_withdrawal: request.amount }, { transaction: t });
 
@@ -455,14 +466,14 @@ async function settleCashCommission(driverId, amount, employeeId, notes) {
         const balanceBefore = wallet.balance;
 
         await DeliveryWalletTransaction.create({
-            wallet_id:             wallet.id,
-            delivery_id:           null,
-            type:                  'cash_commission_paid',
-            payment_method:        'cash',
+            wallet_id:              wallet.id,
+            delivery_id:            null,
+            type:                   'cash_commission_paid',
+            payment_method:         'cash',
             amount,
-            balance_before:        balanceBefore,
-            balance_after:         balanceBefore,
-            notes:                 notes || `Cash commission settlement by agent`,
+            balance_before:         balanceBefore,
+            balance_after:          balanceBefore,
+            notes:                  notes || `Cash commission settlement by agent`,
             created_by_employee_id: employeeId,
         }, { transaction: t });
 

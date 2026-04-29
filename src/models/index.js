@@ -1,57 +1,56 @@
 // src/models/index.js
+'use strict';
 
 const sequelize = require('../config/database');
 
-// ═══════════════════════════════════════════════════════════════════════
-// MODEL IMPORTS — CORE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — CORE ACCOUNT
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const Account          = require('./Account');
 const PassengerProfile = require('./PassengerProfile');
 const DriverProfile    = require('./DriverProfile');
 const VerificationCode = require('./VerificationCode');
 const DriverDocument   = require('./DriverDocument');
-const Trip             = require('./Trip');
-const TripEvent        = require('./TripEvent');
-const ChatMessage      = require('./ChatMessage');
-const Rating           = require('./Rating');
-const Payment          = require('./Payment');
-const Driver           = require('./Driver');
-const Vehicle          = require('./Vehicle');
-const PriceRule        = require('./PriceRule');
-const IdempotencyKey   = require('./IdempotencyKey');
-const VehicleRental    = require('./VehicleRental');
-const VehicleCategory  = require('./VehicleCategory');
-const DriverLocation   = require('./DriverLocation');
-const Employee         = require('./Employee')(sequelize);
+const PendingSignup    = require('./PendingSignup');
+const PartnerProfile   = require('./PartnerProfile');
 const Coupon           = require('./Coupon');
 const SupportTicket    = require('./SupportTicket');
-const PartnerProfile   = require('./PartnerProfile');
-const PendingSignup    = require('./PendingSignup');
 
-// ═══════════════════════════════════════════════════════════════════════
-// MODEL IMPORTS — DELIVERY
-// ═══════════════════════════════════════════════════════════════════════
+// ─── Factory-pattern models (called before any associations) ──────────────────
+const Employee     = require('./Employee')(sequelize);
+const RefreshToken = require('./RefreshToken')(sequelize);
 
-const DeliveryPricing           = require('./DeliveryPricing')(sequelize);
-const DeliverySurgeRule         = require('./DeliverySurgeRule')(sequelize);
-const Delivery                  = require('./Delivery')(sequelize);
-const DeliveryTracking          = require('./DeliveryTracking')(sequelize);
-const DeliveryDispute           = require('./DeliveryDispute')(sequelize);
-const DeliveryWallet            = require('./DeliveryWallet')(sequelize);
-const DeliveryWalletTransaction = require('./DeliveryWalletTransaction')(sequelize);
-const DeliveryPayoutRequest     = require('./DeliveryPayoutRequest')(sequelize);
-const DeliveryCategory          = require('./DeliveryCategory')(sequelize);
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — TRIP / RIDE
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════════
-// MODEL IMPORTS — AUTHENTICATION
-// ═══════════════════════════════════════════════════════════════════════
+const Trip        = require('./Trip');
+const TripEvent   = require('./TripEvent');
+const ChatMessage = require('./ChatMessage');
+const Rating      = require('./Rating');
+const Payment     = require('./Payment');
 
-const RefreshToken = require('./RefreshToken')(sequelize, require('sequelize').DataTypes);
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — DRIVER / VEHICLE
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════════
+const Driver          = require('./Driver');
+const Vehicle         = require('./Vehicle');
+const VehicleCategory = require('./VehicleCategory');
+const VehicleRental   = require('./VehicleRental');
+const DriverLocation  = require('./DriverLocation');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — PRICING / MISC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PriceRule      = require('./PriceRule');
+const IdempotencyKey = require('./IdempotencyKey');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — SERVICES MARKETPLACE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const ServiceCategory = require('./ServiceCategory');
 const ServiceListing  = require('./ServiceListing');
@@ -59,9 +58,9 @@ const ServiceRequest  = require('./ServiceRequest');
 const ServiceRating   = require('./ServiceRating');
 const ServiceDispute  = require('./ServiceDispute');
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — EARNINGS ENGINE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const TripReceipt             = require('./TripReceipt');
 const DriverWallet            = require('./DriverWallet');
@@ -69,17 +68,67 @@ const DriverWalletTransaction = require('./DriverWalletTransaction');
 const EarningRule             = require('./EarningRule');
 const { BonusProgram, BonusAward } = require('./BonusProgramAndAward');
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — PAYOUT SYSTEM
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const DailyBalanceSheet = require('./DailyBalanceSheet');
 const PayoutRequest     = require('./PayoutRequest');
 const DebtPayment       = require('./DebtPayment');
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODEL IMPORTS — DELIVERY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const DeliveryPricing           = require('./DeliveryPricing')(sequelize);
+const DeliverySurgeRule         = require('./DeliverySurgeRule')(sequelize);
+const Delivery                  = require('./Delivery')(sequelize);
+const DeliveryTracking          = require('./DeliveryTracking')(sequelize);
+const DeliveryDispute           = require('./DeliveryDispute')(sequelize);
+const DeliveryCategory          = require('./DeliveryCategory')(sequelize);
+const DeliveryWallet            = require('./DeliveryWallet')(sequelize);
+const DeliveryWalletTransaction = require('./DeliveryWalletTransaction')(sequelize);
+const DeliveryPayoutRequest     = require('./DeliveryPayoutRequest')(sequelize);
+const DeliveryWalletTopUp       = require('./DeliveryWalletTopUp')(sequelize);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VALIDATION — catch undefined models BEFORE associations run
+// If any model is undefined here, it means its require() failed silently due
+// to a circular dependency. The log below will identify the exact culprit.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const _allModels = {
+    Account, PassengerProfile, DriverProfile, VerificationCode, DriverDocument,
+    PendingSignup, PartnerProfile, Coupon, SupportTicket, Employee, RefreshToken,
+    Trip, TripEvent, ChatMessage, Rating, Payment,
+    Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
+    PriceRule, IdempotencyKey,
+    ServiceCategory, ServiceListing, ServiceRequest, ServiceRating, ServiceDispute,
+    TripReceipt, DriverWallet, DriverWalletTransaction, EarningRule, BonusProgram, BonusAward,
+    DailyBalanceSheet, PayoutRequest, DebtPayment,
+    DeliveryPricing, DeliverySurgeRule, Delivery, DeliveryTracking, DeliveryDispute,
+    DeliveryCategory, DeliveryWallet, DeliveryWalletTransaction, DeliveryPayoutRequest,
+    DeliveryWalletTopUp,
+};
+
+const _broken = Object.entries(_allModels)
+    .filter(([, v]) => !v || typeof v.findAll !== 'function')
+    .map(([k]) => k);
+
+if (_broken.length > 0) {
+    throw new Error(
+        `[models/index.js] The following models are undefined or not valid Sequelize models.\n` +
+        `This is caused by a circular require() — one of these model files requires models/index.js\n` +
+        `(directly or indirectly) at the TOP LEVEL, before index.js finishes loading.\n\n` +
+        `Broken models: ${_broken.join(', ')}\n\n` +
+        `Fix: remove any top-level require('../models') or require('./index') calls\n` +
+        `from those model files. Use lazy requires inside function bodies if needed.`
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — ACCOUNT
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 SupportTicket.belongsTo(Account,  { foreignKey: 'user_id',    targetKey: 'uuid', as: 'user' });
 Account.hasMany(SupportTicket,    { foreignKey: 'user_id',    sourceKey: 'uuid', as: 'supportTickets' });
@@ -111,9 +160,9 @@ PartnerProfile.belongsTo(Account, { foreignKey: 'accountId', targetKey: 'uuid', 
 Account.hasMany(RefreshToken,   { foreignKey: 'account_uuid', sourceKey: 'uuid', as: 'refresh_tokens', onDelete: 'CASCADE' });
 RefreshToken.belongsTo(Account, { foreignKey: 'account_uuid', targetKey: 'uuid', as: 'account' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — EMPLOYEE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Employee.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator' });
 Employee.hasMany(Employee,   { foreignKey: 'created_by', as: 'createdEmployees' });
@@ -127,9 +176,9 @@ PriceRule.belongsTo(Employee, { foreignKey: 'updated_by', as: 'updater' });
 Employee.hasMany(Coupon,   { foreignKey: 'created_by', as: 'createdCoupons' });
 Coupon.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — PARTNER PROFILE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 PartnerProfile.belongsTo(Employee, { foreignKey: 'createdByEmployeeId', as: 'createdByEmployee', onDelete: 'SET NULL' });
 Employee.hasMany(PartnerProfile,   { foreignKey: 'createdByEmployeeId', as: 'createdPartners' });
@@ -140,9 +189,9 @@ Employee.hasMany(PartnerProfile,   { foreignKey: 'blockedBy', as: 'blockedPartne
 PartnerProfile.hasMany(Vehicle,   { foreignKey: 'partnerId', sourceKey: 'accountId', as: 'vehicles', onDelete: 'RESTRICT' });
 Vehicle.belongsTo(PartnerProfile, { foreignKey: 'partnerId', targetKey: 'accountId', as: 'partnerProfile' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — TRIP
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Trip.belongsTo(Account, { foreignKey: 'passengerId', as: 'passenger', targetKey: 'uuid' });
 Account.hasMany(Trip,   { foreignKey: 'passengerId', sourceKey: 'uuid', as: 'tripsAsPassenger' });
@@ -150,7 +199,7 @@ Account.hasMany(Trip,   { foreignKey: 'passengerId', sourceKey: 'uuid', as: 'tri
 Trip.belongsTo(Account, { foreignKey: 'driverId', as: 'driver', targetKey: 'uuid' });
 Account.hasMany(Trip,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'tripsAsDriver' });
 
-Trip.hasMany(TripEvent,   { foreignKey: 'tripId', as: 'events',   onDelete: 'CASCADE' });
+Trip.hasMany(TripEvent,   { foreignKey: 'tripId', as: 'events', onDelete: 'CASCADE' });
 TripEvent.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
 Trip.hasMany(ChatMessage,   { foreignKey: 'tripId', as: 'messages', onDelete: 'CASCADE' });
@@ -164,19 +213,19 @@ Trip.hasMany(Rating, { foreignKey: 'trip_id', as: 'ratings', onDelete: 'CASCADE'
 Trip.hasOne(TripReceipt,    { foreignKey: 'tripId', as: 'receipt', onDelete: 'RESTRICT' });
 TripReceipt.belongsTo(Trip, { foreignKey: 'tripId', as: 'trip' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — RATING
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
-Rating.belongsTo(Trip,    { foreignKey: 'trip_id',    as: 'trip' });
+Rating.belongsTo(Trip,    { foreignKey: 'trip_id', as: 'trip' });
 Rating.belongsTo(Account, { foreignKey: 'rated_by',   as: 'rater',  targetKey: 'uuid' });
 Account.hasMany(Rating,   { foreignKey: 'rated_by',   sourceKey: 'uuid', as: 'ratingsGiven' });
 Rating.belongsTo(Account, { foreignKey: 'rated_user', as: 'rated',  targetKey: 'uuid' });
 Account.hasMany(Rating,   { foreignKey: 'rated_user', sourceKey: 'uuid', as: 'ratingsReceived' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — CHAT
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 ChatMessage.belongsTo(Account, { foreignKey: 'fromUserId', as: 'sender',    targetKey: 'uuid' });
 Account.hasMany(ChatMessage,   { foreignKey: 'fromUserId', sourceKey: 'uuid', as: 'sentMessages' });
@@ -184,9 +233,9 @@ Account.hasMany(ChatMessage,   { foreignKey: 'fromUserId', sourceKey: 'uuid', as
 ChatMessage.belongsTo(Account, { foreignKey: 'toUserId', as: 'recipient', targetKey: 'uuid' });
 Account.hasMany(ChatMessage,   { foreignKey: 'toUserId', sourceKey: 'uuid', as: 'receivedMessages' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — VEHICLE & DRIVER
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Vehicle.belongsTo(Account,         { foreignKey: 'partnerId',  as: 'partner',   targetKey: 'uuid' });
 Account.hasMany(Vehicle,           { foreignKey: 'partnerId',  sourceKey: 'uuid', as: 'ownedVehicles' });
@@ -198,14 +247,17 @@ if (Driver) {
     Driver.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
     Vehicle.hasMany(Driver,   { foreignKey: 'vehicleId', as: 'drivers' });
 
-    // Driver.userId → Account.uuid
     Driver.belongsTo(Account, { foreignKey: 'userId', targetKey: 'uuid', as: 'account' });
     Account.hasMany(Driver,   { foreignKey: 'userId', sourceKey: 'uuid', as: 'driverRecords' });
+
+    // ← AJOUTER CES DEUX LIGNES
+    Account.hasOne(Driver, { foreignKey: 'userId', sourceKey: 'uuid', as: 'driver_record' });
+    Driver.hasOne(DeliveryWallet, { foreignKey: 'driver_id', as: 'delivery_wallet' });
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — VEHICLE RENTAL
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 VehicleRental.belongsTo(Account, { foreignKey: 'userId',              as: 'user',              targetKey: 'uuid' });
 Account.hasMany(VehicleRental,   { foreignKey: 'userId',              sourceKey: 'uuid',        as: 'rentals' });
@@ -219,15 +271,15 @@ Account.hasMany(VehicleRental,   { foreignKey: 'handledByEmployeeId', sourceKey:
 VehicleRental.belongsTo(Account, { foreignKey: 'approvedByAdminId',   as: 'approvedByAdmin',   targetKey: 'uuid' });
 Account.hasMany(VehicleRental,   { foreignKey: 'approvedByAdminId',   sourceKey: 'uuid',        as: 'approvedRentals' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — PAYMENT
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Payment.belongsTo(Account, { foreignKey: 'passengerId', as: 'passenger', targetKey: 'uuid' });
 Account.hasMany(Payment,   { foreignKey: 'passengerId', sourceKey: 'uuid', as: 'paymentsAsPassenger' });
 
-Payment.belongsTo(Account, { foreignKey: 'driverId',    as: 'driver',    targetKey: 'uuid' });
-Account.hasMany(Payment,   { foreignKey: 'driverId',    sourceKey: 'uuid', as: 'paymentsAsDriver' });
+Payment.belongsTo(Account, { foreignKey: 'driverId', as: 'driver', targetKey: 'uuid' });
+Account.hasMany(Payment,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'paymentsAsDriver' });
 
 Vehicle.belongsTo(Employee, { foreignKey: 'postedByEmployeeId',   as: 'postedByEmployee' });
 Employee.hasMany(Vehicle,   { foreignKey: 'postedByEmployeeId',   as: 'postedVehicles' });
@@ -235,9 +287,9 @@ Employee.hasMany(Vehicle,   { foreignKey: 'postedByEmployeeId',   as: 'postedVeh
 Vehicle.belongsTo(Employee, { foreignKey: 'verifiedByEmployeeId', as: 'verifiedByEmployee' });
 Employee.hasMany(Vehicle,   { foreignKey: 'verifiedByEmployeeId', as: 'verifiedVehicles' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — SERVICES MARKETPLACE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 ServiceCategory.hasMany(ServiceCategory,   { foreignKey: 'parent_id', as: 'subcategories' });
 ServiceCategory.belongsTo(ServiceCategory, { foreignKey: 'parent_id', as: 'parent' });
@@ -301,9 +353,9 @@ Employee.hasMany(ServiceDispute,   { foreignKey: 'assigned_to', as: 'assignedSer
 ServiceDispute.belongsTo(Employee, { foreignKey: 'resolved_by', as: 'resolver' });
 Employee.hasMany(ServiceDispute,   { foreignKey: 'resolved_by', as: 'resolvedServiceDisputes' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — EARNINGS ENGINE
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Account.hasOne(DriverWallet,    { foreignKey: 'driverId', sourceKey: 'uuid', as: 'wallet', onDelete: 'RESTRICT' });
 DriverWallet.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
@@ -361,9 +413,9 @@ BonusAward.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: '
 Trip.hasMany(BonusAward,   { foreignKey: 'triggerTripId', as: 'triggeredAwards' });
 BonusAward.belongsTo(Trip, { foreignKey: 'triggerTripId', as: 'triggerTrip' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — PAYOUT SYSTEM
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 Account.hasMany(DailyBalanceSheet,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'balanceSheets', onDelete: 'RESTRICT' });
 DailyBalanceSheet.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
@@ -407,32 +459,51 @@ Employee.hasMany(DebtPayment,   { foreignKey: 'verifiedBy', as: 'verifiedDebtPay
 DebtPayment.belongsTo(Employee, { foreignKey: 'rejectedBy', as: 'rejectedByDebtEmployee' });
 Employee.hasMany(DebtPayment,   { foreignKey: 'rejectedBy', as: 'rejectedDebtPayments' });
 
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — DELIVERY
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// ⚠️  RULE: Never define a delivery association directly in this file.
+//     Each model's associate() is the single source of truth.
+//     Defining the same association twice with the same alias causes the
+//     "Account.hasOne called with something that's not a subclass of
+//     Sequelize.Model" startup crash.
+//
+const deliveryModels = {
+    Account,
+    Driver,
+    Employee,
+    Delivery,
+    DeliveryPricing,
+    DeliverySurgeRule,
+    DeliveryTracking,
+    DeliveryDispute,
+    DeliveryWallet,
+    DeliveryWalletTransaction,
+    DeliveryWalletTopUp,
+    DeliveryPayoutRequest,
+    DeliveryCategory,
+};
 
-DeliveryPricing.associate({ DeliverySurgeRule, Delivery, Employee });
-DeliverySurgeRule.associate({ DeliveryPricing, Employee });
-Delivery.associate({ Account, Driver, DeliveryPricing, DeliverySurgeRule, DeliveryTracking, DeliveryDispute });
-DeliveryTracking.associate({ Delivery, Driver });
-DeliveryDispute.associate({ Delivery, Account, Driver, Employee });
+DeliveryPricing.associate(deliveryModels);
+DeliverySurgeRule.associate(deliveryModels);
+Delivery.associate(deliveryModels);
+DeliveryTracking.associate(deliveryModels);
+DeliveryDispute.associate(deliveryModels);
+DeliveryWallet.associate(deliveryModels);            // ← does hasMany(topUps) internally — do NOT repeat here
+DeliveryWalletTransaction.associate(deliveryModels);
+DeliveryPayoutRequest.associate(deliveryModels);
+DeliveryWalletTopUp.associate(deliveryModels);
+DeliveryCategory.associate(deliveryModels);
 
-// Delivery wallet (no FK constraints — tables created via raw SQL)
-DeliveryWallet.associate({ Driver, DeliveryWalletTransaction, DeliveryPayoutRequest, Employee });
-DeliveryWalletTransaction.associate({ DeliveryWallet, Delivery, Employee });
-DeliveryPayoutRequest.associate({ Driver, DeliveryWallet, DeliveryWalletTransaction, Employee });
-
-// Delivery categories — admin managed
-DeliveryCategory.associate({ Employee });
-
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // EXPORTS
-// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 
 module.exports = {
     sequelize,
 
-    // Core account
+    // ── Core account ────────────────────────────────────────────────────────
     Account,
     PendingSignup,
     PassengerProfile,
@@ -443,40 +514,40 @@ module.exports = {
     Coupon,
     PartnerProfile,
 
-    // Authentication
+    // ── Authentication ───────────────────────────────────────────────────────
     RefreshToken,
 
-    // Trip
+    // ── Trip ─────────────────────────────────────────────────────────────────
     Trip,
     TripEvent,
     Rating,
     Payment,
 
-    // Communication
+    // ── Communication ────────────────────────────────────────────────────────
     ChatMessage,
 
-    // Vehicle
+    // ── Vehicle ──────────────────────────────────────────────────────────────
     Vehicle,
     VehicleCategory,
     VehicleRental,
 
-    // Pricing
+    // ── Pricing / misc ───────────────────────────────────────────────────────
     PriceRule,
     SupportTicket,
+    IdempotencyKey,
 
-    // Services Marketplace
+    // ── Services marketplace ─────────────────────────────────────────────────
     ServiceCategory,
     ServiceListing,
     ServiceRequest,
     ServiceRating,
     ServiceDispute,
 
-    // Legacy / Additional
+    // ── Driver ───────────────────────────────────────────────────────────────
     Driver,
     DriverLocation,
-    IdempotencyKey,
 
-    // Earnings Engine
+    // ── Earnings engine ──────────────────────────────────────────────────────
     TripReceipt,
     DriverWallet,
     DriverWalletTransaction,
@@ -484,12 +555,12 @@ module.exports = {
     BonusProgram,
     BonusAward,
 
-    // Payout System
+    // ── Payout system ────────────────────────────────────────────────────────
     DailyBalanceSheet,
     PayoutRequest,
     DebtPayment,
 
-    // Delivery
+    // ── Delivery ─────────────────────────────────────────────────────────────
     Delivery,
     DeliveryDispute,
     DeliveryPricing,
@@ -497,6 +568,7 @@ module.exports = {
     DeliverySurgeRule,
     DeliveryWallet,
     DeliveryWalletTransaction,
+    DeliveryWalletTopUp,
     DeliveryPayoutRequest,
     DeliveryCategory,
 };

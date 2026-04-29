@@ -36,8 +36,8 @@ function setupSocketIO(server) {
             methods:     ['GET', 'POST'],
             credentials: true,
         },
-        pingTimeout:  60000,
-        pingInterval: 25000,
+        pingTimeout:    60000,
+        pingInterval:   25000,
         connectTimeout: 45000,
     });
 
@@ -83,10 +83,18 @@ function setupSocketIO(server) {
         console.log('   Type:  ', socket.userType);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        // Join rooms BEFORE storing socket in Redis
+        // ── Room joining ──────────────────────────────────────────
+        // All users join their personal user room.
+        // DRIVER and DELIVERY_AGENT both join the driver room so that
+        // emitToDriver() can reach delivery agents via `driver:{uuid}`.
+        // PASSENGER joins the passenger room for trip/delivery events.
         socket.join(`user:${socket.userId}`);
-        if (socket.userType === 'DRIVER')    socket.join(`driver:${socket.userId}`);
-        if (socket.userType === 'PASSENGER') socket.join(`passenger:${socket.userId}`);
+        if (socket.userType === 'DRIVER' || socket.userType === 'DELIVERY_AGENT') {
+            socket.join(`driver:${socket.userId}`);
+        }
+        if (socket.userType === 'PASSENGER') {
+            socket.join(`passenger:${socket.userId}`);
+        }
 
         console.log(`✅ [SOCKET] Rooms joined for ${socket.userId}: user, ${socket.userType.toLowerCase()}`);
 
@@ -106,7 +114,7 @@ function setupSocketIO(server) {
         });
 
         // Replay missed events on reconnect
-        if (socket.userType === 'DRIVER') {
+        if (socket.userType === 'DRIVER' || socket.userType === 'DELIVERY_AGENT') {
             await _replayMissedDriverEvents(socket).catch(e =>
                 console.warn('⚠️  [SOCKET] replayMissedDriverEvents failed (non-fatal):', e.message)
             );
@@ -118,10 +126,13 @@ function setupSocketIO(server) {
         }
 
         // ───────────────────────────────────────────────────────────
-        // DRIVER EVENTS
+        // DRIVER + DELIVERY_AGENT EVENTS
+        // Both user types share the same socket event handlers.
+        // Trip-related events (accept, start, complete etc.) are no-ops
+        // for DELIVERY_AGENT since delivery agents never handle ride trips.
         // ───────────────────────────────────────────────────────────
 
-        if (socket.userType === 'DRIVER') {
+        if (socket.userType === 'DRIVER' || socket.userType === 'DELIVERY_AGENT') {
 
             socket.on('driver:online',  (data) => handleDriverOnline(socket, data));
             socket.on('driver:offline', (data) => handleDriverOffline(socket, data));
@@ -129,6 +140,8 @@ function setupSocketIO(server) {
             socket.on('driver:location',        (data) => handleDriverLocationUpdate(socket, data, io));
             socket.on('driver:location_update', (data) => handleDriverLocationUpdate(socket, data, io));
 
+            // Trip events — only meaningful for DRIVER, harmless for DELIVERY_AGENT
+            // (their trip queries will return nothing since they have no ride trips)
             socket.on('trip:accept',   (data) => handleTripAccept(socket, data, io));
             socket.on('trip:decline',  (data) => handleTripDecline(socket, data));
 
@@ -394,7 +407,7 @@ function setupSocketIO(server) {
                 console.warn('⚠️  [SOCKET] removeUserSocket failed:', e.message);
             }
 
-            // ✅ FIX: Do NOT call setDriverOffline on socket disconnect.
+            // ✅ Do NOT call setDriverOffline on socket disconnect.
             // The driver's geo index, ONLINE set and AVAILABLE set must
             // persist through brief reconnects caused by Android backgrounding,
             // network blips, or app lifecycle events.
@@ -402,13 +415,8 @@ function setupSocketIO(server) {
             // setDriverOffline() is only called when the driver explicitly
             // taps "Go Offline" — that goes through handleDriverOffline()
             // which is registered on the 'driver:offline' socket event.
-            //
-            // If we wiped the geo index here, the driver would disappear
-            // from GEORADIUS searches every time the socket briefly dropped,
-            // causing passengers to see "No drivers available" even when a
-            // driver is online and nearby.
-            if (socket.userType === 'DRIVER') {
-                console.log(`⚠️  [SOCKET] Driver ${socket.userId} socket disconnected — Redis state preserved for reconnect`);
+            if (socket.userType === 'DRIVER' || socket.userType === 'DELIVERY_AGENT') {
+                console.log(`⚠️  [SOCKET] ${socket.userType} ${socket.userId} socket disconnected — Redis state preserved for reconnect`);
             }
         });
 
@@ -421,7 +429,7 @@ function setupSocketIO(server) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// RECONNECT REPLAY — DRIVER
+// RECONNECT REPLAY — DRIVER / DELIVERY_AGENT
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _replayMissedDriverEvents(socket) {
@@ -510,5 +518,5 @@ function getIO() {
 // EXPORTS
 // ═══════════════════════════════════════════════════════════════════════
 
-module.exports        = setupSocketIO;
-module.exports.getIO  = getIO;
+module.exports       = setupSocketIO;
+module.exports.getIO = getIO;

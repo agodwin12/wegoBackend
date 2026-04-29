@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>portafoglioonline — Next-Gen Digital Banking</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500&family=DM+Sans:ital,opsz,wght@0,9..40,200;0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&display=swap" rel="stylesheet">
+    <style>
+        *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+
+        :root{
+            --g-abyss:   #040f08;
+            --g-deep:    #071a0d;
+            --g-rich:    #0d2b18;
+            --g-forest:  #143d22;
+            --g-mid:     #1c5c33;
+            --g-base:    #267a44;
+            --g-bright:  #34a05a;
+            --g-vivid:   #3ec97a;
+            --g-light:   #c8f0db;
+            --g-pale:    #eaf8f1;
+            --g-frost:   #f4fcf8;
+            --white:     #ffffff;
+            --cream:     #fdfef9;
+            --gold:      #c9a84c;
+            --gold-lt:   #e8c97a;
+            --txt-head:  #050e08;
+            --txt-body:  #1a3526;
+            --txt-muted: #527a64;
+            --txt-faint: #96b8a4;
+            --border:    rgba(38,122,68,.12);
+            --border-m:  rgba(38,122,68,.22);
+            --border-h:  rgba(38,122,68,.38);
+            --sh-sm: 0 2px 20px rgba(7,26,13,.06);
+            --sh-md: 0 8px 48px rgba(7,26,13,.10);
+            --sh-lg: 0 20px 80px rgba(7,26,13,.14);
+            --sh-xl: 0 40px 120px rgba(7,26,13,.20);
+            --font-h: 'Cormorant Garamond', serif;
+            --font-b: 'DM Sans', sans-serif;
+            --ease: cubic-bezier(.25,.46,.45,.94);
+            --spring: cubic-bezier(.34,1.56,.64,1);
+            --t: .32s var(--ease);
+            --r: 18px;
+        }
+
+        html{scroll-behavior:smooth;}
+        body{font-family:var(--font-b);background:var(--cream);color:var(--txt-body);overflow-x:hidden;-webkit-font-smoothing:antialiased;}
+
+        /* scrollbar */
+        ::-webkit-scrollbar{width:4px;}
+        ::-webkit-scrollbar-track{background:var(--g-frost);}
+        ::-webkit-scrollbar-thumb{background:var(--g-bright);border-radius:4px;}
+
+        /* ── CURSOR ── */
+        #cursor{position:fixed;width:12px;height:12px;border-radius:50%;background:var(--g-vivid);pointer-events:none;z-index:9999;transform:translate(-50%,-50%);transition:transform .12s ease,width .2s ease,height .2s ease,opacity .2s ease;mix-blend-mode:multiply;}
+        #cursor-ring{position:fixed;width:38px;height:38px;border-radius:50%;border:1.5px solid rgba(62,201,122,.4);pointer-events:none;z-index:9998;transform:translate(-50%,-50%);transition:left .18s ease,top .18s ease;}
+        #cursor-glow{position:fixed;width:600px;height:600px;border-radius:50%;pointer-events:none;z-index:0;background:radial-gradient(circle,rgba(52,160,90,.05) 0%,transparent 65%);transform:translate(-50%,-50%);transition:left .3s ease,top .3s ease;}
+
+        /* ── TOPBAR ── */
+        .topbar{background:var(--g-abyss);height:36px;display:flex;align-items:center;}
+        .topbar-inner{max-width:1400px;width:100%;margin:0 auto;padding:0 2.5rem;display:flex;justify-content:space-between;align-items:center;}
+        .topbar-left{display:flex;gap:2.5rem;}
+        .topbar-left span{font-size:.68rem;color:rgba(255,255,255,.45);font-weight:400;letter-spacing:.3px;display:flex;align-items:center;gap:.45rem;}
+        .topbar-left span b{color:var(--g-vivid);font-weight:500;}
+        .topbar-right{display:flex;align-items:center;gap:1rem;}
+        .lang-btn{display:inline-flex;align-items:center;gap:.38rem;background:none;border:none;cursor:pointer;padding:.18rem .5rem;border-radius:5px;transition:background .2s;}
+        .lang-btn .flag{width:18px;height:13px;border-radius:2px;flex-shrink:0;box-shadow:0 0 0 1px rgba(255,255,255,.12);}
+        .lang-btn span{font-size:.67rem;color:rgba(255,255,255,.35);font-weight:600;letter-spacing:1.1px;text-transform:uppercase;font-family:var(--font-b);transition:color .2s;}
+        .lang-btn:hover span,.lang-btn.active span{color:var(--g-vivid);}
+        .lang-btn:hover{background:rgba(255,255,255,.06);}
+        .lang-btn.active .flag{box-shadow:0 0 0 1.5px var(--g-vivid);}
+        .topbar-dot{width:3px;height:3px;border-radius:50%;background:rgba(255,255,255,.15);}
+
+        /* ── NAV ── */
+        .site-header{position:sticky;top:0;z-index:800;}
+        .main-nav{background:rgba(253,254,249,.92);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);border-bottom:1px solid var(--border);transition:var(--t);}
+        .main-nav.scrolled{background:rgba(253,254,249,.98);box-shadow:0 1px 0 var(--border),0 4px 40px rgba(7,26,13,.08);}
+        .nav-inner{max-width:1400px;width:100%;margin:0 auto;padding:0 2.5rem;height:68px;display:flex;align-items:center;gap:0;}
+        .logo{display:flex;align-items:center;gap:.75rem;text-decoration:none;flex-shrink:0;}
+        .logo-ico{width:38px;height:38px;border-radius:10px;background:linear-gradient(145deg,var(--g-mid),var(--g-bright));display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(52,160,90,.28);transition:var(--t);}
+        .logo:hover .logo-ico{transform:rotate(-6deg) scale(1.06);}
+        .logo-ico svg{width:18px;height:18px;color:#fff;}
+        .logo-name{font-family:var(--font-b);font-size:1.05rem;font-weight:700;color:var(--txt-head);letter-spacing:-.3px;}
+        .logo-name span{color:var(--g-bright);}
+
+        .nav-links{display:flex;align-items:center;gap:.2rem;list-style:none;margin-left:3rem;}
+        .nav-links a{color:var(--txt-muted);font-size:.8rem;font-weight:500;text-decoration:none;padding:.4rem .8rem;border-radius:8px;transition:all .2s;letter-spacing:.1px;}
+        .nav-links a:hover{color:var(--g-forest);background:var(--g-pale);}
+
+        .nav-right{display:flex;align-items:center;gap:.7rem;margin-left:auto;}
+        .btn-nav-ghost{display:inline-flex;align-items:center;padding:.45rem 1.2rem;border-radius:100px;font-family:var(--font-b);font-size:.78rem;font-weight:600;color:var(--g-forest);text-decoration:none;border:1px solid var(--border-m);transition:var(--t);}
+        .btn-nav-ghost:hover{background:var(--g-pale);border-color:var(--border-h);}
+        .btn-nav-fill{display:inline-flex;align-items:center;gap:.45rem;padding:.48rem 1.4rem;border-radius:100px;font-family:var(--font-b);font-size:.78rem;font-weight:600;color:#fff;text-decoration:none;background:var(--g-forest);box-shadow:0 4px 16px rgba(20,61,34,.25);transition:var(--t);}
+        .btn-nav-fill:hover{background:var(--g-mid);transform:translateY(-1px);box-shadow:0 8px 24px rgba(20,61,34,.32);}
+        .btn-nav-fill svg{width:12px;height:12px;}
+
+        /* hamburger */
+        .hamburger{display:none;flex-direction:column;gap:4.5px;background:var(--g-pale);border:1px solid var(--border-m);border-radius:9px;padding:10px;cursor:pointer;width:40px;height:40px;align-items:center;justify-content:center;transition:var(--t);}
+        .hamburger span{display:block;width:18px;height:1.5px;background:var(--g-forest);border-radius:2px;transition:all .3s var(--ease);}
+        .hamburger.open span:nth-child(1){transform:translateY(6px) rotate(45deg);}
+        .hamburger.open span:nth-child(2){opacity:0;}
+        .hamburger.open span:nth-child(3){transform:translateY(-6px) rotate(-45deg);}
+
+        /* mobile drawer */
+        .drawer-veil{position:fixed;inset:0;background:rgba(4,15,8,.6);backdrop-filter:blur(8px);opacity:0;visibility:hidden;z-index:900;transition:all .3s ease;}
+        .drawer-veil.open{opacity:1;visibility:visible;}
+        .mobile-drawer{position:fixed;top:0;right:-100%;width:min(300px,88vw);height:100vh;background:var(--cream);border-left:1px solid var(--border);box-shadow:-8px 0 60px rgba(4,15,8,.16);z-index:1000;transition:right .36s var(--ease);display:flex;flex-direction:column;}
+        .mobile-drawer.open{right:0;}
+        .drawer-hd{padding:1.4rem 1.4rem 1.1rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);}
+        .drawer-close{width:30px;height:30px;border-radius:7px;background:var(--g-pale);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--txt-muted);transition:var(--t);}
+        .drawer-close:hover{background:var(--g-light);color:var(--g-forest);}
+        .drawer-close svg{width:13px;height:13px;}
+        .drawer-links{flex:1;overflow-y:auto;padding:.8rem 0;}
+        .drawer-links a{display:flex;align-items:center;gap:.8rem;padding:.75rem 1.4rem;color:var(--txt-muted);text-decoration:none;font-size:.85rem;font-weight:500;border-left:2px solid transparent;transition:all .2s;}
+        .drawer-links a:hover{color:var(--g-forest);background:var(--g-pale);border-left-color:var(--g-bright);padding-left:1.7rem;}
+        .drawer-links a svg{width:15px;height:15px;color:var(--g-bright);}
+        .drawer-ft{padding:1.2rem 1.4rem;border-top:1px solid var(--border);display:flex;gap:.6rem;}
+        .drawer-ft a{flex:1;text-align:center;padding:.55rem;border-radius:10px;font-size:.78rem;font-weight:600;text-decoration:none;transition:var(--t);}
+        .drawer-ft .df-g{background:var(--g-pale);color:var(--g-forest);border:1px solid var(--border-m);}
+        .drawer-ft .df-f{background:var(--g-forest);color:#fff;}
+        .drawer-ft .df-f:hover{background:var(--g-mid);}
+
+        /* ── SCROLL REVEAL ── */
+        .rv{opacity:0;transform:translateY(28px);transition:opacity .75s ease,transform .75s ease;}
+        .rv.fl{transform:translateX(-28px);}
+        .rv.fr{transform:translateX(28px);}
+        .rv.sc{transform:scale(.96);}
+        .rv.vis{opacity:1;transform:none;}
+        .d1{transition-delay:.05s;}.d2{transition-delay:.12s;}.d3{transition-delay:.19s;}
+        .d4{transition-delay:.26s;}.d5{transition-delay:.33s;}.d6{transition-delay:.40s;}
+
+        /* ── HERO ── */
+        .hero{
+            position:relative;min-height:calc(100vh - 104px);
+            background:var(--cream);
+            display:flex;align-items:center;
+            overflow:hidden;padding:4rem 0 5rem;
+        }
+        .hero-bg-line{
+            position:absolute;inset:0;
+            background-image:
+                    linear-gradient(rgba(38,122,68,.06) 1px,transparent 1px),
+                    linear-gradient(90deg,rgba(38,122,68,.06) 1px,transparent 1px);
+            background-size:80px 80px;
+            mask-image:radial-gradient(ellipse 80% 80% at 50% 50%,black,transparent);
+        }
+        .hero-blob-1{position:absolute;top:-120px;right:-80px;width:640px;height:640px;border-radius:50%;background:radial-gradient(circle,rgba(52,160,90,.1) 0%,transparent 65%);filter:blur(60px);pointer-events:none;}
+        .hero-blob-2{position:absolute;bottom:-100px;left:-60px;width:480px;height:480px;border-radius:50%;background:radial-gradient(circle,rgba(38,122,68,.08) 0%,transparent 65%);filter:blur(50px);pointer-events:none;}
+
+        .hero-inner{position:relative;z-index:2;max-width:1400px;width:100%;margin:0 auto;padding:0 2.5rem;display:grid;grid-template-columns:1fr 1fr;gap:5rem;align-items:center;}
+
+        /* badge */
+        .hero-badge{
+            display:inline-flex;align-items:center;gap:.55rem;
+            background:var(--white);border:1px solid var(--border-m);
+            padding:.38rem 1rem .38rem .42rem;border-radius:100px;
+            box-shadow:var(--sh-sm);margin-bottom:2rem;
+        }
+        .badge-dot{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,var(--g-bright),var(--g-vivid));display:flex;align-items:center;justify-content:center;}
+        .badge-dot svg{width:10px;height:10px;color:#fff;}
+        .hero-badge span{font-size:.71rem;font-weight:600;letter-spacing:.6px;color:var(--txt-muted);text-transform:uppercase;}
+
+        .hero h1{
+            font-family:var(--font-h);
+            font-size:clamp(3.2rem,5.5vw,6.2rem);
+            font-weight:300;line-height:1.04;
+            letter-spacing:-1px;color:var(--txt-head);
+            margin-bottom:1.6rem;
+        }
+        .hero h1 strong{font-weight:600;}
+        .hero h1 em{font-style:italic;color:var(--g-bright);font-weight:300;}
+
+        .hero-sub{font-size:.96rem;font-weight:300;line-height:1.95;color:var(--txt-muted);max-width:440px;margin-bottom:2.8rem;letter-spacing:.1px;}
+
+        .hero-actions{display:flex;gap:.9rem;flex-wrap:wrap;margin-bottom:3rem;}
+        .btn-primary{display:inline-flex;align-items:center;gap:.5rem;padding:.85rem 2.2rem;border-radius:100px;font-family:var(--font-b);font-size:.85rem;font-weight:600;text-decoration:none;background:var(--g-forest);color:#fff;box-shadow:0 8px 28px rgba(20,61,34,.28);transition:var(--t);}
+        .btn-primary:hover{background:var(--g-mid);transform:translateY(-2px);box-shadow:0 14px 40px rgba(20,61,34,.36);}
+        .btn-primary svg{width:14px;height:14px;}
+        .btn-secondary{display:inline-flex;align-items:center;gap:.5rem;padding:.85rem 2.2rem;border-radius:100px;font-family:var(--font-b);font-size:.85rem;font-weight:600;text-decoration:none;background:transparent;color:var(--g-forest);border:1px solid var(--border-h);transition:var(--t);}
+        .btn-secondary:hover{background:var(--g-pale);}
+
+        /* trust pills */
+        .trust-row{display:flex;gap:.7rem;flex-wrap:wrap;}
+        .trust-chip{display:flex;align-items:center;gap:.4rem;padding:.3rem .8rem;border-radius:100px;background:var(--g-frost);border:1px solid var(--border);font-size:.7rem;color:var(--txt-muted);font-weight:500;}
+        .trust-chip svg{width:11px;height:11px;color:var(--g-bright);}
+
+        /* hero right — card stack */
+        .hero-visual{position:relative;height:560px;display:flex;align-items:center;justify-content:center;}
+        .v-glow{position:absolute;width:380px;height:380px;border-radius:50%;background:radial-gradient(circle,rgba(52,160,90,.14),transparent 68%);animation:pulseGlow 5s ease-in-out infinite;}
+        @keyframes pulseGlow{0%,100%{transform:scale(1);}50%{transform:scale(1.1);}}
+
+        /* floating cards */
+        .fcard{position:absolute;border-radius:20px;cursor:pointer;transition:transform .5s var(--ease),box-shadow .5s var(--ease),z-index 0s;}
+        .fcard-face{width:100%;height:100%;border-radius:20px;padding:1.5rem;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;}
+        .fcard-face::before{content:'';position:absolute;inset:0;border-radius:20px;background:linear-gradient(145deg,rgba(255,255,255,.15) 0%,transparent 50%);}
+        .fcard-face::after{content:'';position:absolute;width:260px;height:260px;border-radius:50%;background:rgba(255,255,255,.04);top:-80px;right:-60px;}
+
+        .fc1{width:335px;height:198px;z-index:3;transform:rotate(-5deg) translate(-15px,-12px);animation:fa1 6s ease-in-out infinite;}
+        .fc2{width:312px;height:184px;z-index:2;transform:rotate(5deg) translate(52px,40px);animation:fa2 7s ease-in-out infinite;}
+        .fc3{width:292px;height:172px;z-index:1;transform:rotate(-8deg) translate(-40px,85px);animation:fa3 8s ease-in-out infinite;}
+
+        .fc1 .fcard-face{background:linear-gradient(145deg,var(--g-abyss) 0%,var(--g-forest) 50%,var(--g-mid) 100%);border:1px solid rgba(62,201,122,.3);box-shadow:0 30px 80px rgba(4,15,8,.4),0 0 0 1px rgba(62,201,122,.1);}
+        .fc2 .fcard-face{background:linear-gradient(145deg,var(--g-forest),var(--g-mid));border:1px solid rgba(255,255,255,.12);box-shadow:0 20px 60px rgba(4,15,8,.3);}
+        .fc3 .fcard-face{background:linear-gradient(145deg,var(--g-mid),var(--g-bright));border:1px solid rgba(255,255,255,.18);}
+
+        @keyframes fa1{0%,100%{transform:rotate(-5deg) translate(-15px,-12px);}50%{transform:rotate(-5deg) translate(-15px,-24px);}}
+        @keyframes fa2{0%,100%{transform:rotate(5deg) translate(52px,40px);}50%{transform:rotate(5deg) translate(52px,28px);}}
+        @keyframes fa3{0%,100%{transform:rotate(-8deg) translate(-40px,85px);}50%{transform:rotate(-8deg) translate(-40px,73px);}}
+        .fc1:hover{transform:rotate(-2deg) translate(-8px,-28px) scale(1.04);z-index:10;animation:none;}
+
+        .cc-brand{font-size:.68rem;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,.85);position:relative;z-index:1;}
+        .cc-chip{width:32px;height:22px;border-radius:4px;background:linear-gradient(135deg,#d4a833,#9e731a);position:relative;}
+        .cc-chip::before{content:'';position:absolute;inset:3px;border:1px solid rgba(255,255,255,.25);border-radius:2px;}
+        .cc-top{display:flex;justify-content:space-between;align-items:flex-start;position:relative;z-index:1;}
+        .cc-num{font-size:.84rem;letter-spacing:4px;color:rgba(255,255,255,.75);position:relative;z-index:1;font-weight:300;}
+        .cc-bot{display:flex;justify-content:space-between;align-items:flex-end;position:relative;z-index:1;}
+        .cc-lbl{font-size:.5rem;color:rgba(255,255,255,.38);text-transform:uppercase;letter-spacing:.8px;margin-bottom:.15rem;}
+        .cc-val{font-size:.74rem;font-weight:500;color:rgba(255,255,255,.82);}
+        .cc-rings{display:flex;}
+        .cc-ring{width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,.2);}
+        .cc-ring+.cc-ring{margin-left:-9px;background:rgba(255,255,255,.1);}
+
+        /* floating stats */
+        .fstat{position:absolute;z-index:10;background:rgba(255,255,255,.95);backdrop-filter:blur(20px);border:1px solid var(--border-m);box-shadow:var(--sh-lg);border-radius:14px;padding:.9rem 1.1rem;}
+        .fstat.s1{top:35px;right:-5px;animation:sfloat 4s ease-in-out infinite;}
+        .fstat.s2{bottom:95px;left:-20px;animation:sfloat 5s ease-in-out infinite .8s;}
+        @keyframes sfloat{0%,100%{transform:translateY(0);}50%{transform:translateY(-8px);}}
+        .fs-label{font-size:.58rem;text-transform:uppercase;letter-spacing:.8px;color:var(--txt-faint);font-weight:600;margin-bottom:.25rem;}
+        .fs-value{font-size:1.15rem;font-weight:700;color:var(--txt-head);font-family:var(--font-b);}
+        .fs-value span{color:var(--g-bright);}
+        .fs-trend{font-size:.62rem;color:var(--g-bright);font-weight:600;margin-top:.12rem;display:flex;align-items:center;gap:.25rem;}
+        .fs-trend svg{width:10px;height:10px;}
+
+        /* ── MARQUEE BAND ── */
+        .marquee-band{background:var(--g-abyss);padding:.9rem 0;overflow:hidden;position:relative;}
+        .marquee-inner{display:flex;gap:0;white-space:nowrap;animation:marqueeRun 30s linear infinite;}
+        .marquee-item{display:inline-flex;align-items:center;gap:.6rem;padding:0 2.5rem;border-right:1px solid rgba(62,201,122,.15);}
+        .marquee-item span{font-size:.7rem;font-weight:500;color:rgba(255,255,255,.45);letter-spacing:.3px;}
+        .marquee-item b{color:var(--g-vivid);font-weight:600;}
+        .marquee-dot{width:4px;height:4px;border-radius:50%;background:var(--g-vivid);opacity:.5;}
+        @keyframes marqueeRun{from{transform:translateX(0);}to{transform:translateX(-50%);}}
+
+        /* ── SECTION SYSTEM ── */
+        .sec{padding:8rem 0;}
+        .sec-alt{background:var(--g-frost);}
+        .sec-dark{background:linear-gradient(160deg,var(--g-rich),var(--g-abyss));}
+        .container{max-width:1400px;width:100%;margin:0 auto;padding:0 2.5rem;}
+
+        .eyebrow{display:inline-flex;align-items:center;gap:.55rem;font-family:var(--font-b);font-size:.68rem;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:var(--g-base);margin-bottom:.8rem;}
+        .eyebrow::before{content:'';display:block;width:22px;height:1px;background:var(--g-bright);}
+        .on-dark .eyebrow{color:var(--g-vivid);}
+        .on-dark .eyebrow::before{background:var(--g-vivid);}
+
+        .sec-title{font-family:var(--font-h);font-size:clamp(2.4rem,4vw,4rem);font-weight:300;line-height:1.1;color:var(--txt-head);letter-spacing:-.3px;margin-bottom:1.1rem;}
+        .sec-title strong{font-weight:600;}
+        .sec-title em{font-style:italic;color:var(--g-bright);font-weight:300;}
+        .on-dark .sec-title{color:#fff;}
+        .on-dark .sec-title em{color:var(--g-vivid);}
+
+        .sec-desc{font-size:.92rem;font-weight:300;line-height:1.95;color:var(--txt-muted);max-width:500px;letter-spacing:.1px;}
+        .on-dark .sec-desc{color:rgba(255,255,255,.48);}
+
+        /* ── SERVICES ── */
+        .srv-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;margin-top:4rem;}
+        .srv{
+            background:var(--white);border:1px solid var(--border);
+            border-radius:var(--r);padding:2rem;
+            box-shadow:var(--sh-sm);
+            transition:var(--t);position:relative;overflow:hidden;cursor:default;
+        }
+        .srv::before{content:'';position:absolute;inset:0;border-radius:var(--r);background:linear-gradient(160deg,var(--g-pale),transparent 55%);opacity:0;transition:opacity var(--t);}
+        .srv:hover{transform:translateY(-6px);border-color:var(--border-m);box-shadow:var(--sh-md);}
+        .srv:hover::before{opacity:1;}
+        .srv-num{font-family:var(--font-h);font-size:3.5rem;font-weight:300;color:rgba(38,122,68,.1);line-height:1;margin-bottom:.5rem;transition:color var(--t);}
+        .srv:hover .srv-num{color:rgba(38,122,68,.18);}
+        .srv-ico{width:44px;height:44px;border-radius:12px;background:var(--g-pale);border:1px solid var(--border-m);display:flex;align-items:center;justify-content:center;margin-bottom:1.2rem;transition:var(--t);}
+        .srv-ico svg{width:20px;height:20px;color:var(--g-base);transition:var(--t);}
+        .srv:hover .srv-ico{background:var(--g-forest);border-color:var(--g-forest);}
+        .srv:hover .srv-ico svg{color:#fff;}
+        .srv h3{font-family:var(--font-h);font-size:1.5rem;font-weight:500;color:var(--txt-head);margin-bottom:.55rem;}
+        .srv p{font-size:.8rem;font-weight:300;color:var(--txt-muted);line-height:1.85;margin-bottom:1.2rem;}
+        .srv-link{display:inline-flex;align-items:center;gap:.3rem;font-size:.72rem;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--g-base);text-decoration:none;transition:gap var(--t);}
+        .srv-link:hover{gap:.6rem;}
+        .srv-link::after{content:'→';}
+
+        /* ── CARDS SECTION ── */
+        .two-col{display:grid;grid-template-columns:1fr 1fr;gap:6rem;align-items:center;}
+        .two-col.rev{direction:rtl;}
+        .two-col.rev>*{direction:ltr;}
+
+        /* card showcase v2 */
+        .card-stage{position:relative;height:420px;display:flex;align-items:center;justify-content:center;}
+        .cs-glow{position:absolute;width:320px;height:320px;border-radius:50%;background:radial-gradient(circle,rgba(62,201,122,.16),transparent 70%);animation:pulseGlow 5s ease-in-out infinite;}
+
+        /* Feature list */
+        .feat-list{display:flex;flex-direction:column;gap:.75rem;margin:2rem 0 2.2rem;}
+        .feat-row{display:flex;align-items:center;gap:.85rem;padding:.85rem 1rem;border-radius:12px;border:1px solid var(--border);background:var(--cream);transition:var(--t);cursor:default;}
+        .feat-row:hover{background:var(--g-pale);border-color:var(--border-m);}
+        .on-dark .feat-row{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.09);}
+        .on-dark .feat-row:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.18);}
+        .feat-ico{width:34px;height:34px;border-radius:9px;background:var(--g-pale);border:1px solid var(--border-m);flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+        .feat-ico svg{width:15px;height:15px;color:var(--g-base);}
+        .on-dark .feat-ico{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12);}
+        .on-dark .feat-ico svg{color:var(--g-vivid);}
+        .feat-row h4{font-size:.82rem;font-weight:600;color:var(--txt-head);margin-bottom:.05rem;}
+        .feat-row p{font-size:.72rem;font-weight:300;color:var(--txt-muted);}
+        .on-dark .feat-row h4{color:#fff;}
+        .on-dark .feat-row p{color:rgba(255,255,255,.42);}
+
+        /* ── STATS ── */
+        .stats-strip{background:linear-gradient(135deg,var(--g-forest),var(--g-mid));padding:5rem 0;}
+        .stats-row{display:grid;grid-template-columns:repeat(4,1fr);max-width:1100px;margin:0 auto;padding:0 2.5rem;}
+        .stat-block{text-align:center;padding:1.5rem;border-right:1px solid rgba(255,255,255,.1);}
+        .stat-block:last-child{border-right:none;}
+        .stat-n{font-family:var(--font-h);font-size:3.8rem;font-weight:300;color:#fff;line-height:1;letter-spacing:-1px;}
+        .stat-n sup{font-family:var(--font-b);font-size:1.4rem;font-weight:400;color:var(--g-vivid);}
+        .stat-l{font-size:.68rem;color:rgba(255,255,255,.42);font-weight:500;letter-spacing:1.2px;text-transform:uppercase;margin-top:.4rem;}
+
+        /* ── WHY US ── */
+        .why-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;margin-top:4rem;}
+        .why{border-radius:var(--r);overflow:hidden;background:var(--white);border:1px solid var(--border);box-shadow:var(--sh-sm);transition:var(--t);cursor:default;}
+        .why:hover{transform:translateY(-6px);box-shadow:var(--sh-md);}
+        .why-img{height:220px;overflow:hidden;position:relative;}
+        .why-img img{width:100%;height:100%;object-fit:cover;transition:transform .7s var(--ease);}
+        .why:hover .why-img img{transform:scale(1.05);}
+        .why-img::after{content:'';position:absolute;inset:0;background:linear-gradient(to bottom,transparent 45%,rgba(4,15,8,.5) 100%);}
+        .why-body{padding:1.6rem;}
+        .why-tag{font-size:.63rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--g-bright);margin-bottom:.45rem;}
+        .why-body h3{font-family:var(--font-h);font-size:1.5rem;font-weight:500;color:var(--txt-head);margin-bottom:.5rem;}
+        .why-body p{font-size:.78rem;font-weight:300;color:var(--txt-muted);line-height:1.85;}
+
+        /* ── SECURITY ── */
+        .sec-visual{position:relative;height:400px;display:flex;align-items:center;justify-content:center;}
+        .sec-pulse{position:absolute;border-radius:50%;border:1px solid rgba(62,201,122,.18);animation:pExp 3.5s ease-out infinite;}
+        .sec-pulse:nth-child(1){width:180px;height:180px;}
+        .sec-pulse:nth-child(2){width:270px;height:270px;animation-delay:.9s;}
+        .sec-pulse:nth-child(3){width:360px;height:360px;animation-delay:1.8s;}
+        @keyframes pExp{from{opacity:.6;transform:scale(.88);}to{opacity:0;transform:scale(1.08);}}
+        .sec-core{width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;position:relative;z-index:2;}
+        .sec-core svg{width:44px;height:44px;color:#fff;}
+        .sec-badges{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;margin-top:1.6rem;}
+        .sec-badge{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:1rem;text-align:center;transition:var(--t);}
+        .sec-badge:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.18);}
+        .sec-badge svg{width:20px;height:20px;color:var(--g-vivid);margin-bottom:.35rem;}
+        .sec-badge span{font-size:.68rem;color:rgba(255,255,255,.42);display:block;font-weight:400;}
+
+        .checks{display:flex;flex-direction:column;gap:.7rem;margin:2rem 0;}
+        .check-row{display:flex;align-items:center;gap:.85rem;font-size:.84rem;font-weight:300;color:rgba(255,255,255,.65);}
+        .check-ico{width:20px;height:20px;border-radius:50%;background:rgba(62,201,122,.18);border:1px solid rgba(62,201,122,.3);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+        .check-ico svg{width:9px;height:9px;color:var(--g-vivid);}
+
+        /* ── PHONE ── */
+        .phone-wrap{display:flex;justify-content:center;animation:phoneFloat 5.5s ease-in-out infinite;}
+        @keyframes phoneFloat{0%,100%{transform:translateY(0) rotate(-2deg);}50%{transform:translateY(-16px) rotate(-2deg);}}
+        .phone{width:250px;border-radius:36px;background:var(--white);border:1.5px solid var(--border-m);box-shadow:var(--sh-xl);overflow:hidden;}
+        .p-bar{width:70px;height:20px;background:var(--g-frost);margin:0 auto;border-radius:0 0 12px 12px;}
+        .p-body{padding:.9rem;}
+        .p-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem;}
+        .p-greet{font-size:.55rem;color:var(--txt-faint);font-weight:600;text-transform:uppercase;letter-spacing:.5px;}
+        .p-name{font-size:.78rem;font-weight:700;color:var(--txt-head);}
+        .p-av{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--g-bright),var(--g-mid));display:flex;align-items:center;justify-content:center;font-size:.62rem;font-weight:800;color:#fff;}
+        .p-bal-card{background:linear-gradient(145deg,var(--g-abyss),var(--g-forest));border-radius:12px;padding:.85rem;margin-bottom:.85rem;}
+        .p-bal-l{font-size:.52rem;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.6px;font-weight:600;}
+        .p-bal-v{font-size:1.35rem;font-weight:700;color:#fff;line-height:1.2;}
+        .p-bal-s{font-size:.55rem;color:var(--g-vivid);margin-top:.1rem;font-weight:600;}
+        .p-acts{display:grid;grid-template-columns:repeat(4,1fr);gap:.3rem;margin-bottom:.85rem;}
+        .p-act-btn{text-align:center;}
+        .p-act-ico{width:28px;height:28px;border-radius:8px;background:var(--g-pale);margin:0 auto .2rem;display:flex;align-items:center;justify-content:center;}
+        .p-act-ico svg{width:11px;height:11px;color:var(--g-base);}
+        .p-act-l{font-size:.48rem;color:var(--txt-muted);font-weight:600;}
+        .p-tx-head{font-size:.56rem;font-weight:700;color:var(--txt-faint);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.45rem;}
+        .p-tx{display:flex;align-items:center;gap:.45rem;padding:.38rem 0;border-bottom:1px solid var(--border);}
+        .p-tx:last-child{border:none;}
+        .p-tx-ic{width:20px;height:20px;border-radius:6px;background:var(--g-pale);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+        .p-tx-ic svg{width:9px;height:9px;color:var(--g-base);}
+        .p-tx-n{font-size:.6rem;font-weight:700;color:var(--txt-head);}
+        .p-tx-d{font-size:.54rem;color:var(--txt-faint);}
+        .p-tx-a{margin-left:auto;font-size:.62rem;font-weight:700;}
+        .p-tx-a.neg{color:#d32f2f;}
+        .p-tx-a.pos{color:var(--g-bright);}
+
+        /* ── TESTIMONIALS ── */
+        .testi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;margin-top:4rem;}
+        .testi{padding:2rem;border-radius:var(--r);background:var(--white);border:1px solid var(--border);box-shadow:var(--sh-sm);transition:var(--t);position:relative;}
+        .testi:hover{transform:translateY(-5px);box-shadow:var(--sh-md);border-color:var(--border-m);}
+        .testi-stars{display:flex;gap:.18rem;margin-bottom:1.2rem;}
+        .testi-stars svg{width:13px;height:13px;color:var(--gold);}
+        .testi-quote{font-family:var(--font-h);font-size:1.05rem;font-weight:400;font-style:italic;color:var(--txt-body);line-height:1.75;margin-bottom:1.6rem;letter-spacing:.1px;}
+        .testi-author{display:flex;align-items:center;gap:.8rem;}
+        .testi-av{width:38px;height:38px;border-radius:50%;flex-shrink:0;background:linear-gradient(135deg,var(--g-bright),var(--g-mid));display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:800;color:#fff;}
+        .testi-name{font-size:.8rem;font-weight:600;color:var(--txt-head);}
+        .testi-role{font-size:.68rem;color:var(--txt-faint);}
+
+        /* ── CTA ── */
+        .cta-sec{padding:8rem 0;text-align:center;background:linear-gradient(135deg,var(--g-mid),var(--g-abyss));position:relative;overflow:hidden;}
+        .cta-sec::before{content:'';position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:72px 72px;}
+        .cta-sec>*{position:relative;z-index:1;}
+        .cta-sec .sec-title{max-width:580px;margin:0 auto 1rem;}
+        .cta-sec .sec-desc{margin:0 auto 3rem;}
+        .cta-btns{display:flex;align-items:center;justify-content:center;gap:.9rem;flex-wrap:wrap;}
+        .btn-cta-w{display:inline-flex;align-items:center;gap:.5rem;padding:.85rem 2.2rem;border-radius:100px;font-family:var(--font-b);font-size:.85rem;font-weight:600;text-decoration:none;background:#fff;color:var(--g-forest);box-shadow:0 8px 28px rgba(0,0,0,.2);transition:var(--t);}
+        .btn-cta-w:hover{transform:translateY(-2px);box-shadow:0 14px 40px rgba(0,0,0,.3);}
+        .btn-cta-o{display:inline-flex;align-items:center;gap:.5rem;padding:.85rem 2.2rem;border-radius:100px;font-family:var(--font-b);font-size:.85rem;font-weight:600;text-decoration:none;color:#fff;border:1px solid rgba(255,255,255,.28);transition:var(--t);}
+        .btn-cta-o:hover{background:rgba(255,255,255,.09);}
+
+        /* ── FOOTER ── */
+        footer{background:var(--g-abyss);border-top:1px solid rgba(62,201,122,.1);padding:5rem 0 2rem;}
+        .footer-grid{display:grid;grid-template-columns:1.8fr 1fr 1fr 1fr;gap:4rem;margin-bottom:4rem;}
+        .f-logo{display:flex;align-items:center;gap:.7rem;margin-bottom:1rem;}
+        .f-logo-ico{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--g-vivid),var(--g-bright));display:flex;align-items:center;justify-content:center;}
+        .f-logo-ico svg{width:16px;height:16px;color:var(--g-deep);}
+        .f-logo-name{font-family:var(--font-b);font-size:.98rem;font-weight:700;color:#fff;}
+        .f-desc{font-size:.76rem;color:rgba(255,255,255,.32);line-height:1.9;font-weight:300;margin-bottom:1.4rem;}
+        .f-socials{display:flex;gap:.5rem;}
+        .f-soc{width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.3);cursor:pointer;transition:var(--t);}
+        .f-soc:hover{background:rgba(62,201,122,.12);color:var(--g-vivid);border-color:rgba(62,201,122,.25);}
+        .f-soc svg{width:13px;height:13px;}
+        .f-col h4{font-size:.62rem;font-weight:700;letter-spacing:1.8px;text-transform:uppercase;color:rgba(255,255,255,.22);margin-bottom:1.2rem;}
+        .f-col a{display:block;font-size:.78rem;color:rgba(255,255,255,.38);text-decoration:none;padding:.25rem 0;font-weight:300;transition:color .2s;}
+        .f-col a:hover{color:var(--g-vivid);}
+        .footer-bot{padding-top:2rem;border-top:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;}
+        .footer-bot p{font-size:.72rem;color:rgba(255,255,255,.22);}
+        .footer-links{display:flex;gap:1.5rem;}
+        .footer-links a{font-size:.72rem;color:rgba(255,255,255,.22);text-decoration:none;transition:color .2s;}
+        .footer-links a:hover{color:var(--g-vivid);}
+
+        /* WhatsApp */
+        .wa-float{position:fixed;bottom:26px;right:26px;z-index:400;}
+        .wa-btn{width:52px;height:52px;background:#25D366;border-radius:50%;display:flex;align-items:center;justify-content:center;text-decoration:none;box-shadow:0 6px 22px rgba(37,211,102,.45);transition:var(--t);animation:waPulse 3s infinite;}
+        .wa-btn:hover{transform:scale(1.1);}
+        .wa-btn svg{width:24px;height:24px;color:#fff;}
+        @keyframes waPulse{0%,100%{box-shadow:0 6px 22px rgba(37,211,102,.45);}50%{box-shadow:0 6px 28px rgba(37,211,102,.7),0 0 0 8px rgba(37,211,102,.07);}}
+
+        /* ── RESPONSIVE ── */
+        @media(max-width:1100px){
+            .hero-inner,.two-col{gap:3rem;}
+            .srv-grid{grid-template-columns:repeat(2,1fr);}
+            .footer-grid{grid-template-columns:1fr 1fr;gap:2.5rem;}
+        }
+        @media(max-width:960px){
+            .nav-links,.nav-right .btn-nav-ghost,.nav-right .btn-nav-fill{display:none;}
+            .hamburger{display:flex;}
+            .nav-inner{padding:0 1.5rem;}
+            .container{padding:0 1.5rem;}
+            .hero-inner,.two-col{grid-template-columns:1fr;text-align:center;}
+            .hero-actions,.trust-row{justify-content:center;}
+            .hero-sub{max-width:100%;}
+            .hero-visual{height:400px;}
+            .stats-row{grid-template-columns:repeat(2,1fr);}
+            .stat-block:nth-child(2){border-right:none;}
+            .stat-block{border-bottom:1px solid rgba(255,255,255,.08);}
+            .stat-block:nth-last-child(-n+2){border-bottom:none;}
+            .why-grid,.testi-grid{grid-template-columns:repeat(2,1fr);}
+            .card-stage{height:360px;}
+            .sec{padding:5.5rem 0;}
+            .topbar{display:none;}
+            .eyebrow{justify-content:center;}
+            .sec-desc{max-width:100%;}
+            .two-col.rev{direction:ltr;}
+        }
+        @media(max-width:640px){
+            .hero-visual{display:none;}
+            .hero h1{font-size:3rem;}
+            .srv-grid,.why-grid,.testi-grid{grid-template-columns:1fr;}
+            .footer-grid{grid-template-columns:1fr;}
+            .hero-actions{flex-direction:column;align-items:center;}
+            .btn-primary,.btn-secondary{width:100%;max-width:300px;justify-content:center;}
+            .sec{padding:4.5rem 0;}
+            .sec-badges{grid-template-columns:repeat(2,1fr);}
+        }
+    </style>
+</head>
+<body>
+
+<div id="cursor-glow"></div>
+<div id="cursor-ring"></div>
+<div id="cursor"></div>
+
+<div class="drawer-veil" id="drawerVeil" onclick="closeDrawer()"></div>
+<nav class="mobile-drawer" id="mobileDrawer">
+    <div class="drawer-hd">
+        <a href="#home" class="logo" onclick="closeDrawer()">
+            <div class="logo-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+            <div class="logo-name">portafoglio<span>online</span></div>
+        </a>
+        <button class="drawer-close" onclick="closeDrawer()">
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+    </div>
+    <div class="drawer-links">
+        <a href="#home" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span data-i18n="nav.home">Home</span></a>
+        <a href="#services" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/></svg><span data-i18n="nav.services">Services</span></a>
+        <a href="#cards" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg><span data-i18n="nav.cards">Cards</span></a>
+        <a href="#security" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span data-i18n="nav.security">Security</span></a>
+        <a href="#mobile-app" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/></svg><span data-i18n="nav.mobile">Mobile App</span></a>
+        <a href="#contact" onclick="closeDrawer()"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span data-i18n="nav.contact">Contact</span></a>
+    </div>
+    <div class="drawer-ft">
+        <a href="#" class="df-g" data-i18n="nav.login">Login</a>
+        <a href="#" class="df-f" data-i18n="nav.started">Get Started</a>
+    </div>
+</nav>
+
+<!-- HEADER -->
+<div class="site-header" id="siteHeader">
+    <div class="topbar">
+        <div class="topbar-inner">
+            <div class="topbar-left">
+                <span><b>📞</b>+237 670 887 727</span>
+                <span><b>✉</b>contact@portafoglio.online</span>
+            </div>
+            <div class="topbar-right">
+                <button class="lang-btn active" data-lang="en" onclick="setLang('en')" aria-label="English">
+                    <!-- UK flag -->
+                    <svg class="flag" viewBox="0 0 20 15" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="15" fill="#012169"/><path d="M0,0 L20,15 M20,0 L0,15" stroke="#fff" stroke-width="3"/><path d="M0,0 L20,15 M20,0 L0,15" stroke="#C8102E" stroke-width="2"/><path d="M10,0 V15 M0,7.5 H20" stroke="#fff" stroke-width="5"/><path d="M10,0 V15 M0,7.5 H20" stroke="#C8102E" stroke-width="3"/></svg>
+                    <span>EN</span>
+                </button>
+                <div class="topbar-dot"></div>
+                <button class="lang-btn" data-lang="fr" onclick="setLang('fr')" aria-label="Français">
+                    <!-- French flag -->
+                    <svg class="flag" viewBox="0 0 20 15" xmlns="http://www.w3.org/2000/svg"><rect width="7" height="15" fill="#002395"/><rect x="7" width="6" height="15" fill="#fff"/><rect x="13" width="7" height="15" fill="#ED2939"/></svg>
+                    <span>FR</span>
+                </button>
+                <div class="topbar-dot"></div>
+                <button class="lang-btn" data-lang="it" onclick="setLang('it')" aria-label="Italiano">
+                    <!-- Italian flag -->
+                    <svg class="flag" viewBox="0 0 20 15" xmlns="http://www.w3.org/2000/svg"><rect width="7" height="15" fill="#009246"/><rect x="7" width="6" height="15" fill="#fff"/><rect x="13" width="7" height="15" fill="#CE2B37"/></svg>
+                    <span>IT</span>
+                </button>
+            </div>
+        </div>
+    </div>
+    <nav class="main-nav" id="mainNav">
+        <div class="nav-inner">
+            <a href="#home" class="logo">
+                <div class="logo-ico">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                </div>
+                <div class="logo-name">portafoglio<span>online</span></div>
+            </a>
+            <ul class="nav-links">
+                <li><a href="#home" data-i18n="nav.home">Home</a></li>
+                <li><a href="#services" data-i18n="nav.services">Services</a></li>
+                <li><a href="#cards" data-i18n="nav.cards">Cards</a></li>
+                <li><a href="#security" data-i18n="nav.security">Security</a></li>
+                <li><a href="#mobile-app" data-i18n="nav.mobile">Mobile App</a></li>
+                <li><a href="#contact" data-i18n="nav.contact">Contact</a></li>
+            </ul>
+            <div class="nav-right">
+                <a href="#" class="btn-nav-ghost" data-i18n="nav.login">Login</a>
+                <a href="#" class="btn-nav-fill">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    <span data-i18n="nav.started">Get Started</span>
+                </a>
+            </div>
+            <button class="hamburger" id="hamburger" onclick="toggleDrawer()">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+</div>
+
+<!-- HERO -->
+<section class="hero" id="home">
+    <div class="hero-bg-line"></div>
+    <div class="hero-blob-1"></div>
+    <div class="hero-blob-2"></div>
+    <div class="hero-inner">
+        <!-- Left -->
+        <div>
+            <div class="hero-badge rv">
+                <div class="badge-dot"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>
+                <span data-i18n="hero.badge">Next-Gen Digital Banking</span>
+            </div>
+            <h1 class="rv d1" data-i18n="hero.h1" data-i18n-html>Banking<br><strong>Reimagined</strong><br><em>For You.</em></h1>
+            <p class="hero-sub rv d2" data-i18n="hero.sub">Full-featured digital banking wherever you are — send money, pay bills, invest, and grow your wealth from one seamless platform.</p>
+            <div class="hero-actions rv d3">
+                <a href="#" class="btn-primary">
+                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    <span data-i18n="hero.open">Open Account</span>
+                </a>
+                <a href="#services" class="btn-secondary">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/></svg>
+                    <span data-i18n="hero.services">Our Services</span>
+                </a>
+            </div>
+            <div class="trust-row rv d4">
+                <div class="trust-chip"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span data-i18n="hero.trust1">Bank-Grade Security</span></div>
+                <div class="trust-chip"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg><span data-i18n="hero.trust2">256-bit Encrypted</span></div>
+                <div class="trust-chip"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span data-i18n="hero.trust3">15+ Years</span></div>
+            </div>
+        </div>
+        <!-- Right -->
+        <div class="hero-visual rv fr d2">
+            <div class="v-glow"></div>
+            <div class="fcard fc1">
+                <div class="fcard-face">
+                    <div class="cc-top"><div class="cc-brand">Portafoglio</div><div class="cc-chip"></div></div>
+                    <div class="cc-num">•••• •••• •••• 4827</div>
+                    <div class="cc-bot">
+                        <div><div class="cc-lbl">Card Holder</div><div class="cc-val">Alessandro M.</div></div>
+                        <div><div class="cc-lbl">Expires</div><div class="cc-val">09/28</div></div>
+                        <div class="cc-rings"><div class="cc-ring"></div><div class="cc-ring"></div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="fcard fc2">
+                <div class="fcard-face">
+                    <div class="cc-top"><div class="cc-brand" style="font-size:.62rem">Business</div><div class="cc-chip"></div></div>
+                    <div class="cc-num" style="font-size:.78rem">•••• •••• •••• 9341</div>
+                    <div class="cc-bot">
+                        <div><div class="cc-lbl">Card Holder</div><div class="cc-val">Marco F.</div></div>
+                        <div><div class="cc-lbl">Expires</div><div class="cc-val">12/27</div></div>
+                        <div class="cc-rings"><div class="cc-ring"></div><div class="cc-ring"></div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="fcard fc3">
+                <div class="fcard-face">
+                    <div class="cc-top"><div class="cc-brand" style="font-size:.6rem;color:rgba(4,15,8,.8)">Premium</div><div class="cc-chip"></div></div>
+                    <div class="cc-num" style="font-size:.74rem;color:rgba(4,15,8,.65)">•••• •••• •••• 7102</div>
+                    <div class="cc-bot">
+                        <div><div class="cc-lbl" style="color:rgba(4,15,8,.4)">Card Holder</div><div class="cc-val" style="color:rgba(4,15,8,.78)">Sofia R.</div></div>
+                        <div><div class="cc-lbl" style="color:rgba(4,15,8,.4)">Expires</div><div class="cc-val" style="color:rgba(4,15,8,.78)">03/29</div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="fstat s1">
+                <div class="fs-label" data-i18n="hero.stat1.lbl">Total Balance</div>
+                <div class="fs-value">€<span>248,590</span></div>
+                <div class="fs-trend" data-i18n="hero.stat1.trend">↑ +18.4% this year</div>
+            </div>
+            <div class="fstat s2">
+                <div class="fs-label" data-i18n="hero.stat2.lbl">Monthly Growth</div>
+                <div class="fs-value"><span>+€1,240</span></div>
+                <div class="fs-trend" data-i18n="hero.stat2.trend">↑ vs last month</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- MARQUEE -->
+<div class="marquee-band">
+    <div class="marquee-inner" id="marquee">
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.1" data-i18n-html>Active Customers <b>50,000+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.2" data-i18n-html>Transactions Processed <b>€500M+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.3" data-i18n-html>Customer Satisfaction <b>99%</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.4" data-i18n-html>Years of Excellence <b>15+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.5" data-i18n-html>Countries Supported <b>40+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.6" data-i18n-html>Security Rating <b>AAA</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.7" data-i18n-html>App Rating <b>4.9★</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.1" data-i18n-html>Active Customers <b>50,000+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.2" data-i18n-html>Transactions Processed <b>€500M+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.3" data-i18n-html>Customer Satisfaction <b>99%</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.4" data-i18n-html>Years of Excellence <b>15+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.5" data-i18n-html>Countries Supported <b>40+</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.6" data-i18n-html>Security Rating <b>AAA</b></span></div>
+        <div class="marquee-item"><div class="marquee-dot"></div><span data-i18n="marquee.7" data-i18n-html>App Rating <b>4.9★</b></span></div>
+    </div>
+</div>
+
+<!-- SERVICES -->
+<section class="sec" id="services">
+    <div class="container">
+        <div style="text-align:center;max-width:560px;margin:0 auto;" class="rv">
+            <div class="eyebrow" data-i18n="srv.eyebrow">What We Offer</div>
+            <h2 class="sec-title" data-i18n="srv.title" data-i18n-html>Financial Solutions<br><em>Built to Last</em></h2>
+            <p class="sec-desc" style="margin:0 auto;" data-i18n="srv.desc">Comprehensive services designed for every stage of your financial journey.</p>
+        </div>
+        <div class="srv-grid">
+            <div class="srv rv d1">
+                <div class="srv-num">01</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg></div>
+                <h3 data-i18n="srv1.title">Business Banking</h3>
+                <p data-i18n="srv1.desc">Powerful tools to help your company grow, manage cash flow, and scale confidently in global markets.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+            <div class="srv rv d2">
+                <div class="srv-num">02</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg></div>
+                <h3 data-i18n="srv2.title">Personal Banking</h3>
+                <p data-i18n="srv2.desc">Personalized banking for all your daily needs — savings, payments, transfers, and much more.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+            <div class="srv rv d3">
+                <div class="srv-num">03</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg></div>
+                <h3 data-i18n="srv3.title">Home Loans</h3>
+                <p data-i18n="srv3.desc">Competitive rates and flexible terms to help you unlock the door to your dream property.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+            <div class="srv rv d1">
+                <div class="srv-num">04</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg></div>
+                <h3 data-i18n="srv4.title">Investments</h3>
+                <p data-i18n="srv4.desc">AI-powered strategies and robo-advisory tools to build sustainable long-term wealth effortlessly.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+            <div class="srv rv d2">
+                <div class="srv-num">05</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg></div>
+                <h3 data-i18n="srv5.title">Mobile Banking</h3>
+                <p data-i18n="srv5.desc">Full-featured banking on your phone — send, receive, pay, and invest from anywhere in the world.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+            <div class="srv rv d3">
+                <div class="srv-num">06</div>
+                <div class="srv-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></div>
+                <h3 data-i18n="srv6.title">Credit Cards</h3>
+                <p data-i18n="srv6.desc">Flexible credit with rich rewards, cashback, and exclusive lifestyle benefits on every purchase.</p>
+                <a href="#" class="srv-link" data-i18n="srv.explore">Explore</a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- STATS -->
+<div class="stats-strip">
+    <div class="stats-row">
+        <div class="stat-block rv d1">
+            <div class="stat-n"><span data-target="50000">0</span></div>
+            <div class="stat-l" data-i18n="stats.lbl1">Active Customers</div>
+        </div>
+        <div class="stat-block rv d2">
+            <div class="stat-n"><span data-target="500">0</span><sup>M+</sup></div>
+            <div class="stat-l" data-i18n="stats.lbl2">Transactions Processed</div>
+        </div>
+        <div class="stat-block rv d3">
+            <div class="stat-n"><span data-target="99">0</span><sup>%</sup></div>
+            <div class="stat-l" data-i18n="stats.lbl3">Customer Satisfaction</div>
+        </div>
+        <div class="stat-block rv d4">
+            <div class="stat-n"><span data-target="15">0</span><sup>+</sup></div>
+            <div class="stat-l" data-i18n="stats.lbl4">Years of Excellence</div>
+        </div>
+    </div>
+</div>
+
+<!-- CARDS SECTION (dark) -->
+<section class="sec sec-dark on-dark" id="cards">
+    <div class="container">
+        <div class="two-col">
+            <!-- Card stage -->
+            <div class="card-stage rv fl">
+                <div class="cs-glow"></div>
+                <div class="fcard fc1" style="transform:rotate(-5deg) translate(-15px,-12px);animation:fa1 6s ease-in-out infinite;">
+                    <div class="fcard-face">
+                        <div class="cc-top"><div class="cc-brand">Portafoglio</div><div class="cc-chip"></div></div>
+                        <div class="cc-num">•••• •••• •••• 4827</div>
+                        <div class="cc-bot">
+                            <div><div class="cc-lbl">Card Holder</div><div class="cc-val">Alessandro M.</div></div>
+                            <div><div class="cc-lbl">Expires</div><div class="cc-val">09/28</div></div>
+                            <div class="cc-rings"><div class="cc-ring"></div><div class="cc-ring"></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="fcard fc2" style="transform:rotate(5deg) translate(52px,40px);animation:fa2 7s ease-in-out infinite;">
+                    <div class="fcard-face">
+                        <div class="cc-top"><div class="cc-brand" style="font-size:.62rem">Business</div><div class="cc-chip"></div></div>
+                        <div class="cc-num" style="font-size:.78rem">•••• •••• •••• 9341</div>
+                        <div class="cc-bot">
+                            <div><div class="cc-lbl">Card Holder</div><div class="cc-val">Marco F.</div></div>
+                            <div><div class="cc-lbl">Expires</div><div class="cc-val">12/27</div></div>
+                            <div class="cc-rings"><div class="cc-ring"></div><div class="cc-ring"></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="fcard fc3" style="transform:rotate(-8deg) translate(-40px,85px);animation:fa3 8s ease-in-out infinite;">
+                    <div class="fcard-face">
+                        <div class="cc-top"><div class="cc-brand" style="font-size:.6rem;color:rgba(4,15,8,.8)">Premium</div><div class="cc-chip"></div></div>
+                        <div class="cc-num" style="font-size:.74rem;color:rgba(4,15,8,.65)">•••• •••• •••• 7102</div>
+                        <div class="cc-bot">
+                            <div><div class="cc-lbl" style="color:rgba(4,15,8,.4)">Card Holder</div><div class="cc-val" style="color:rgba(4,15,8,.78)">Sofia R.</div></div>
+                            <div><div class="cc-lbl" style="color:rgba(4,15,8,.4)">Expires</div><div class="cc-val" style="color:rgba(4,15,8,.78)">03/29</div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Text -->
+            <div class="rv fr">
+                <div class="eyebrow" data-i18n="cards.eyebrow">Premium Cards</div>
+                <h2 class="sec-title" data-i18n="cards.title" data-i18n-html>Smart Cards for<br><em>Every Lifestyle</em></h2>
+                <p class="sec-desc" data-i18n="cards.desc">Digital-first cards with unmatched rewards, security, and flexibility — from everyday spending to premium global accounts.</p>
+                <div class="feat-list">
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>
+                        <div><h4 data-i18n="cards.f1.title">Instant Virtual Cards</h4><p data-i18n="cards.f1.desc">Create virtual cards for online shopping in seconds</p></div>
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg></div>
+                        <div><h4 data-i18n="cards.f2.title">Zero Foreign Transaction Fees</h4><p data-i18n="cards.f2.desc">Use your card worldwide with no hidden charges</p></div>
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+                        <div><h4 data-i18n="cards.f3.title">Up to 5% Cashback & Rewards</h4><p data-i18n="cards.f3.desc">Earn on every purchase, redeemable instantly</p></div>
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+                        <div><h4 data-i18n="cards.f4.title">Real-Time Fraud Protection</h4><p data-i18n="cards.f4.desc">AI-powered alerts and instant card freeze controls</p></div>
+                    </div>
+                </div>
+                <a href="#" class="btn-cta-w" style="display:inline-flex;align-items:center;gap:.5rem;">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+                    <span data-i18n="cards.apply">Apply for a Card</span>
+                </a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- WHY US -->
+<section class="sec" id="about">
+    <div class="container">
+        <div style="text-align:center;max-width:520px;margin:0 auto;" class="rv">
+            <div class="eyebrow" data-i18n="why.eyebrow">Why Choose Us</div>
+            <h2 class="sec-title" data-i18n="why.title" data-i18n-html>Designed Around<br><em>You</em></h2>
+            <p class="sec-desc" style="margin:0 auto;" data-i18n="why.desc">Discover what makes portafoglioonline the preferred choice for thousands worldwide.</p>
+        </div>
+        <div class="why-grid">
+            <div class="why rv d1">
+                <div class="why-img"><img src="https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=600&q=80" alt="Business" loading="lazy"></div>
+                <div class="why-body"><div class="why-tag" data-i18n="why1.tag">Business Solutions</div><h3 data-i18n="why1.title">Tomorrow Happens Today</h3><p data-i18n="why1.desc">Cutting-edge tools that help entrepreneurs and enterprises thrive in a rapidly changing world.</p></div>
+            </div>
+            <div class="why rv d3">
+                <div class="why-img"><img src="https://images.unsplash.com/photo-1511895426328-dc8714191300?auto=format&fit=crop&w=600&q=80" alt="Family" loading="lazy"></div>
+                <div class="why-body"><div class="why-tag" data-i18n="why2.tag">Family Banking</div><h3 data-i18n="why2.title">Plan for the Future</h3><p data-i18n="why2.desc">Build a lasting financial legacy with savings plans, joint accounts, and family budgeting tools.</p></div>
+            </div>
+            <div class="why rv d5">
+                <div class="why-img"><img src="https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=600&q=80" alt="Home" loading="lazy"></div>
+                <div class="why-body"><div class="why-tag" data-i18n="why3.tag">Home Lending</div><h3 data-i18n="why3.title">Home, Your Way</h3><p data-i18n="why3.desc">Tailored mortgage solutions with competitive rates and expert guidance every step of the way.</p></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- SECURITY (dark) -->
+<section class="sec sec-dark on-dark" id="security">
+    <div class="container">
+        <div class="two-col rev">
+            <!-- Text first (reversed) -->
+            <div class="rv fl">
+                <div class="eyebrow" data-i18n="sec.eyebrow">Zero-Trust Security</div>
+                <h2 class="sec-title" data-i18n="sec.title" data-i18n-html>Your Money.<br><em>Always Safe.</em></h2>
+                <p class="sec-desc" data-i18n="sec.desc">Military-grade encryption, biometric authentication, and real-time AI fraud detection protect every transaction 24/7.</p>
+                <div class="checks">
+                    <div class="check-row"><div class="check-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><span data-i18n="sec.c1">End-to-end encryption on all transactions</span></div>
+                    <div class="check-row"><div class="check-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><span data-i18n="sec.c2">Two-factor authentication & biometric login</span></div>
+                    <div class="check-row"><div class="check-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><span data-i18n="sec.c3">Real-time AI-powered fraud monitoring</span></div>
+                    <div class="check-row"><div class="check-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><span data-i18n="sec.c4">Instant card freeze & spending controls</span></div>
+                    <div class="check-row"><div class="check-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><span data-i18n="sec.c5">Zero-knowledge proof architecture</span></div>
+                </div>
+                <a href="#" class="btn-cta-w" style="display:inline-flex;align-items:center;gap:.5rem;">
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span data-i18n="sec.start">Start Securely</span>
+                </a>
+            </div>
+            <!-- Visual -->
+            <div class="rv fr">
+                <div class="sec-visual">
+                    <div class="sec-pulse"></div><div class="sec-pulse"></div><div class="sec-pulse"></div>
+                    <div class="sec-core"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+                </div>
+                <div class="sec-badges">
+                    <div class="sec-badge"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg><span>256-bit AES</span></div>
+                    <div class="sec-badge"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0"/></svg><span>Biometric Auth</span></div>
+                    <div class="sec-badge"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17H4a2 2 0 01-2-2V5a2 2 0 012-2h16a2 2 0 012 2v10a2 2 0 01-2 2h-1"/></svg><span>AI Fraud Detection</span></div>
+                    <div class="sec-badge"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59"/></svg><span>Zero-Knowledge</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- MOBILE APP -->
+<section class="sec sec-alt" id="mobile-app">
+    <div class="container">
+        <div class="two-col">
+            <!-- Phone -->
+            <div class="rv fl">
+                <div class="phone-wrap">
+                    <div class="phone">
+                        <div class="p-bar"></div>
+                        <div class="p-body">
+                            <div class="p-row">
+                                <div><div class="p-greet" data-i18n="phone.greet">Good morning</div><div class="p-name">Alessandro</div></div>
+                                <div class="p-av">A</div>
+                            </div>
+                            <div class="p-bal-card">
+                                <div class="p-bal-l">Total Balance</div>
+                                <div class="p-bal-v">€ 48,290</div>
+                                <div class="p-bal-s" data-i18n="phone.trend">↑ +€1,240.00 this month</div>
+                            </div>
+                            <div class="p-acts">
+                                <div class="p-act-btn"><div class="p-act-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="11" height="11"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></div><div class="p-act-l">Send</div></div>
+                                <div class="p-act-btn"><div class="p-act-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="11" height="11"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0018 9h-1.26A8 8 0 103 16.29"/></svg></div><div class="p-act-l">Receive</div></div>
+                                <div class="p-act-btn"><div class="p-act-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="11" height="11"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></div><div class="p-act-l">Transfer</div></div>
+                                <div class="p-act-btn"><div class="p-act-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="11" height="11"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></div><div class="p-act-l">More</div></div>
+                            </div>
+                            <div class="p-tx-head">Recent Transactions</div>
+                            <div class="p-tx"><div class="p-tx-ic"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="9" height="9"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 002 1.61h9.72a2 2 0 002-1.61L23 6H6"/></svg></div><div><div class="p-tx-n">Amazon</div><div class="p-tx-d">Today, 09:14</div></div><div class="p-tx-a neg">-€42</div></div>
+                            <div class="p-tx"><div class="p-tx-ic"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="9" height="9"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg></div><div><div class="p-tx-n">Salary</div><div class="p-tx-d">Dec 1</div></div><div class="p-tx-a pos">+€3,200</div></div>
+                            <div class="p-tx"><div class="p-tx-ic"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" width="9" height="9"><path d="M18 8h1a4 4 0 010 8h-1M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8z"/></svg></div><div><div class="p-tx-n">Café Verdi</div><div class="p-tx-d">Nov 30</div></div><div class="p-tx-a neg">-€5.80</div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Text -->
+            <div class="rv fr">
+                <div class="eyebrow">Mobile First</div>
+                <h2 class="sec-title">Banking in<br><em>Your Pocket</em></h2>
+                <p class="sec-desc">Our award-winning app puts the full power of portafoglioonline in the palm of your hand. Biometric login, instant alerts, and a beautiful interface.</p>
+                <div class="feat-list" style="margin-bottom:2rem;">
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 11c0 3.517-1.009 6.799-2.753 9.571"/></svg></div>
+                        <div><h4>Biometric Login</h4><p>Face ID and fingerprint for instant secure access</p></div>
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg></div>
+                        <div><h4>Instant Alerts</h4><p>Real-time push notifications for every transaction</p></div>
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg></div>
+                        <div><h4>Worldwide Access</h4><p>Bank from anywhere in 40+ countries seamlessly</p></div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:.8rem;flex-wrap:wrap;">
+                    <a href="#" class="btn-primary">
+                        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                        Download App
+                    </a>
+                    <a href="#" class="btn-secondary">Learn More</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- TESTIMONIALS -->
+<section class="sec" id="testimonials">
+    <div class="container">
+        <div style="text-align:center;max-width:480px;margin:0 auto;" class="rv">
+            <div class="eyebrow">Customer Stories</div>
+            <h2 class="sec-title">Trusted by<br><em>Thousands</em></h2>
+        </div>
+        <div class="testi-grid">
+            <div class="testi rv d1">
+                <div class="testi-stars">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                </div>
+                <p class="testi-quote">"Switching to portafoglioonline transformed how I manage my business finances. The interface is stunning and everything just works perfectly."</p>
+                <div class="testi-author">
+                    <div class="testi-av">A</div>
+                    <div><div class="testi-name">Alessandro Marino</div><div class="testi-role">CEO, Marino Ventures</div></div>
+                </div>
+            </div>
+            <div class="testi rv d3">
+                <div class="testi-stars">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                </div>
+                <p class="testi-quote">"The investment features are absolutely incredible. My portfolio is up 22% since I joined and the analytics dashboard is so intuitive."</p>
+                <div class="testi-author">
+                    <div class="testi-av" style="background:linear-gradient(135deg,var(--g-base),var(--g-bright));">S</div>
+                    <div><div class="testi-name">Sofia Ricci</div><div class="testi-role">Financial Analyst</div></div>
+                </div>
+            </div>
+            <div class="testi rv d5">
+                <div class="testi-stars">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                </div>
+                <p class="testi-quote">"The security features give me real peace of mind. I've never felt more confident about where my money is. Exceptional customer support too."</p>
+                <div class="testi-author">
+                    <div class="testi-av" style="background:linear-gradient(135deg,var(--g-mid),var(--g-vivid));">M</div>
+                    <div><div class="testi-name">Marco Ferretti</div><div class="testi-role">Entrepreneur</div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-sec on-dark" id="contact">
+    <div class="eyebrow" style="justify-content:center;">Ready to Start?</div>
+    <h2 class="sec-title">Open Your Account<br><em>Today</em></h2>
+    <p class="sec-desc">Join 50,000+ customers already banking smarter with portafoglioonline.</p>
+    <div class="cta-btns">
+        <a href="#" class="btn-cta-o">
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+            Login
+        </a>
+        <a href="#" class="btn-cta-w">
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            Get Started Free
+        </a>
+    </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+    <div class="container">
+        <div class="footer-grid">
+            <div>
+                <div class="f-logo">
+                    <div class="f-logo-ico"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+                    <div class="f-logo-name">portafoglioonline</div>
+                </div>
+                <p class="f-desc">Next-generation digital banking platform. Secure, fast, and designed for the modern world. FDIC Insured. Equal Housing Lender.</p>
+                <div class="f-socials">
+                    <div class="f-soc"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M24 4.557c-.883.392-1.832.656-2.828.775 1.017-.609 1.798-1.574 2.165-2.724-.951.564-2.005.974-3.127 1.195-.897-.957-2.178-1.555-3.594-1.555-3.179 0-5.515 2.966-4.797 6.045-4.091-.205-7.719-2.165-10.148-5.144-1.29 2.213-.669 5.108 1.523 6.574-.806-.026-1.566-.247-2.229-.616-.054 2.281 1.581 4.415 3.949 4.89-.693.188-1.452.232-2.224.084.626 1.956 2.444 3.379 4.6 3.419-2.07 1.623-4.678 2.348-7.29 2.04 2.179 1.397 4.768 2.212 7.548 2.212 9.142 0 14.307-7.721 13.995-14.646.962-.695 1.797-1.562 2.457-2.549z"/></svg></div>
+                    <div class="f-soc"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg></div>
+                    <div class="f-soc"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C8.74 0 8.333.015 7.053.072 5.775.132 4.905.333 4.14.63c-.789.306-1.459.717-2.126 1.384S.935 3.35.63 4.14C.333 4.905.131 5.775.072 7.053.012 8.333 0 8.74 0 12c0 3.259.014 3.668.072 4.948.132 1.279.333 2.149.63 2.913.306.789.717 1.459 1.384 2.126.667.666 1.336 1.079 2.126 1.384.764.297 1.634.499 2.913.558C8.333 23.988 8.74 24 12 24c3.259 0 3.668-.014 4.948-.072 1.279-.131 2.149-.333 2.913-.63.789-.306 1.459-.717 2.126-1.384.666-.667 1.079-1.335 1.384-2.126.297-.764.499-1.634.557-2.913.06-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.131-1.279-.333-2.149-.63-2.913-.306-.789-.717-1.459-1.384-2.126C21.319 1.347 20.651.935 19.86.63c-.764-.297-1.634-.499-2.913-.558C15.667.012 15.259 0 12 0zm0 2.16c3.203 0 3.585.016 4.85.071 1.17.055 1.805.249 2.227.415.562.217.96.477 1.382.896.419.42.679.819.896 1.381.164.422.36 1.057.413 2.227.057 1.266.07 1.646.07 4.85s-.015 3.585-.074 4.85c-.061 1.17-.256 1.805-.421 2.227-.224.562-.479.96-.899 1.382-.419.419-.824.679-1.38.896-.42.164-1.065.36-2.235.413-1.274.057-1.649.07-4.859.07-3.211 0-3.586-.015-4.859-.074-1.171-.061-1.816-.256-2.236-.421-.569-.224-.96-.479-1.379-.899-.421-.419-.69-.824-.9-1.38-.165-.42-.359-1.065-.42-2.235-.045-1.26-.061-1.649-.061-4.844 0-3.196.016-3.586.061-4.861.061-1.17.255-1.814.42-2.234.21-.57.479-.96.9-1.381.419-.419.81-.689 1.379-.898.42-.166 1.051-.361 2.221-.421 1.275-.045 1.65-.06 4.859-.06z"/></svg></div>
+                </div>
+            </div>
+            <div class="f-col">
+                <h4>Banking</h4>
+                <a href="#">Account Login</a>
+                <a href="#">Open Account</a>
+                <a href="#">Cards</a>
+                <a href="#">Loans</a>
+                <a href="#">Investments</a>
+            </div>
+            <div class="f-col">
+                <h4>Company</h4>
+                <a href="#">About Us</a>
+                <a href="#">Services</a>
+                <a href="#">Security</a>
+                <a href="#">Press</a>
+                <a href="#">Careers</a>
+            </div>
+            <div class="f-col">
+                <h4>Contact</h4>
+                <a href="tel:+237670887727">+237 670 887 727</a>
+                <a href="mailto:contact@portafoglio.online">contact@portafoglio.online</a>
+                <a href="#">Mon–Fri: 9AM–5PM</a>
+                <a href="#">Online: 24/7</a>
+            </div>
+        </div>
+        <div class="footer-bot">
+            <p>© 2026 portafoglioonline. All rights reserved.</p>
+            <div class="footer-links">
+                <a href="#">Privacy Policy</a>
+                <a href="#">Terms of Service</a>
+                <a href="#">Cookie Policy</a>
+            </div>
+        </div>
+    </div>
+</footer>
+
+<!-- WhatsApp -->
+<div class="wa-float">
+    <a href="https://wa.me/237670887727" target="_blank" rel="noopener" class="wa-btn" title="Chat on WhatsApp">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+    </a>
+</div>
+
+<script>
+    // cursor
+    const cur = document.getElementById('cursor');
+    const ring = document.getElementById('cursor-ring');
+    const glow = document.getElementById('cursor-glow');
+    let mx=0,my=0;
+    document.addEventListener('mousemove', e => {
+        mx=e.clientX; my=e.clientY;
+        cur.style.left=mx+'px'; cur.style.top=my+'px';
+        glow.style.left=mx+'px'; glow.style.top=my+'px';
+        ring.style.left=mx+'px'; ring.style.top=my+'px';
+    });
+    document.querySelectorAll('a,button,.srv,.fcard,.testi,.why').forEach(el=>{
+        el.addEventListener('mouseenter',()=>{cur.style.width='18px';cur.style.height='18px';cur.style.opacity='.6';});
+        el.addEventListener('mouseleave',()=>{cur.style.width='12px';cur.style.height='12px';cur.style.opacity='1';});
+    });
+
+    // nav scroll
+    const nav = document.getElementById('mainNav');
+    window.addEventListener('scroll', () => nav.classList.toggle('scrolled', scrollY > 60), {passive:true});
+
+    // drawer
+    let open=false;
+    function toggleDrawer(){open=!open;applyDrawer();}
+    function closeDrawer(){open=false;applyDrawer();}
+    function applyDrawer(){
+        document.getElementById('mobileDrawer').classList.toggle('open',open);
+        document.getElementById('drawerVeil').classList.toggle('open',open);
+        document.getElementById('hamburger').classList.toggle('open',open);
+        document.body.style.overflow=open?'hidden':'';
+    }
+    window.addEventListener('resize',()=>{if(innerWidth>960)closeDrawer();});
+    document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
+
+    // smooth scroll
+    document.querySelectorAll('a[href^="#"]').forEach(a=>{
+        a.addEventListener('click',e=>{
+            const id=a.getAttribute('href');
+            if(id==='#')return;
+            const t=document.querySelector(id);
+            if(!t)return;
+            e.preventDefault();
+            const off=document.getElementById('siteHeader').offsetHeight;
+            window.scrollTo({top:t.getBoundingClientRect().top+scrollY-off,behavior:'smooth'});
+        });
+    });
+
+    // scroll reveal
+    const ro=new IntersectionObserver(entries=>{
+        entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('vis');ro.unobserve(e.target);}});
+    },{threshold:.08,rootMargin:'0px 0px -40px 0px'});
+    document.querySelectorAll('.rv').forEach(el=>ro.observe(el));
+
+    // ── i18n ──
+    const translations = {
+        en: {
+            'nav.home':'Home','nav.services':'Services','nav.cards':'Cards','nav.security':'Security','nav.mobile':'Mobile App','nav.contact':'Contact',
+            'nav.login':'Login','nav.started':'Get Started',
+            'hero.badge':'Next-Gen Digital Banking',
+            'hero.h1':'Banking<br><strong>Reimagined</strong><br><em>For You.</em>',
+            'hero.sub':'Full-featured digital banking wherever you are — send money, pay bills, invest, and grow your wealth from one seamless platform.',
+            'hero.open':'Open Account','hero.services':'Our Services',
+            'hero.trust1':'Bank-Grade Security','hero.trust2':'256-bit Encrypted','hero.trust3':'15+ Years',
+            'hero.stat1.lbl':'Total Balance','hero.stat1.trend':'↑ +18.4% this year',
+            'hero.stat2.lbl':'Monthly Growth','hero.stat2.trend':'↑ vs last month',
+            'marquee.1':'Active Customers <b>50,000+</b>','marquee.2':'Transactions Processed <b>€500M+</b>',
+            'marquee.3':'Customer Satisfaction <b>99%</b>','marquee.4':'Years of Excellence <b>15+</b>',
+            'marquee.5':'Countries Supported <b>40+</b>','marquee.6':'Security Rating <b>AAA</b>','marquee.7':'App Rating <b>4.9★</b>',
+            'srv.eyebrow':'What We Offer','srv.title':'Financial Solutions<br><em>Built to Last</em>','srv.desc':'Comprehensive services designed for every stage of your financial journey.',
+            'srv1.title':'Business Banking','srv1.desc':'Powerful tools to help your company grow, manage cash flow, and scale confidently in global markets.',
+            'srv2.title':'Personal Banking','srv2.desc':'Personalized banking for all your daily needs — savings, payments, transfers, and much more.',
+            'srv3.title':'Home Loans','srv3.desc':'Competitive rates and flexible terms to help you unlock the door to your dream property.',
+            'srv4.title':'Investments','srv4.desc':'AI-powered strategies and robo-advisory tools to build sustainable long-term wealth effortlessly.',
+            'srv5.title':'Mobile Banking','srv5.desc':'Full-featured banking on your phone — send, receive, pay, and invest from anywhere in the world.',
+            'srv6.title':'Credit Cards','srv6.desc':'Flexible credit with rich rewards, cashback, and exclusive lifestyle benefits on every purchase.',
+            'srv.explore':'Explore',
+            'stats.lbl1':'Active Customers','stats.lbl2':'Transactions Processed','stats.lbl3':'Customer Satisfaction','stats.lbl4':'Years of Excellence',
+            'cards.eyebrow':'Premium Cards','cards.title':'Smart Cards for<br><em>Every Lifestyle</em>','cards.desc':'Digital-first cards with unmatched rewards, security, and flexibility — from everyday spending to premium global accounts.',
+            'cards.f1.title':'Instant Virtual Cards','cards.f1.desc':'Create virtual cards for online shopping in seconds',
+            'cards.f2.title':'Zero Foreign Transaction Fees','cards.f2.desc':'Use your card worldwide with no hidden charges',
+            'cards.f3.title':'Up to 5% Cashback & Rewards','cards.f3.desc':'Earn on every purchase, redeemable instantly',
+            'cards.f4.title':'Real-Time Fraud Protection','cards.f4.desc':'AI-powered alerts and instant card freeze controls',
+            'cards.apply':'Apply for a Card',
+            'why.eyebrow':'Why Choose Us','why.title':'Designed Around<br><em>You</em>','why.desc':'Discover what makes portafoglioonline the preferred choice for thousands worldwide.',
+            'why1.tag':'Business Solutions','why1.title':'Tomorrow Happens Today','why1.desc':'Cutting-edge tools that help entrepreneurs and enterprises thrive in a rapidly changing world.',
+            'why2.tag':'Family Banking','why2.title':'Plan for the Future','why2.desc':'Build a lasting financial legacy with savings plans, joint accounts, and family budgeting tools.',
+            'why3.tag':'Home Lending','why3.title':'Home, Your Way','why3.desc':'Tailored mortgage solutions with competitive rates and expert guidance every step of the way.',
+            'sec.eyebrow':'Zero-Trust Security','sec.title':'Your Money.<br><em>Always Safe.</em>','sec.desc':'Military-grade encryption, biometric authentication, and real-time AI fraud detection protect every transaction 24/7.',
+            'sec.c1':'End-to-end encryption on all transactions','sec.c2':'Two-factor authentication & biometric login',
+            'sec.c3':'Real-time AI-powered fraud monitoring','sec.c4':'Instant card freeze & spending controls','sec.c5':'Zero-knowledge proof architecture',
+            'sec.start':'Start Securely',
+            'app.eyebrow':'Mobile First','app.title':'Banking in<br><em>Your Pocket</em>','app.desc':'Our award-winning app puts the full power of portafoglioonline in the palm of your hand. Biometric login, instant alerts, and a beautiful interface.',
+            'app.f1.title':'Biometric Login','app.f1.desc':'Face ID and fingerprint for instant secure access',
+            'app.f2.title':'Instant Alerts','app.f2.desc':'Real-time push notifications for every transaction',
+            'app.f3.title':'Worldwide Access','app.f3.desc':'Bank from anywhere in 40+ countries seamlessly',
+            'app.dl':'Download App','app.learn':'Learn More',
+            'testi.eyebrow':'Customer Stories','testi.title':'Trusted by<br><em>Thousands</em>',
+            'testi1.q':'"Switching to portafoglioonline transformed how I manage my business finances. The interface is stunning and everything just works perfectly."',
+            'testi2.q':'"The investment features are absolutely incredible. My portfolio is up 22% since I joined and the analytics dashboard is so intuitive."',
+            'testi3.q':'"The security features give me real peace of mind. I\'ve never felt more confident about where my money is. Exceptional customer support too."',
+            'cta.eyebrow':'Ready to Start?','cta.title':'Open Your Account<br><em>Today</em>','cta.desc':'Join 50,000+ customers already banking smarter with portafoglioonline.',
+            'cta.login':'Login','cta.start':'Get Started Free',
+            'footer.desc':'Next-generation digital banking platform. Secure, fast, and designed for the modern world. FDIC Insured. Equal Housing Lender.',
+            'footer.banking':'Banking','footer.company':'Company','footer.contact':'Contact',
+            'footer.login':'Account Login','footer.open':'Open Account','footer.cards':'Cards','footer.loans':'Loans','footer.invest':'Investments',
+            'footer.about':'About Us','footer.services':'Services','footer.security':'Security','footer.press':'Press','footer.careers':'Careers',
+            'footer.hours1':'Mon–Fri: 9AM–5PM','footer.hours2':'Online: 24/7','footer.copy':'© 2026 portafoglioonline. All rights reserved.',
+            'footer.privacy':'Privacy Policy','footer.terms':'Terms of Service','footer.cookies':'Cookie Policy',
+            'phone.greet':'Good morning','phone.txhead':'Recent Transactions','phone.trend':'↑ +€1,240.00 this month',
+        },
+        fr: {
+            'nav.home':'Accueil','nav.services':'Services','nav.cards':'Cartes','nav.security':'Sécurité','nav.mobile':'App Mobile','nav.contact':'Contact',
+            'nav.login':'Connexion','nav.started':'Commencer',
+            'hero.badge':'Banque Numérique Nouvelle Génération',
+            'hero.h1':'La Banque<br><strong>Réinventée</strong><br><em>Pour Vous.</em>',
+            'hero.sub':'Services bancaires complets où que vous soyez — envoyez de l\'argent, payez vos factures, investissez et développez votre patrimoine depuis une seule plateforme.',
+            'hero.open':'Ouvrir un Compte','hero.services':'Nos Services',
+            'hero.trust1':'Sécurité Bancaire','hero.trust2':'Chiffré 256 bits','hero.trust3':'15+ Ans d\'Excellence',
+            'hero.stat1.lbl':'Solde Total','hero.stat1.trend':'↑ +18,4% cette année',
+            'hero.stat2.lbl':'Croissance Mensuelle','hero.stat2.trend':'↑ vs le mois dernier',
+            'marquee.1':'Clients Actifs <b>50 000+</b>','marquee.2':'Transactions Traitées <b>500M€+</b>',
+            'marquee.3':'Satisfaction Client <b>99%</b>','marquee.4':'Années d\'Excellence <b>15+</b>',
+            'marquee.5':'Pays Supportés <b>40+</b>','marquee.6':'Note Sécurité <b>AAA</b>','marquee.7':'Note App <b>4,9★</b>',
+            'srv.eyebrow':'Ce Que Nous Offrons','srv.title':'Solutions Financières<br><em>Durables</em>','srv.desc':'Des services complets conçus pour chaque étape de votre parcours financier.',
+            'srv1.title':'Banque d\'Entreprise','srv1.desc':'Des outils puissants pour aider votre entreprise à croître et à gérer efficacement ses flux de trésorerie.',
+            'srv2.title':'Banque Personnelle','srv2.desc':'Une banque personnalisée pour tous vos besoins quotidiens — épargne, paiements, virements et bien plus.',
+            'srv3.title':'Prêts Immobiliers','srv3.desc':'Des taux compétitifs et des conditions flexibles pour vous aider à franchir la porte de votre maison de rêve.',
+            'srv4.title':'Investissements','srv4.desc':'Des stratégies IA et des outils de conseil automatisé pour construire un patrimoine durable sans effort.',
+            'srv5.title':'Banque Mobile','srv5.desc':'Services bancaires complets sur votre téléphone — envoyez, recevez, payez et investissez de partout.',
+            'srv6.title':'Cartes de Crédit','srv6.desc':'Crédit flexible avec récompenses, cashback et avantages exclusifs sur chaque achat.',
+            'srv.explore':'Explorer',
+            'stats.lbl1':'Clients Actifs','stats.lbl2':'Transactions Traitées','stats.lbl3':'Satisfaction Client','stats.lbl4':'Années d\'Excellence',
+            'cards.eyebrow':'Cartes Premium','cards.title':'Cartes Intelligentes pour<br><em>Chaque Style de Vie</em>','cards.desc':'Des cartes numériques avec des récompenses, une sécurité et une flexibilité inégalées.',
+            'cards.f1.title':'Cartes Virtuelles Instantanées','cards.f1.desc':'Créez des cartes virtuelles pour vos achats en ligne en quelques secondes',
+            'cards.f2.title':'Zéro Frais à l\'Étranger','cards.f2.desc':'Utilisez votre carte partout dans le monde sans frais cachés',
+            'cards.f3.title':'Jusqu\'à 5% de Cashback','cards.f3.desc':'Gagnez sur chaque achat, remboursable instantanément',
+            'cards.f4.title':'Protection Anti-Fraude en Temps Réel','cards.f4.desc':'Alertes IA et blocage instantané de la carte',
+            'cards.apply':'Demander une Carte',
+            'why.eyebrow':'Pourquoi Nous Choisir','why.title':'Conçu Autour<br><em>de Vous</em>','why.desc':'Découvrez ce qui fait de portafoglioonline le choix privilégié de milliers de personnes.',
+            'why1.tag':'Solutions Entreprise','why1.title':'Demain se Passe Aujourd\'hui','why1.desc':'Des outils de pointe qui aident les entrepreneurs à prospérer dans un monde en rapide évolution.',
+            'why2.tag':'Banque Familiale','why2.title':'Planifiez l\'Avenir','why2.desc':'Construisez un héritage financier durable avec des plans d\'épargne et des outils de budget familial.',
+            'why3.tag':'Prêts Immobiliers','why3.title':'Votre Maison, À Votre Façon','why3.desc':'Des solutions hypothécaires sur mesure avec des taux compétitifs et un accompagnement expert.',
+            'sec.eyebrow':'Sécurité Zéro Confiance','sec.title':'Votre Argent.<br><em>Toujours en Sécurité.</em>','sec.desc':'Chiffrement de niveau militaire, authentification biométrique et détection de fraude IA en temps réel.',
+            'sec.c1':'Chiffrement de bout en bout sur toutes les transactions','sec.c2':'Authentification à deux facteurs & connexion biométrique',
+            'sec.c3':'Surveillance anti-fraude IA en temps réel','sec.c4':'Blocage instantané de la carte & contrôle des dépenses','sec.c5':'Architecture à connaissance nulle',
+            'sec.start':'Commencer en Sécurité',
+            'app.eyebrow':'Mobile en Premier','app.title':'La Banque dans<br><em>Votre Poche</em>','app.desc':'Notre application primée met toute la puissance de portafoglioonline dans la paume de votre main.',
+            'app.f1.title':'Connexion Biométrique','app.f1.desc':'Face ID et empreinte digitale pour un accès instantané et sécurisé',
+            'app.f2.title':'Alertes Instantanées','app.f2.desc':'Notifications push en temps réel pour chaque transaction',
+            'app.f3.title':'Accès Mondial','app.f3.desc':'Gérez votre banque depuis plus de 40 pays sans interruption',
+            'app.dl':'Télécharger l\'App','app.learn':'En Savoir Plus',
+            'testi.eyebrow':'Témoignages Clients','testi.title':'La Confiance de<br><em>Milliers</em>',
+            'testi1.q':'"Passer à portafoglioonline a transformé la gestion de mes finances professionnelles. L\'interface est superbe et tout fonctionne parfaitement."',
+            'testi2.q':'"Les fonctionnalités d\'investissement sont absolument incroyables. Mon portefeuille a augmenté de 22% depuis mon inscription."',
+            'testi3.q':'"Les fonctionnalités de sécurité me rassurent vraiment. Je n\'ai jamais été aussi confiant concernant mon argent. Support client exceptionnel."',
+            'cta.eyebrow':'Prêt à Commencer?','cta.title':'Ouvrez Votre Compte<br><em>Aujourd\'hui</em>','cta.desc':'Rejoignez plus de 50 000 clients qui gèrent déjà leur argent plus intelligemment.',
+            'cta.login':'Connexion','cta.start':'Commencer Gratuitement',
+            'footer.desc':'Plateforme bancaire numérique de nouvelle génération. Sécurisée, rapide et conçue pour le monde moderne.',
+            'footer.banking':'Banque','footer.company':'Entreprise','footer.contact':'Contact',
+            'footer.login':'Connexion au Compte','footer.open':'Ouvrir un Compte','footer.cards':'Cartes','footer.loans':'Prêts','footer.invest':'Investissements',
+            'footer.about':'À Propos','footer.services':'Services','footer.security':'Sécurité','footer.press':'Presse','footer.careers':'Carrières',
+            'footer.hours1':'Lun–Ven: 9h–17h','footer.hours2':'En ligne: 24h/7j','footer.copy':'© 2026 portafoglioonline. Tous droits réservés.',
+            'footer.privacy':'Politique de Confidentialité','footer.terms':'Conditions d\'Utilisation','footer.cookies':'Politique de Cookies',
+            'phone.greet':'Bonjour','phone.txhead':'Transactions Récentes','phone.trend':'↑ +1 240€ ce mois',
+        },
+        it: {
+            'nav.home':'Home','nav.services':'Servizi','nav.cards':'Carte','nav.security':'Sicurezza','nav.mobile':'App Mobile','nav.contact':'Contatti',
+            'nav.login':'Accedi','nav.started':'Inizia Ora',
+            'hero.badge':'Banca Digitale di Nuova Generazione',
+            'hero.h1':'Banca<br><strong>Reinventata</strong><br><em>Per Te.</em>',
+            'hero.sub':'Servizi bancari completi ovunque tu sia — invia denaro, paga bollette, investi e fai crescere il tuo patrimonio da un\'unica piattaforma.',
+            'hero.open':'Apri un Conto','hero.services':'I Nostri Servizi',
+            'hero.trust1':'Sicurezza Bancaria','hero.trust2':'Crittografia 256 bit','hero.trust3':'15+ Anni di Eccellenza',
+            'hero.stat1.lbl':'Saldo Totale','hero.stat1.trend':'↑ +18,4% quest\'anno',
+            'hero.stat2.lbl':'Crescita Mensile','hero.stat2.trend':'↑ vs mese scorso',
+            'marquee.1':'Clienti Attivi <b>50.000+</b>','marquee.2':'Transazioni Elaborate <b>500M€+</b>',
+            'marquee.3':'Soddisfazione Clienti <b>99%</b>','marquee.4':'Anni di Eccellenza <b>15+</b>',
+            'marquee.5':'Paesi Supportati <b>40+</b>','marquee.6':'Rating Sicurezza <b>AAA</b>','marquee.7':'Valutazione App <b>4,9★</b>',
+            'srv.eyebrow':'Cosa Offriamo','srv.title':'Soluzioni Finanziarie<br><em>Costruite per Durare</em>','srv.desc':'Servizi completi progettati per ogni fase del tuo percorso finanziario.',
+            'srv1.title':'Banca d\'Impresa','srv1.desc':'Strumenti potenti per far crescere la tua azienda e gestire i flussi di cassa con fiducia.',
+            'srv2.title':'Banca Personale','srv2.desc':'Banca personalizzata per tutte le tue esigenze quotidiane — risparmio, pagamenti, bonifici e molto altro.',
+            'srv3.title':'Mutui Casa','srv3.desc':'Tassi competitivi e condizioni flessibili per aprire la porta alla casa dei tuoi sogni.',
+            'srv4.title':'Investimenti','srv4.desc':'Strategie basate sull\'IA e strumenti di robo-advisory per costruire ricchezza duratura senza fatica.',
+            'srv5.title':'Banca Mobile','srv5.desc':'Servizi bancari completi sul tuo telefono — invia, ricevi, paga e investi da qualsiasi posto nel mondo.',
+            'srv6.title':'Carte di Credito','srv6.desc':'Credito flessibile con ricchi premi, cashback e vantaggi esclusivi su ogni acquisto.',
+            'srv.explore':'Scopri',
+            'stats.lbl1':'Clienti Attivi','stats.lbl2':'Transazioni Elaborate','stats.lbl3':'Soddisfazione Clienti','stats.lbl4':'Anni di Eccellenza',
+            'cards.eyebrow':'Carte Premium','cards.title':'Carte Intelligenti per<br><em>Ogni Stile di Vita</em>','cards.desc':'Carte digitali con premi, sicurezza e flessibilità senza pari — dalla spesa quotidiana ai conti globali premium.',
+            'cards.f1.title':'Carte Virtuali Istantanee','cards.f1.desc':'Crea carte virtuali per lo shopping online in pochi secondi',
+            'cards.f2.title':'Zero Commissioni Estere','cards.f2.desc':'Usa la tua carta in tutto il mondo senza costi nascosti',
+            'cards.f3.title':'Fino al 5% di Cashback','cards.f3.desc':'Guadagna su ogni acquisto, riscattabile istantaneamente',
+            'cards.f4.title':'Protezione Antifrode in Tempo Reale','cards.f4.desc':'Avvisi IA e blocco istantaneo della carta',
+            'cards.apply':'Richiedi una Carta',
+            'why.eyebrow':'Perché Sceglierci','why.title':'Progettato Intorno<br><em>a Te</em>','why.desc':'Scopri cosa rende portafoglioonline la scelta preferita di migliaia di persone nel mondo.',
+            'why1.tag':'Soluzioni Aziendali','why1.title':'Il Domani Accade Oggi','why1.desc':'Strumenti all\'avanguardia che aiutano imprenditori e aziende a prosperare in un mondo in rapida evoluzione.',
+            'why2.tag':'Banca di Famiglia','why2.title':'Pianifica il Futuro','why2.desc':'Costruisci un\'eredità finanziaria duratura con piani di risparmio, conti congiunti e strumenti di budget familiare.',
+            'why3.tag':'Mutui Immobiliari','why3.title':'Casa, a Modo Tuo','why3.desc':'Soluzioni ipotecarie su misura con tassi competitivi e guida esperta ad ogni passo.',
+            'sec.eyebrow':'Sicurezza Zero-Trust','sec.title':'Il Tuo Denaro.<br><em>Sempre al Sicuro.</em>','sec.desc':'Crittografia di livello militare, autenticazione biometrica e rilevamento frodi IA in tempo reale proteggono ogni transazione 24/7.',
+            'sec.c1':'Crittografia end-to-end su tutte le transazioni','sec.c2':'Autenticazione a due fattori e accesso biometrico',
+            'sec.c3':'Monitoraggio antifrode IA in tempo reale','sec.c4':'Blocco istantaneo della carta e controllo delle spese','sec.c5':'Architettura a conoscenza zero',
+            'sec.start':'Inizia in Sicurezza',
+            'app.eyebrow':'Mobile in Primo Piano','app.title':'La Banca in<br><em>Tasca Tua</em>','app.desc':'La nostra app pluripremiata mette tutta la potenza di portafoglioonline nel palmo della tua mano.',
+            'app.f1.title':'Accesso Biometrico','app.f1.desc':'Face ID e impronta digitale per un accesso istantaneo e sicuro',
+            'app.f2.title':'Notifiche Istantanee','app.f2.desc':'Notifiche push in tempo reale per ogni transazione',
+            'app.f3.title':'Accesso Mondiale','app.f3.desc':'Gestisci la tua banca da oltre 40 paesi senza interruzioni',
+            'app.dl':'Scarica l\'App','app.learn':'Scopri di Più',
+            'testi.eyebrow':'Storie di Clienti','testi.title':'La Fiducia di<br><em>Migliaia</em>',
+            'testi1.q':'"Passare a portafoglioonline ha trasformato il modo in cui gestisco le mie finanze aziendali. L\'interfaccia è stupenda e tutto funziona perfettamente."',
+            'testi2.q':'"Le funzionalità di investimento sono assolutamente incredibili. Il mio portafoglio è cresciuto del 22% da quando mi sono iscritto."',
+            'testi3.q':'"Le funzionalità di sicurezza mi danno vera tranquillità. Non mi sono mai sentito così sicuro riguardo al mio denaro. Supporto clienti eccezionale."',
+            'cta.eyebrow':'Pronto a Iniziare?','cta.title':'Apri il Tuo Conto<br><em>Oggi</em>','cta.desc':'Unisciti a oltre 50.000 clienti che gestiscono già il proprio denaro in modo più intelligente.',
+            'cta.login':'Accedi','cta.start':'Inizia Gratuitamente',
+            'footer.desc':'Piattaforma bancaria digitale di nuova generazione. Sicura, veloce e progettata per il mondo moderno.',
+            'footer.banking':'Banca','footer.company':'Azienda','footer.contact':'Contatti',
+            'footer.login':'Accesso al Conto','footer.open':'Apri un Conto','footer.cards':'Carte','footer.loans':'Prestiti','footer.invest':'Investimenti',
+            'footer.about':'Chi Siamo','footer.services':'Servizi','footer.security':'Sicurezza','footer.press':'Stampa','footer.careers':'Carriere',
+            'footer.hours1':'Lun–Ven: 9–17','footer.hours2':'Online: 24/7','footer.copy':'© 2026 portafoglioonline. Tutti i diritti riservati.',
+            'footer.privacy':'Informativa Privacy','footer.terms':'Termini di Servizio','footer.cookies':'Politica dei Cookie',
+            'phone.greet':'Buongiorno','phone.txhead':'Transazioni Recenti','phone.trend':'↑ +€1.240 questo mese',
+        }
+    };
+
+    // map data-i18n keys to elements
+    const i18nMap = {
+        'nav.home':      '[data-i18n="nav.home"]',
+        'nav.services':  '[data-i18n="nav.services"]',
+        'nav.cards':     '[data-i18n="nav.cards"]',
+        'nav.security':  '[data-i18n="nav.security"]',
+        'nav.mobile':    '[data-i18n="nav.mobile"]',
+        'nav.contact':   '[data-i18n="nav.contact"]',
+        'nav.login':     '[data-i18n="nav.login"]',
+        'nav.started':   '[data-i18n="nav.started"]',
+    };
+
+    let currentLang = 'en';
+    function setLang(lang) {
+        currentLang = lang;
+        const t = translations[lang];
+        // update all data-i18n elements
+        document.querySelectorAll('[data-i18n]').forEach(el => {
+            const key = el.getAttribute('data-i18n');
+            if (t[key] !== undefined) {
+                if (el.hasAttribute('data-i18n-html')) el.innerHTML = t[key];
+                else el.textContent = t[key];
+            }
+        });
+        // toggle active button
+        document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.lang === lang));
+        // update html lang attribute
+        document.documentElement.lang = lang;
+    }
+
+    // counter
+    function animCount(el,target){
+        const t0=performance.now();
+        const tick=ts=>{
+            const p=Math.min((ts-t0)/2200,1);
+            const e=1-Math.pow(1-p,3);
+            el.textContent=Math.floor(e*target).toLocaleString();
+            if(p<1)requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+    }
+    const co=new IntersectionObserver(entries=>{
+        entries.forEach(e=>{
+            if(!e.isIntersecting)return;
+            animCount(e.target,parseInt(e.target.dataset.target));
+            co.unobserve(e.target);
+        });
+    },{threshold:.4});
+    document.querySelectorAll('[data-target]').forEach(el=>co.observe(el));
+</script>
+</body>
+</html>
