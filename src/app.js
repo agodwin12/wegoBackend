@@ -58,6 +58,8 @@ const agentProfileRoutes = require('./routes/delivery/agentProfile.routes');
 // ═══════════════════════════════════════════════════════════════════════════════
 // IMPORT ROUTES — PUBLIC (MOBILE / WEB USERS)
 // ═══════════════════════════════════════════════════════════════════════════════
+//SWITCH MODE
+const switchModeRoutes = require('./routes/switchMode.routes');
 
 // Auth & profiles
 const authRoutes                  = require('./routes/auth.routes');
@@ -74,10 +76,10 @@ const ratingRoutes                = require('./routes/rating.routes');
 const chatRoutes                  = require('./routes/chat.routes');
 const fareRoutes                  = require('./routes/fareRoutes');
 const driverPayoutRoutes          = require('./routes/driverPayout.routes');
+const driverTopUpRoutes = require('./routes/driverTopUp.routes');
 
 // ── DELIVERY ─────────────────────────────────────────────────────────────────
-// delivery.routes.js already includes the top-up driver routes at /driver/wallet/topup
-// so we only need ONE require here — no separate topUpDriverRouter needed.
+
 const deliveryRoutes              = require('./routes/delivery.routes');
 
 // Backoffice top-up admin router (separate router from delivery.routes.js)
@@ -143,6 +145,9 @@ app.get('/health', (req, res) => {
 app.use('/api/upload', uploadRoutesMobile);
 
 
+//SWITHC MODE
+app.use('/api/auth', switchModeRoutes);
+
 // Auth & user management
 app.use('/api/auth',             authRoutes);
 app.use('/api/users',            profileRoutes);
@@ -156,6 +161,7 @@ app.use('/api/users/stats',      statsRoutes);
 // Ride booking
 app.use('/api/driver',                  driverPublicRoutes);
 app.use('/api/request/payout/driver',   driverPayoutRoutes);
+app.use('/api/driver/wallet', driverTopUpRoutes);
 
 // ─── DELIVERY — PUBLIC ROUTES ────────────────────────────────────────────────
 //
@@ -174,7 +180,7 @@ app.use('/api/chat',    chatRoutes);
 
 // Services marketplace (public)
 app.use('/api/services/categories', serviceCategoryRoutes);
-app.use('/api/services/moderation', serviceListingRoutes);
+app.use('/api/services/listings', serviceListingRoutes);
 app.use('/api/services/requests',   serviceRequestRoutes);
 app.use('/api/services/ratings',    serviceRatingRoutes);
 app.use('/api/services/disputes',   serviceDisputeRoutes);

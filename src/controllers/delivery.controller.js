@@ -1231,44 +1231,530 @@ exports.getDriverDeliveries = async (req, res) => {
         const { page = 1, limit = 10, status } = req.query;
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
-        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
+        if (!driver) {
+            return res.status(404).json({
+                success: false,
+                message: 'Driver record not found',
+            });
+        }
 
         const where = { driver_id: driver.id };
         if (status) where.status = status;
 
+        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const limitNum = Math.max(parseInt(limit, 10) || 10, 1);
+
         const { count, rows } = await Delivery.findAndCountAll({
             where,
-            order:  [['created_at', 'DESC']],
-            limit:  parseInt(limit),
-            offset: (parseInt(page) - 1) * parseInt(limit),
+            include: [
+                {
+                    association: 'sender',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                },
+                {
+                    association: 'pricingZone',
+                    attributes: ['id', 'zone_name'],
+                },
+                {
+                    association: 'surgeRule',
+                    attributes: ['id', 'name', 'multiplier'],
+                },
+            ],
+            order: [['created_at', 'DESC']],
+            limit: limitNum,
+            offset: (pageNum - 1) * limitNum,
         });
 
-        const deliveries = rows.map(d => {
-            const obj = d.toJSON();
-            delete obj.delivery_pin;
-            obj.deliveryType  = obj.delivery_type;
-            obj.trackingMode  = trackingMode(obj.delivery_type);
-            obj.categoryLabel = CATEGORY_META[obj.package_category]?.label || 'Other';
-            obj.categoryEmoji = CATEGORY_META[obj.package_category]?.emoji || '📦';
-            return obj;
-        });
+        const deliveries = rows.map(d => ({
+            id: d.id,
+            deliveryCode: d.delivery_code,
+            deliveryType: d.delivery_type,
+            trackingMode: trackingMode(d.delivery_type),
+            status: d.status,
+
+            pickup: {
+                address: d.pickup_address,
+                lat: parseFloat(d.pickup_latitude),
+                lng: parseFloat(d.pickup_longitude),
+                landmark: d.pickup_landmark,
+            },
+
+            dropoff: {
+                address: d.dropoff_address,
+                lat: parseFloat(d.dropoff_latitude),
+                lng: parseFloat(d.dropoff_longitude),
+                landmark: d.dropoff_landmark,
+            },
+
+            package: {
+                size: d.package_size,
+                category: d.package_category,
+                categoryLabel: CATEGORY_META[d.package_category]?.label || 'Other',
+                categoryEmoji: CATEGORY_META[d.package_category]?.emoji || '📦',
+                description: d.package_description,
+                photoUrl: d.package_photo_url,
+                isFragile: d.is_fragile,
+            },
+
+            recipient: {
+                name: d.recipient_name,
+                phone: d.recipient_phone,
+                note: d.recipient_note,
+            },
+
+            sender: d.sender ? {
+                uuid: d.sender.uuid,
+                name: `${d.sender.first_name || ''} ${d.sender.last_name || ''}`.trim(),
+                phone: d.sender.phone_e164,
+                avatar: d.sender.avatar_url,
+            } : null,
+
+            pricing: {
+                currency: 'XAF',
+                distanceKm: parseFloat(d.distance_km || 0),
+                baseFee: parseFloat(d.base_fee_applied || 0),
+                perKmRate: parseFloat(d.per_km_rate_applied || 0),
+                sizeMultiplier: parseFloat(d.size_multiplier_applied || 0),
+                surgeMultiplier: parseFloat(d.surge_multiplier_applied || 1),
+                subtotal: parseFloat(d.subtotal || 0),
+                totalPrice: parseFloat(d.total_price || 0),
+                commissionPercentage: parseFloat(d.commission_percentage_applied || 0),
+                commissionAmount: parseFloat(d.commission_amount || 0),
+                driverPayout: parseFloat(d.driver_payout || 0),
+            },
+
+            payment: {
+                method: d.payment_method,
+                status: d.payment_status,
+                paidAt: d.paid_at,
+            },
+
+            timestamps: {
+                createdAt: d.created_at,
+                updatedAt: d.updated_at,
+                acceptedAt: d.accepted_at,
+                pickedUpAt: d.picked_up_at,
+                deliveredAt: d.delivered_at,
+                cancelledAt: d.cancelled_at,
+            },
+
+            pricingZone: d.pricingZone ? {
+                id: d.pricingZone.id,
+                name: d.pricingZone.zone_name,
+            } : null,
+
+            surgeRule: d.surgeRule ? {
+                id: d.surgeRule.id,
+                name: d.surgeRule.name,
+                multiplier: d.surgeRule.multiplier,
+            } : null,
+        }));
 
         return res.json({
             success: true,
             deliveries,
             pagination: {
-                total:      count,
-                page:       parseInt(page),
-                limit:      parseInt(limit),
-                totalPages: Math.ceil(count / parseInt(limit)),
+                total: count,
+                page: pageNum,
+                limit: limitNum,
+                totalPages: Math.ceil(count / limitNum),
             },
         });
 
     } catch (error) {
         console.error('❌ [DELIVERY] getDriverDeliveries error:', error.message);
-        return res.status(500).json({ success: false, message: 'Failed to get driver deliveries' });
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to get driver deliveries',
+        });
     }
 };
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AGENT HISTORY HELPERS
+// Used by Flutter DeliveryHistoryScreen
+// ═══════════════════════════════════════════════════════════════════════════════
+function mapDeliveryForAgent(d) {
+    const senderName = d.sender
+        ? `${d.sender.first_name || ''} ${d.sender.last_name || ''}`.trim()
+        : null;
+
+    const acceptedAt = d.accepted_at || null;
+    const deliveredAt = d.delivered_at || null;
+
+    let durationMinutes = null;
+    if (acceptedAt && deliveredAt) {
+        durationMinutes = Math.round(
+            (new Date(deliveredAt).getTime() - new Date(acceptedAt).getTime()) / 60000
+        );
+    }
+
+    return {
+        id: d.id,
+        deliveryCode: d.delivery_code || '',
+        deliveryType: d.delivery_type || 'regular',
+        status: d.status || '',
+
+        packageSize: d.package_size || '',
+        packageCategory: d.package_category || '',
+        categoryLabel: CATEGORY_META[d.package_category]?.label || 'Other',
+        categoryEmoji: CATEGORY_META[d.package_category]?.emoji || '📦',
+
+        pickup: {
+            address: d.pickup_address || '',
+            lat: Number(d.pickup_latitude || 0),
+            lng: Number(d.pickup_longitude || 0),
+            landmark: d.pickup_landmark || null,
+        },
+
+        dropoff: {
+            address: d.dropoff_address || '',
+            lat: Number(d.dropoff_latitude || 0),
+            lng: Number(d.dropoff_longitude || 0),
+            landmark: d.dropoff_landmark || null,
+        },
+
+        distanceKm: Number(d.distance_km || 0),
+        totalPrice: Number(d.total_price || 0),
+        driverPayout: Number(d.driver_payout || 0),
+        commissionAmount: Number(d.commission_amount || 0),
+
+        paymentMethod: d.payment_method || 'unknown',
+        paymentStatus: d.payment_status || 'unknown',
+
+        isSurging: Number(d.surge_multiplier_applied || 1) > 1,
+
+        sender: d.sender ? {
+            uuid: d.sender.uuid,
+            name: senderName,
+            phone: d.sender.phone_e164 || null,
+            avatar: d.sender.avatar_url || null,
+        } : null,
+
+        senderName,
+
+        recipientName: d.recipient_name || '',
+        recipientPhone: d.recipient_phone || '',
+        recipientNote: d.recipient_note || '',
+
+        durationMinutes,
+
+        createdAt: d.created_at || null,
+        acceptedAt: d.accepted_at || null,
+        arrivedPickupAt: d.arrived_pickup_at || null,
+        pickedUpAt: d.picked_up_at || null,
+        arrivedDropoffAt: d.arrived_dropoff_at || null,
+        deliveredAt: d.delivered_at || null,
+        cancelledAt: d.cancelled_at || null,
+
+        cancelledBy: d.cancelled_by || null,
+        cancellationReason: d.cancellation_reason || null,
+    };
+}
+
+exports.getAgentDeliveryHistory = async (req, res) => {
+    try {
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📦 [AGENT-HISTORY] Request received');
+        console.log('   URL        :', req.originalUrl);
+        console.log('   user uuid  :', req.user?.uuid);
+        console.log('   user type  :', req.user?.user_type);
+        console.log('   activeMode :', req.auth?.active_mode || '(not set)');
+        console.log('   query      :', req.query);
+
+        const {
+            page = 1,
+            limit = 15,
+            status,
+            delivery_type,
+            payment_method,
+        } = req.query;
+
+        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const limitNum = Math.max(parseInt(limit, 10) || 15, 1);
+
+        const driver = await getDriverByAccountUuid(req.user.uuid);
+
+        console.log('👤 [AGENT-HISTORY] Driver lookup result:');
+        console.log('   found      :', !!driver);
+
+        if (!driver) {
+            console.log('❌ [AGENT-HISTORY] No Driver row found for account uuid:', req.user.uuid);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+            return res.status(404).json({
+                success: false,
+                message: 'Driver record not found',
+            });
+        }
+
+        console.log('   driver.id  :', driver.id);
+        console.log('   driver.uuid:', driver.userId);
+        console.log('   status     :', driver.status);
+        console.log('   mode       :', driver.current_mode);
+
+        const where = {
+            driver_id: driver.id,
+        };
+
+        if (status) where.status = status;
+        if (delivery_type) where.delivery_type = delivery_type;
+        if (payment_method) where.payment_method = payment_method;
+
+        console.log('🔎 [AGENT-HISTORY] Query params normalized:');
+        console.log('   page       :', pageNum);
+        console.log('   limit      :', limitNum);
+        console.log('   where      :', JSON.stringify(where));
+
+        const { count, rows } = await Delivery.findAndCountAll({
+            where,
+            include: [
+                {
+                    association: 'sender',
+                    attributes: [
+                        'uuid',
+                        'first_name',
+                        'last_name',
+                        'phone_e164',
+                        'avatar_url',
+                    ],
+                },
+            ],
+            order: [['created_at', 'DESC']],
+            limit: limitNum,
+            offset: (pageNum - 1) * limitNum,
+        });
+
+        console.log('✅ [AGENT-HISTORY] DB result:');
+        console.log('   total count:', count);
+        console.log('   rows fetched:', rows.length);
+
+        rows.forEach((d, index) => {
+            console.log(`\n🧾 [AGENT-HISTORY] Raw row #${index + 1}`);
+            console.log('   id              :', d.id);
+            console.log('   code            :', d.delivery_code);
+            console.log('   status          :', d.status);
+            console.log('   delivery_type   :', d.delivery_type);
+            console.log('   distance_km     :', d.distance_km);
+            console.log('   total_price     :', d.total_price);
+            console.log('   driver_payout   :', d.driver_payout);
+            console.log('   commission      :', d.commission_amount);
+            console.log('   payment_method  :', d.payment_method);
+            console.log('   payment_status  :', d.payment_status);
+            console.log('   pickup_address  :', d.pickup_address);
+            console.log('   dropoff_address :', d.dropoff_address);
+            console.log('   created_at      :', d.created_at);
+            console.log('   delivered_at    :', d.delivered_at);
+        });
+
+        const deliveries = rows.map(mapDeliveryForAgent);
+
+        deliveries.forEach((d, index) => {
+            console.log(`\n📤 [AGENT-HISTORY] Mapped response #${index + 1}`);
+            console.log('   id              :', d.id);
+            console.log('   deliveryCode    :', d.deliveryCode);
+            console.log('   distanceKm      :', d.distanceKm);
+            console.log('   totalPrice      :', d.totalPrice);
+            console.log('   driverPayout    :', d.driverPayout);
+            console.log('   commissionAmount:', d.commissionAmount);
+            console.log('   paymentMethod   :', d.paymentMethod);
+            console.log('   paymentStatus   :', d.paymentStatus);
+            console.log('   pickup.address  :', d.pickup.address);
+            console.log('   dropoff.address :', d.dropoff.address);
+        });
+
+        console.log('📦 [AGENT-HISTORY] Response ready');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        return res.json({
+            success: true,
+            deliveries,
+            pagination: {
+                total: count,
+                page: pageNum,
+                limit: limitNum,
+                totalPages: Math.ceil(count / limitNum),
+            },
+        });
+
+    } catch (error) {
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.error('❌ [AGENT-HISTORY] Error:', error.message);
+        console.error(error.stack);
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to get delivery history',
+        });
+    }
+};
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET AGENT DELIVERY DETAIL
+// GET /api/deliveries/agent/history/:id
+// ═══════════════════════════════════════════════════════════════════════════════
+
+exports.getAgentDeliveryDetail = async (req, res) => {
+    try {
+        const deliveryId = parseInt(req.params.id, 10);
+
+        const driver = await getDriverByAccountUuid(req.user.uuid);
+
+        if (!driver) {
+            return res.status(404).json({
+                success: false,
+                message: 'Driver record not found',
+            });
+        }
+
+        const delivery = await Delivery.findOne({
+            where: {
+                id: deliveryId,
+                driver_id: driver.id,
+            },
+            include: [
+                {
+                    association: 'sender',
+                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                },
+            ],
+        });
+
+        if (!delivery) {
+            return res.status(404).json({
+                success: false,
+                message: 'Delivery not found',
+            });
+        }
+
+        const walletTransactions = await DeliveryWalletTransaction.findAll({
+            where: {
+                delivery_id: delivery.id,
+            },
+            order: [['created_at', 'DESC']],
+        });
+
+        return res.json({
+            success: true,
+            delivery: {
+                ...mapDeliveryForAgent(delivery),
+                walletTransactions,
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [DELIVERY] getAgentDeliveryDetail error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to get delivery detail',
+        });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET AGENT DELIVERY EARNINGS
+// GET /api/deliveries/agent/history/earnings
+// ═══════════════════════════════════════════════════════════════════════════════
+
+exports.getAgentDeliveryEarnings = async (req, res) => {
+    try {
+        const driver = await getDriverByAccountUuid(req.user.uuid);
+
+        if (!driver) {
+            return res.status(404).json({
+                success: false,
+                message: 'Driver record not found',
+            });
+        }
+
+        const now = new Date();
+
+        const startOfToday = new Date(now);
+        startOfToday.setHours(0, 0, 0, 0);
+
+        const startOfWeek = new Date(now);
+        const day = startOfWeek.getDay() || 7;
+        startOfWeek.setDate(startOfWeek.getDate() - day + 1);
+        startOfWeek.setHours(0, 0, 0, 0);
+
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        async function periodStats(startDate = null) {
+            const where = {
+                driver_id: driver.id,
+                status: 'delivered',
+            };
+
+            if (startDate) {
+                where.delivered_at = {
+                    [Op.gte]: startDate,
+                };
+            }
+
+            const deliveries = await Delivery.findAll({ where });
+
+            let totalEarnings = 0;
+            let cashCollected = 0;
+            let cashOwedToWego = 0;
+            let walletCredited = 0;
+            let expressCount = 0;
+            let regularCount = 0;
+
+            for (const d of deliveries) {
+                const payout = parseFloat(d.driver_payout || 0);
+                const total = parseFloat(d.total_price || 0);
+                const commission = parseFloat(d.commission_amount || 0);
+
+                totalEarnings += payout;
+
+                if (d.payment_method === 'cash') {
+                    cashCollected += total;
+                    cashOwedToWego += commission;
+                } else {
+                    walletCredited += payout;
+                }
+
+                if (d.delivery_type === 'express') {
+                    expressCount++;
+                } else {
+                    regularCount++;
+                }
+            }
+
+            return {
+                deliveries: deliveries.length,
+                totalEarnings,
+                cashCollected,
+                cashOwedToWego,
+                walletCredited,
+                expressCount,
+                regularCount,
+            };
+        }
+
+        return res.json({
+            success: true,
+            earnings: {
+                today: await periodStats(startOfToday),
+                week: await periodStats(startOfWeek),
+                month: await periodStats(startOfMonth),
+                allTime: await periodStats(null),
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [DELIVERY] getAgentDeliveryEarnings error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to get earnings',
+        });
+    }
+};
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 12. TOGGLE DRIVER MODE

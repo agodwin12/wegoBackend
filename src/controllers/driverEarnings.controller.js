@@ -17,7 +17,7 @@
 
 'use strict';
 
-const { Op }   = require('sequelize');
+const { Op }         = require('sequelize');
 const earningsEngine = require('../services/earningsEngineService');
 
 const {
@@ -29,6 +29,19 @@ const {
     EarningRule,
     Trip,
 } = require('../models');
+
+// ── All valid transaction types (kept in sync with DriverWalletTransaction ENUM) ──
+// TOP_UP is first because it's now the most common entry for new drivers.
+const ALL_TX_TYPES = [
+    'TOP_UP',
+    'TRIP_FARE',
+    'COMMISSION',
+    'BONUS_TRIP',
+    'BONUS_QUEST',
+    'ADJUSTMENT',
+    'REFUND',
+    'PAYOUT',
+];
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /api/driver/earnings/summary
@@ -44,16 +57,17 @@ exports.getSummary = async (req, res, next) => {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('💰 [EARNINGS] getSummary — Driver:', driverId);
 
-        // Use the engine helper which aggregates everything efficiently
         const summary = await earningsEngine.getWalletSummary(driverId);
 
         if (!summary) {
-            // Driver has never completed a trip — return zeroed summary
+            // Driver has no wallet yet — return a clean zero state.
+            // This is normal for new drivers who haven't topped up or completed a trip.
             console.log('ℹ️  [EARNINGS] No wallet found — returning empty summary');
             return res.status(200).json({
                 success: true,
                 data: {
                     balance:         0,
+                    totalTopUps:     0,   // ← pre-paid credits ever deposited
                     totalEarned:     0,
                     totalCommission: 0,
                     totalBonuses:    0,
@@ -61,6 +75,7 @@ exports.getSummary = async (req, res, next) => {
                     currency:        'XAF',
                     walletStatus:    'ACTIVE',
                     lastPayoutAt:    null,
+                    lastTopUpAt:     null,
                     today:  { net: 0, trips: 0 },
                     week:   { net: 0, trips: 0 },
                     month:  { net: 0 },
@@ -68,13 +83,19 @@ exports.getSummary = async (req, res, next) => {
             });
         }
 
-        console.log(`✅ [EARNINGS] Summary: balance=${summary.balance} XAF`);
+        console.log(`✅ [EARNINGS] Summary: balance=${summary.balance} XAF | topUps=${summary.totalTopUps ?? 0} XAF`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(200).json({
             success: true,
             data: {
                 balance:         summary.balance,
+                // ── Pre-paid top-up lifetime total ─────────────────────
+                // Separate from totalEarned so the driver can see how much
+                // they funded vs how much they actually earned from trips.
+                totalTopUps:     summary.totalTopUps     ?? 0,
+                lastTopUpAt:     summary.lastTopUpAt     ?? null,
+                // ── Trip earnings ──────────────────────────────────────
                 totalEarned:     summary.totalEarned,
                 totalCommission: summary.totalCommission,
                 totalBonuses:    summary.totalBonuses,
@@ -82,6 +103,7 @@ exports.getSummary = async (req, res, next) => {
                 currency:        summary.currency,
                 walletStatus:    summary.status,
                 lastPayoutAt:    summary.lastPayoutAt,
+                // ── Period breakdowns ──────────────────────────────────
                 today:           summary.today,
                 week:            summary.week,
                 month:           summary.month,
@@ -119,7 +141,6 @@ exports.getTripReceipts = async (req, res, next) => {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log(`📋 [EARNINGS] getTripReceipts — Driver: ${driverId} | Period: ${period} | Page: ${page}`);
 
-        // ── Build date filter ─────────────────────────────────────────
         const dateFilter = _buildDateFilter(period);
         const where      = { driverId };
         if (dateFilter) where.createdAt = dateFilter;
@@ -147,20 +168,18 @@ exports.getTripReceipts = async (req, res, next) => {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         const formatted = receipts.map(r => ({
-            receiptId:       r.id,
-            tripId:          r.tripId,
-            grossFare:       r.grossFare,
-            commissionRate:  parseFloat(r.commissionRate),
-            commissionAmount:r.commissionAmount,
-            bonusTotal:      r.bonusTotal,
-            driverNet:       r.driverNet,
-            paymentMethod:   r.paymentMethod,
-            status:          r.status,
-            processedAt:     r.processedAt,
-            createdAt:       r.createdAt,
-            // Breakdown array for display (from appliedRules snapshot)
-            breakdown:       r.appliedRules || [],
-            // Trip details
+            receiptId:        r.id,
+            tripId:           r.tripId,
+            grossFare:        r.grossFare,
+            commissionRate:   parseFloat(r.commissionRate),
+            commissionAmount: r.commissionAmount,
+            bonusTotal:       r.bonusTotal,
+            driverNet:        r.driverNet,
+            paymentMethod:    r.paymentMethod,
+            status:           r.status,
+            processedAt:      r.processedAt,
+            createdAt:        r.createdAt,
+            breakdown:        r.appliedRules || [],
             trip: r.trip ? {
                 pickupAddress:  r.trip.pickupAddress,
                 dropoffAddress: r.trip.dropoffAddress,
@@ -202,7 +221,8 @@ exports.getTripReceipts = async (req, res, next) => {
 // Query params:
 //   page    (default: 1)
 //   limit   (default: 30, max: 100)
-//   type    (TRIP_FARE | COMMISSION | BONUS_TRIP | BONUS_QUEST | PAYOUT | ADJUSTMENT | all)
+//   type    (TOP_UP | TRIP_FARE | COMMISSION | BONUS_TRIP | BONUS_QUEST |
+//            PAYOUT | ADJUSTMENT | REFUND | all — default: all)
 //   period  (today | week | month | all — default: all)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -219,14 +239,16 @@ exports.getActivity = async (req, res, next) => {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log(`📊 [EARNINGS] getActivity — Driver: ${driverId} | Period: ${period} | Type: ${type}`);
 
-        // ── Build filters ─────────────────────────────────────────────
         const where = { driverId };
 
         const dateFilter = _buildDateFilter(period);
         if (dateFilter) where.createdAt = dateFilter;
 
-        const validTypes = ['TRIP_FARE', 'COMMISSION', 'BONUS_TRIP', 'BONUS_QUEST', 'ADJUSTMENT', 'REFUND', 'PAYOUT'];
-        if (type !== 'all' && validTypes.includes(type.toUpperCase())) {
+        // ── Type filter — now includes TOP_UP ─────────────────────────
+        // ALL_TX_TYPES is the single source of truth for valid type names.
+        // Using it here means adding a new type to the ENUM automatically
+        // makes it filterable here without touching this code again.
+        if (type !== 'all' && ALL_TX_TYPES.includes(type.toUpperCase())) {
             where.type = type.toUpperCase();
         }
 
@@ -235,7 +257,6 @@ exports.getActivity = async (req, res, next) => {
             order:  [['createdAt', 'DESC']],
             limit,
             offset,
-            // No JOIN needed — description + metadata has everything for display
         });
 
         console.log(`✅ [EARNINGS] ${count} transactions found`);
@@ -244,24 +265,34 @@ exports.getActivity = async (req, res, next) => {
         const formatted = transactions.map(tx => ({
             id:           tx.id,
             type:         tx.type,
-            amount:       tx.amount,           // signed — positive = credit, negative = debit
+            amount:       tx.amount,        // signed — positive = credit, negative = debit
             balanceAfter: tx.balanceAfter,
             description:  tx.description,
-            tripId:       tx.tripId   || null,
+            tripId:       tx.tripId    || null,
             receiptId:    tx.receiptId || null,
             createdAt:    tx.createdAt,
-            // Extra fields for specific types
+
+            // ── PAYOUT-specific fields ─────────────────────────────────
             payoutMethod: tx.payoutMethod || null,
             payoutRef:    tx.payoutRef    || null,
             payoutStatus: tx.payoutStatus || null,
+
+            // ── TOP_UP-specific fields ─────────────────────────────────
+            // topUpMethod lets the activity feed show "MTN MoMo" / "Cash" etc.
+            // alongside the top-up entry, matching how payoutMethod works for payouts.
+            topUpMethod:  tx.topUpMethod  || null,
+            topUpRef:     tx.topUpRef     || null,
+
+            // ── Shared ────────────────────────────────────────────────
             metadata:     tx.metadata     || null,
-            // UI helpers
+
+            // ── UI helpers ────────────────────────────────────────────
             isCredit: tx.amount > 0,
             isDebit:  tx.amount < 0,
             label:    _txTypeLabel(tx.type),
         }));
 
-        // ── Aggregates for the period (useful for header display) ──────
+        // ── Period aggregates (used for the summary bar in Flutter) ────
         const periodCredits = transactions
             .filter(tx => tx.amount > 0)
             .reduce((sum, tx) => sum + tx.amount, 0);
@@ -316,7 +347,6 @@ exports.getQuests = async (req, res, next) => {
 
         const today = new Date().toISOString().split('T')[0];
 
-        // Load all currently active programs
         const programs = await BonusProgram.findAll({
             where: {
                 isActive: true,
@@ -335,17 +365,14 @@ exports.getQuests = async (req, res, next) => {
             });
         }
 
-        // For each program, compute current progress + completion status
         const quests = await Promise.all(programs.map(async (program) => {
             const periodKey   = BonusProgram.getPeriodKey(program.period);
             const periodStart = earningsEngine._getPeriodStart(program.period);
 
-            // Check if already awarded this period
             const award = await BonusAward.findOne({
                 where: { driverId, programId: program.id, periodKey },
             });
 
-            // Count current metric
             const baseWhere = {
                 driverId,
                 status:          'COMPLETED',
@@ -369,23 +396,21 @@ exports.getQuests = async (req, res, next) => {
             );
 
             return {
-                programId:       program.id,
-                name:            program.name,
-                description:     program.description,
-                type:            program.type,
-                period:          program.period,
+                programId:      program.id,
+                name:           program.name,
+                description:    program.description,
+                type:           program.type,
+                period:         program.period,
                 periodKey,
-                iconEmoji:       program.iconEmoji || '🏆',
-                targetValue:     program.targetValue,
-                bonusAmount:     program.bonusAmount,
+                iconEmoji:      program.iconEmoji || '🏆',
+                targetValue:    program.targetValue,
+                bonusAmount:    program.bonusAmount,
                 currentMetric,
                 progressPercent,
-                isCompleted:     !!award,
-                completedAt:     award?.awardedAt || null,
-                // UI label for the metric unit
-                metricUnit:      program.type.includes('EARNINGS') ? 'XAF' : 'trips',
-                // Remaining to target
-                remaining:       Math.max(program.targetValue - currentMetric, 0),
+                isCompleted:    !!award,
+                completedAt:    award?.awardedAt || null,
+                metricUnit:     program.type.includes('EARNINGS') ? 'XAF' : 'trips',
+                remaining:      Math.max(program.targetValue - currentMetric, 0),
             };
         }));
 
@@ -425,23 +450,21 @@ function _buildDateFilter(period) {
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
     switch (period) {
-        case 'today':
-            return { [Op.gte]: today, [Op.lt]: tomorrow };
-        case 'week':
-            return { [Op.gte]: weekStart };
-        case 'month':
-            return { [Op.gte]: monthStart };
-        default:
-            return null; // 'all' — no date filter
+        case 'today': return { [Op.gte]: today, [Op.lt]: tomorrow };
+        case 'week':  return { [Op.gte]: weekStart };
+        case 'month': return { [Op.gte]: monthStart };
+        default:      return null; // 'all' — no date filter
     }
 }
 
 /**
  * Human-readable label for each transaction type.
- * Used in the Flutter activity feed.
+ * Returned as the `label` field on every transaction row.
+ * Flutter uses this directly in the activity feed tile heading.
  */
 function _txTypeLabel(type) {
     const labels = {
+        TOP_UP:      'Wallet Top-Up',    // ← pre-paid credit
         TRIP_FARE:   'Trip Fare',
         COMMISSION:  'WEGO Commission',
         BONUS_TRIP:  'Trip Bonus',

@@ -8,7 +8,11 @@
 // Rows are NEVER updated or deleted after creation. This is a pure
 // append-only ledger — the financial source of truth for the platform.
 //
-// For each completed trip, the earnings engine writes multiple rows:
+// ── Pre-paid top-up (driver credits wallet before working) ───────────
+//
+//   type=TOP_UP         amount=+5000   "Wallet top-up via MTN MoMo"
+//
+// ── Per completed trip, the earnings engine writes multiple rows ──────
 //
 //   type=TRIP_FARE      amount=+5000   "Trip fare earned"
 //   type=COMMISSION     amount=-500    "WEGO commission (10%)"
@@ -17,19 +21,46 @@
 //                       ───────────
 //                       net = +5700 XAF credited to driver balance
 //
-// When WEGO pays the driver:
+// ── When WEGO pays the driver ─────────────────────────────────────────
+//
 //   type=PAYOUT         amount=-5700   "Weekly payout via MTN MoMo"
 //
-// Admin corrections:
+// ── Admin corrections ─────────────────────────────────────────────────
+//
 //   type=ADJUSTMENT     amount=+300    "Manual fare correction — Trip X"
 //   type=ADJUSTMENT     amount=-200    "Penalty — late cancellation"
 //
-// Refund after dispute:
+// ── Refund after dispute ──────────────────────────────────────────────
+//
 //   type=REFUND         amount=-3000   "Refund issued — dispute #D-2026-001"
 //
-// IMPORTANT: amount is always signed.
+// ── Sign convention ───────────────────────────────────────────────────
+//
 //   Positive = credit  (money coming INTO driver wallet)
 //   Negative = debit   (money going OUT of driver wallet)
+//
+// ── Reference format by type ──────────────────────────────────────────
+//
+//   TOP_UP:      "TOP_UP:{uuid}"
+//   TRIP_FARE:   "TRIP_FARE:{tripId}"
+//   COMMISSION:  "COMMISSION:{tripId}"
+//   BONUS_TRIP:  "BONUS_TRIP:{ruleId}:{tripId}"
+//   BONUS_QUEST: "BONUS_QUEST:{programId}:{date}"
+//   PAYOUT:      "PAYOUT:{payoutId}"
+//   ADJUSTMENT:  "ADJUSTMENT:{adminId}:{timestamp}"
+//   REFUND:      "REFUND:{disputeId}"
+//
+// ⚠️  MIGRATION REQUIRED when adding TOP_UP:
+//   ALTER TABLE driver_wallet_transactions
+//     MODIFY COLUMN type ENUM(
+//       'TRIP_FARE','COMMISSION','BONUS_TRIP','BONUS_QUEST',
+//       'ADJUSTMENT','REFUND','PAYOUT','TOP_UP'
+//     ) NOT NULL;
+//   ALTER TABLE driver_wallet_transactions
+//     ADD COLUMN topUpMethod ENUM('MTN_MOMO','ORANGE_MONEY','CASH','BANK_TRANSFER') NULL
+//     AFTER payoutStatus;
+//   ALTER TABLE driver_wallet_transactions
+//     ADD COLUMN topUpRef VARCHAR(200) NULL AFTER topUpMethod;
 //
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -70,7 +101,7 @@ DriverWalletTransaction.init(
             type:      DataTypes.CHAR(36),
             allowNull: true,
             field:     'tripId',
-            comment:   'FK → trips.id. Present for TRIP_FARE, COMMISSION, BONUS_TRIP. Null for PAYOUT, ADJUSTMENT.',
+            comment:   'FK → trips.id. Present for TRIP_FARE, COMMISSION, BONUS_TRIP. Null for TOP_UP, PAYOUT, ADJUSTMENT.',
         },
 
         receiptId: {
@@ -84,7 +115,7 @@ DriverWalletTransaction.init(
             type:      DataTypes.CHAR(36),
             allowNull: true,
             field:     'ruleId',
-            comment:   'FK → earning_rules.id. Which rule triggered this entry. Null for PAYOUT/ADJUSTMENT.',
+            comment:   'FK → earning_rules.id. Which rule triggered this entry. Null for TOP_UP, PAYOUT, ADJUSTMENT.',
         },
 
         bonusProgramId: {
@@ -103,7 +134,8 @@ DriverWalletTransaction.init(
 
         // ── Transaction type ──────────────────────────────────────────
         type: {
-            type:      DataTypes.ENUM(
+            type: DataTypes.ENUM(
+                'TOP_UP',        // Driver pre-funds wallet via MoMo / cash (positive)
                 'TRIP_FARE',     // Gross fare from a completed trip (positive)
                 'COMMISSION',    // WEGO commission deduction (negative)
                 'BONUS_TRIP',    // Per-trip bonus: night, area, airport, etc. (positive)
@@ -138,7 +170,7 @@ DriverWalletTransaction.init(
             type:      DataTypes.STRING(300),
             allowNull: false,
             field:     'description',
-            comment:   'Human-readable label shown in driver earnings activity feed. E.g. "Night shift bonus — Trip #ABC123"',
+            comment:   'Human-readable label shown in driver earnings activity feed.',
         },
 
         // ── Idempotency reference ─────────────────────────────────────
@@ -147,14 +179,7 @@ DriverWalletTransaction.init(
             allowNull: false,
             unique:    true,
             field:     'reference',
-            comment:   'Unique idempotency key for this entry. Format: {type}:{tripId|programId|uuid}. Prevents duplicate posting.',
-            // Examples:
-            //   "TRIP_FARE:trip-uuid-here"
-            //   "COMMISSION:trip-uuid-here"
-            //   "BONUS_TRIP:rule-uuid:trip-uuid"
-            //   "BONUS_QUEST:program-uuid:2026-02-28"
-            //   "PAYOUT:payout-uuid-here"
-            //   "ADJUSTMENT:admin-uuid:timestamp"
+            comment:   'Unique idempotency key. Format: {TYPE}:{uuid}. Prevents duplicate posting.',
         },
 
         // ── Extra metadata ────────────────────────────────────────────
@@ -164,12 +189,28 @@ DriverWalletTransaction.init(
             field:     'metadata',
             comment:   'Arbitrary extra context. Never used for business logic — audit/display only.',
             // Examples by type:
+            // TOP_UP:       { method: "MTN_MOMO", phone: "+237670000000", ref: "TXN123", initiatedBy: "driver" | "admin" }
             // TRIP_FARE:    { grossFare: 5000, pickup: "Akwa", dropoff: "Bonamoussadi" }
             // COMMISSION:   { rate: 0.10, ruleId: "...", ruleName: "Standard 10%" }
             // BONUS_TRIP:   { ruleName: "Night Bonus", condition: "hour >= 22" }
             // BONUS_QUEST:  { programName: "10 Trips Daily", target: 10, achieved: 10, period: "2026-02-28" }
             // PAYOUT:       { method: "MTN_MOMO", phone: "+237670000000", ref: "TXN123" }
             // ADJUSTMENT:   { adminId: "...", adminName: "Jean Admin", note: "Manual correction" }
+        },
+
+        // ── For TOP_UP type only ──────────────────────────────────────
+        topUpMethod: {
+            type:      DataTypes.ENUM('MTN_MOMO', 'ORANGE_MONEY', 'CASH', 'BANK_TRANSFER'),
+            allowNull: true,
+            field:     'topUpMethod',
+            comment:   'Payment channel used to fund the wallet. Only populated for type=TOP_UP.',
+        },
+
+        topUpRef: {
+            type:      DataTypes.STRING(200),
+            allowNull: true,
+            field:     'topUpRef',
+            comment:   'External payment gateway transaction reference. Only populated for type=TOP_UP.',
         },
 
         // ── For PAYOUT type only ──────────────────────────────────────
@@ -240,6 +281,7 @@ DriverWalletTransaction.init(
             { fields: ['receiptId'], name: 'dwt_receipt' },
 
             // Type filter: "show all PAYOUT entries" (for payout reconciliation)
+            // Also used to find all TOP_UP entries for reconciliation reports
             { fields: ['type'], name: 'dwt_type' },
 
             // Idempotency check (unique reference)

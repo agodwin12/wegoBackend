@@ -1,187 +1,209 @@
 // src/routes/driver.routes.js
 
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 
-// ═══════════════════════════════════════════════════════════════════════
-// MIDDLEWARE IMPORTS
-// ═══════════════════════════════════════════════════════════════════════
-
-const { authenticate } = require('../middleware/auth.middleware');
-const { requireDriver, requireDriverAny } = require('../middleware/driver.middleware');
-
-// ═══════════════════════════════════════════════════════════════════════
-// CONTROLLER IMPORT
-// ═══════════════════════════════════════════════════════════════════════
+const { authenticate }                                             = require('../middleware/auth.middleware');
+const { requireActiveDriver, requireDriver, requireDriverAny }    = require('../middleware/driver.middleware');
 
 const driverController = require('../controllers/driver.controller');
 
 // ═══════════════════════════════════════════════════════════════════════
 // DRIVER STATUS ROUTES
 // ═══════════════════════════════════════════════════════════════════════
+//
+// online / offline / location / status are SHARED between ride-hailing
+// drivers and delivery agents — both verticals use the same Redis
+// geo-index and socket infrastructure.
+//
+// requireActiveDriver accepts:
+//   - DRIVER in DRIVER mode
+//   - DRIVER in DELIVERY_AGENT mode  (driver switched to delivery)
+//   - DELIVERY_AGENT in DELIVERY_AGENT mode
+//   Blocks anyone in PASSENGER mode.
+//
+// ───────────────────────────────────────────────────────────────────────
 
 /**
  * @route   PUT /api/driver/status
- * @desc    Toggle online/offline — accepts { status: 'online' | 'offline' }
- *          Used by DeliveryAgentDashboard and DriverDashboard Flutter screens.
- *          Works for both DRIVER and DELIVERY_AGENT user types.
- * @access  Private (DRIVER or DELIVERY_AGENT)
- * @body    { status: 'online' | 'offline', lat?: number, lng?: number }
+ * @desc    Toggle online/offline — { status: 'online' | 'offline' }
+ * @access  Private (DRIVER or DELIVERY_AGENT, not in PASSENGER mode)
  */
-router.put('/status', authenticate, requireDriver, driverController.setStatus);
+router.put('/status', authenticate, requireActiveDriver, driverController.setStatus);
 
 /**
  * @route   POST /api/driver/online
- * @desc    Set driver status to ONLINE (available for trips)
- * @access  Private (Active Drivers only)
- * @body    { lat: number, lng: number, heading?: number }
+ * @desc    Set status to ONLINE (available for trips or deliveries)
+ * @access  Private (DRIVER or DELIVERY_AGENT, not in PASSENGER mode)
+ * @body    { lat, lng, heading? }
  */
-router.post('/online', authenticate, requireDriver, driverController.goOnline);
+router.post('/online', authenticate, requireActiveDriver, driverController.goOnline);
 
 /**
  * @route   POST /api/driver/offline
- * @desc    Set driver status to OFFLINE (unavailable for trips)
- * @access  Private (Active Drivers only)
+ * @desc    Set status to OFFLINE
+ * @access  Private (DRIVER or DELIVERY_AGENT, not in PASSENGER mode)
  */
-router.post('/offline', authenticate, requireDriver, driverController.goOffline);
+router.post('/offline', authenticate, requireActiveDriver, driverController.goOffline);
 
 /**
  * @route   POST /api/driver/location
- * @desc    Update driver's current location
- * @access  Private (Active Drivers only)
- * @body    { lat: number, lng: number, heading?: number, speed?: number }
+ * @desc    Update current GPS location
+ * @access  Private (DRIVER or DELIVERY_AGENT, not in PASSENGER mode)
+ * @body    { lat, lng, heading?, speed? }
  */
-router.post('/location', authenticate, requireDriver, driverController.updateLocation);
+router.post('/location', authenticate, requireActiveDriver, driverController.updateLocation);
 
 /**
  * @route   GET /api/driver/status
- * @desc    Get driver's current online/offline status
- * @access  Private (Any Driver)
+ * @desc    Get current online/offline status
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.get('/status', authenticate, requireDriverAny, driverController.getStatus);
 
 // ═══════════════════════════════════════════════════════════════════════
-// TRIP MANAGEMENT ROUTES
+// WALLET ROUTE
 // ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * @route   GET /api/driver/wallet
+ * @desc    Get wallet balance + period earnings breakdown.
+ * @access  Private (Any driver or delivery agent, any mode)
+ */
+router.get('/wallet', authenticate, requireDriverAny, driverController.getWalletBalance);
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRIP MANAGEMENT ROUTES  (ride-hailing ONLY)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// requireDriver accepts DRIVER in DRIVER mode only.
+// A driver who switched to PASSENGER or DELIVERY_AGENT mode cannot
+// interact with these endpoints.
+//
+// ───────────────────────────────────────────────────────────────────────
 
 /**
  * @route   GET /api/driver/current-trip
  * @desc    Get driver's current active trip
- * @access  Private (Active Drivers only)
+ * @access  Private (DRIVER in DRIVER mode)
  */
 router.get('/current-trip', authenticate, requireDriver, driverController.getCurrentTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/accept
  * @desc    Accept a trip offer
- * @access  Private (Active Drivers only)
+ * @access  Private (DRIVER in DRIVER mode)
  */
 router.post('/trips/:tripId/accept', authenticate, requireDriver, driverController.acceptTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/decline
  * @desc    Decline a trip offer
- * @access  Private (Active Drivers only)
+ * @access  Private (DRIVER in DRIVER mode)
  */
 router.post('/trips/:tripId/decline', authenticate, requireDriver, driverController.declineTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/arrived
- * @desc    Mark driver as arrived at pickup location
- * @access  Private (Active Drivers only)
+ * @desc    Mark arrived at pickup location
+ * @access  Private (DRIVER in DRIVER mode)
  */
 router.post('/trips/:tripId/arrived', authenticate, requireDriver, driverController.arrivedAtPickup);
 
 /**
  * @route   POST /api/driver/trips/:tripId/start
  * @desc    Start trip (passenger on board)
- * @access  Private (Active Drivers only)
+ * @access  Private (DRIVER in DRIVER mode)
  */
 router.post('/trips/:tripId/start', authenticate, requireDriver, driverController.startTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/complete
  * @desc    Complete trip (arrived at destination)
- * @access  Private (Active Drivers only)
- * @body    { final_fare?: number, distance_traveled?: number, duration_seconds?: number }
+ * @access  Private (DRIVER in DRIVER mode)
+ * @body    { final_fare?, distance_traveled?, duration_seconds? }
  */
 router.post('/trips/:tripId/complete', authenticate, requireDriver, driverController.completeTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/cancel
  * @desc    Cancel a trip
- * @access  Private (Active Drivers only)
- * @body    { reason: string, waitingTime?: number }
+ * @access  Private (DRIVER in DRIVER mode)
+ * @body    { reason }
  */
 router.post('/trips/:tripId/cancel', authenticate, requireDriver, driverController.cancelTrip);
 
 /**
  * @route   POST /api/driver/trips/:tripId/no-show
- * @desc    Report passenger no-show (passenger didn't arrive after waiting)
- * @access  Private (Active Drivers only)
- * @body    { waitingTime: number, reason?: string }
+ * @desc    Report passenger no-show
+ * @access  Private (DRIVER in DRIVER mode)
+ * @body    { waitingTime, reason? }
  */
 router.post('/trips/:tripId/no-show', authenticate, requireDriver, driverController.reportNoShow);
 
 // ═══════════════════════════════════════════════════════════════════════
-// STATS & HISTORY ROUTES
+// STATS & HISTORY ROUTES  (read-only — any mode)
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
  * @route   GET /api/driver/stats
- * @desc    Get driver statistics (today, week, total trips & earnings)
- * @access  Private (Any Driver)
+ * @desc    Driver statistics (today, week, total trips & earnings)
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.get('/stats', authenticate, requireDriverAny, driverController.getStats);
 
 /**
  * @route   GET /api/driver/earnings
- * @desc    Get detailed earnings breakdown
- * @access  Private (Any Driver)
+ * @desc    Detailed earnings breakdown
+ * @access  Private (Any driver or delivery agent, any mode)
  * @query   { period?: 'today' | 'week' | 'month' | 'all' }
  */
 router.get('/earnings', authenticate, requireDriverAny, driverController.getEarnings);
 
 /**
  * @route   GET /api/driver/trips/history
- * @desc    Get paginated trip history
- * @access  Private (Any Driver)
- * @query   { page?: number, limit?: number, status?: string }
+ * @desc    Paginated trip history
+ * @access  Private (Any driver or delivery agent, any mode)
+ * @query   { page?, limit?, status? }
  */
 router.get('/trips/history', authenticate, requireDriverAny, driverController.getTripHistory);
 
-
+/**
+ * @route   GET /api/driver/trips
+ * @desc    All trips with filters
+ * @access  Private (Any driver or delivery agent, any mode)
+ */
 router.get('/trips', authenticate, requireDriverAny, driverController.getAllTrips);
+
 /**
  * @route   GET /api/driver/trips/:tripId
- * @desc    Get details of a specific trip
- * @access  Private (Any Driver)
+ * @desc    Details of a specific trip
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.get('/trips/:tripId', authenticate, requireDriverAny, driverController.getTripDetails);
 
 // ═══════════════════════════════════════════════════════════════════════
-// DRIVER PROFILE ROUTES
+// PROFILE ROUTES  (read-only — any mode)
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
  * @route   GET /api/driver/profile
- * @desc    Get driver profile information
- * @access  Private (Any Driver)
+ * @desc    Get profile information
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.get('/profile', authenticate, requireDriverAny, driverController.getProfile);
 
 /**
  * @route   PUT /api/driver/profile
- * @desc    Update driver profile
- * @access  Private (Any Driver)
- * @body    { phone?: string, emergency_contact?: string, etc. }
+ * @desc    Update profile
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.put('/profile', authenticate, requireDriverAny, driverController.updateProfile);
 
 /**
  * @route   GET /api/driver/ratings
- * @desc    Get driver ratings and reviews
- * @access  Private (Any Driver)
+ * @desc    Ratings and reviews
+ * @access  Private (Any driver or delivery agent, any mode)
  */
 router.get('/ratings', authenticate, requireDriverAny, driverController.getRatings);
 
@@ -189,36 +211,25 @@ router.get('/ratings', authenticate, requireDriverAny, driverController.getRatin
 // HEALTH CHECK
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * @route   GET /api/driver/health
- * @desc    Health check endpoint
- * @access  Public
- */
 router.get('/health', (req, res) => {
     res.status(200).json({
-        status: 'ok',
-        message: 'Driver API is running',
+        status:    'ok',
+        message:   'Driver API is running',
         timestamp: new Date().toISOString(),
     });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// ERROR HANDLING
+// 404 HANDLER
 // ═══════════════════════════════════════════════════════════════════════
 
-// 404 handler for undefined driver routes
-// 🩵 Using no path argument avoids path-to-regexp crash
 router.use((req, res) => {
-    console.log(`❌ [DRIVER-ROUTES] 404 - Route not found: ${req.method} ${req.originalUrl}`);
+    console.log(`❌ [DRIVER-ROUTES] 404 — ${req.method} ${req.originalUrl}`);
     res.status(404).json({
-        error: 'Not Found',
+        error:   'Not Found',
         message: 'The requested driver endpoint does not exist',
-        path: req.originalUrl,
+        path:    req.originalUrl,
     });
 });
-
-// ═══════════════════════════════════════════════════════════════════════
-// EXPORT ROUTER
-// ═══════════════════════════════════════════════════════════════════════
 
 module.exports = router;

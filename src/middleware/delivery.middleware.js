@@ -1,39 +1,5 @@
 // src/middleware/delivery.middleware.js
-//
-// ═══════════════════════════════════════════════════════════════════════════════
-// DELIVERY MIDDLEWARE
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-// Route-level guards for the delivery module.
-//
-// Exported middleware:
-//
-//   requireDeliveryWalletBalance
-//     → Blocks a driver from accepting a job if their available wallet
-//       balance is below the commission amount for that delivery.
-//     → Must be used on POST /api/deliveries/:id/accept AFTER authenticate.
-//     → Attaches req.deliveryWallet and req.deliveryDriver for the controller
-//       to reuse — avoids a second DB round-trip.
-//
-//   validateDeliveryType
-//     → Validates the delivery_type field in booking requests.
-//     → Ensures only 'regular' and 'express' are accepted.
-//     → Attaches req.deliveryType for the controller to read.
-//
-// Usage in routes:
-//   router.post('/:id/accept',
-//     authenticate,
-//     requireDriver,          ← existing driver middleware
-//     requireDeliveryWalletBalance,   ← NEW
-//     ctrl.acceptDelivery
-//   );
-//
-//   router.post('/book',
-//     authenticate,
-//     validateDeliveryType,   ← NEW
-//     ctrl.bookDelivery
-//   );
-// ═══════════════════════════════════════════════════════════════════════════════
+
 
 'use strict';
 
@@ -50,25 +16,7 @@ const EXPRESS_SURCHARGE = parseFloat(process.env.EXPRESS_DELIVERY_SURCHARGE || 0
 // Minimum float required above commission (matches the service constant)
 const MINIMUM_FLOAT_XAF = parseInt(process.env.COMMISSION_MINIMUM_FLOAT_XAF || 0, 10);
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// requireDeliveryWalletBalance
-// ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Verifies the calling driver has enough wallet balance to cover the
- * commission fee for the delivery they are attempting to accept.
- *
- * Flow:
- *   1. Resolve Driver from req.user.uuid
- *   2. Load the Delivery to get commission_amount
- *   3. Load the DeliveryWallet and compute available balance
- *   4. If balance < (commission + minimum float) → 402
- *   5. Otherwise attach req.deliveryDriver and req.deliveryWallet and pass through
- *
- * The actual reservation (incrementing reserved_balance) happens inside
- * deliveryCommission.service.reserveCommission(), called by the controller.
- * This middleware is a fast pre-flight check only.
- */
 async function requireDeliveryWalletBalance(req, res, next) {
     try {
         const accountUuid = req.user?.uuid;

@@ -1,32 +1,51 @@
 // src/services/tripMatchingService.js
+'use strict';
 
-const locationService = require('./locationService');
+const locationService                        = require('./locationService');
 const { redisClient, REDIS_KEYS, redisHelpers } = require('../config/redis');
-const { Trip, TripEvent, Account, DriverProfile, Rating, Driver } = require('../models');
+const {
+    Trip, TripEvent, Account, DriverProfile,
+    Rating, Driver, DriverWallet, EarningRule,
+} = require('../models');
+const { Op }    = require('sequelize');
 const { v4: uuidv4 } = require('uuid');
 
+// ─── Shared cache key with EarningsEngineService ──────────────────────────────
+// Both services read from the same Redis key so rules are never fetched twice
+// for the same TTL window.
+const RULES_CACHE_KEY   = 'earnings:rules:active';
+const RULES_CACHE_TTL_S = 300; // 5 minutes — matches EarningsEngineService
+
+// ─── Fallback commission rate ─────────────────────────────────────────────────
+// Used when no COMMISSION_PERCENT rule is found in the DB.
+// Keep in sync with EarningsEngineService fallback (0.10 = 10%).
+const FALLBACK_COMMISSION_RATE = parseFloat(process.env.DEFAULT_COMMISSION_RATE || '0.10');
+
 class TripMatchingService {
+
     constructor() {
-        this.offerTtlMs      = parseInt(process.env.OFFER_TTL_MS       || 20000, 10);
-        this.searchRadiusKm  = parseFloat(process.env.DRIVER_SEARCH_RADIUS_KM || 5);
+        this.offerTtlMs     = parseInt(process.env.OFFER_TTL_MS            || 20000, 10);
+        this.searchRadiusKm = parseFloat(process.env.DRIVER_SEARCH_RADIUS_KM || 5);
 
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔧 [TRIP-MATCHING] Config:');
-        console.log('   OFFER_TTL_MS:', this.offerTtlMs, 'ms');
-        console.log('   SEARCH_RADIUS:', this.searchRadiusKm, 'km');
+        console.log('   OFFER_TTL_MS  :', this.offerTtlMs, 'ms');
+        console.log('   SEARCH_RADIUS :', this.searchRadiusKm, 'km');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         // In-memory map of tripId → setTimeout handle
         this.activeTimeouts = new Map();
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // BROADCAST TRIP TO NEARBY DRIVERS
-    // ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC: BROADCAST TRIP TO NEARBY DRIVERS
+    // ═══════════════════════════════════════════════════════════════════════
+
     async broadcastTripToDrivers(tripId, io) {
         try {
             console.log(`\n📢 [MATCHING] broadcastTripToDrivers(${tripId})`);
 
+            // ── Fetch trip from Redis ───────────────────────────────────────
             const trip = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
             if (!trip) {
                 console.log(`❌ [MATCHING] Trip ${tripId} not found in Redis`);
@@ -37,12 +56,11 @@ class TripMatchingService {
                 return { success: false, reason: 'Trip not in searching status' };
             }
 
-            // ── Fetch passenger info ────────────────────────────────────
+            // ── Fetch passenger info ────────────────────────────────────────
             const passengerAccount = await Account.findOne({
                 where:      { uuid: trip.passengerId },
                 attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
             });
-
             if (!passengerAccount) {
                 console.error(`❌ [MATCHING] Passenger ${trip.passengerId} not found`);
                 return { success: false, reason: 'Passenger not found' };
@@ -50,9 +68,8 @@ class TripMatchingService {
 
             const passengerRating = await this._getPassengerRating(trip.passengerId);
 
-            // ── Find nearby drivers from Redis geospatial index ─────────
-            // NOTE: Redis returns ALL nearby online drivers regardless of mode.
-            // We filter by current_mode='ride' in the next step.
+            // ── STEP 1: Find nearby drivers from Redis geo index ────────────
+            // Returns ALL online drivers regardless of mode or wallet status.
             const nearbyDrivers = await locationService.findNearbyDrivers(
                 parseFloat(trip.pickupLng),
                 parseFloat(trip.pickupLat),
@@ -66,40 +83,93 @@ class TripMatchingService {
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
-            console.log(`🔍 [MATCHING] ${nearbyDrivers.length} drivers found in radius — filtering by mode...`);
+            console.log(`🔍 [MATCHING] ${nearbyDrivers.length} drivers found in radius`);
 
-            // ── ✅ FILTER: Only drivers in 'ride' mode ──────────────────
-            // Redis geo index contains ALL online drivers (ride + delivery).
-            // We must exclude delivery-mode drivers from ride requests.
+            // ── STEP 2: Filter by ride mode ─────────────────────────────────
+            // Exclude delivery-mode drivers — they must not receive trip offers.
             const nearbyDriverIds = nearbyDrivers.map(d => d.driverId);
 
             const rideReadyDrivers = await Driver.findAll({
                 where: {
-                    id:           nearbyDriverIds,
-                    current_mode: 'ride',   // ✅ KEY FILTER — exclude delivery mode drivers
+                    id:           { [Op.in]: nearbyDriverIds },
+                    current_mode: 'ride',
                 },
                 attributes: ['id', 'current_mode'],
             });
 
-            // Build a Set for O(1) lookup
-            const rideReadyIds = new Set(rideReadyDrivers.map(d => d.id));
+            const rideReadyIds     = new Set(rideReadyDrivers.map(d => d.id));
+            const rideModeDrivers  = nearbyDrivers.filter(d => rideReadyIds.has(d.driverId));
 
-            // Keep only drivers who are in ride mode
-            const filteredDrivers = nearbyDrivers.filter(d => rideReadyIds.has(d.driverId));
+            console.log(`✅ [MATCHING] ${rideModeDrivers.length}/${nearbyDrivers.length} drivers in ride mode`);
 
-            console.log(`✅ [MATCHING] ${filteredDrivers.length}/${nearbyDrivers.length} drivers in ride mode`);
-
-            if (filteredDrivers.length === 0) {
+            if (rideModeDrivers.length === 0) {
                 console.log(`❌ [MATCHING] No ride-mode drivers available for trip ${tripId}`);
                 await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
                 await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
-            // ── Build trip offer payload ────────────────────────────────
+            // ── STEP 3: Commission-coverage wallet gate ─────────────────────
+            //
+            // Uber/Yango model: a driver only receives the offer if their wallet
+            // balance covers the commission on the estimated fare for this trip.
+            //
+            // commission_required = ceil(fareEstimate × commissionRate)
+            //
+            // We resolve the commission rate once per broadcast (not per driver)
+            // using the same cached EarningRule the earnings engine would apply.
+            // This keeps the gate in sync with what will actually be deducted at
+            // trip completion — no separate config to maintain.
+            //
+            // Wallet rows are fetched in ONE bulk query so this adds a single
+            // extra DB round-trip for the entire broadcast, regardless of how
+            // many drivers are in the pool.
+
+            const fareEstimate     = Math.round(trip.fareEstimate || 0);
+            const commissionRate   = await this._getCommissionRate(fareEstimate);
+            const commissionRequired = Math.ceil(fareEstimate * commissionRate);
+
+            console.log(`\n💰 [MATCHING] Wallet gate:`);
+            console.log(`   Fare estimate     : ${fareEstimate} XAF`);
+            console.log(`   Commission rate   : ${(commissionRate * 100).toFixed(1)}%`);
+            console.log(`   Min balance needed: ${commissionRequired} XAF`);
+
+            // Bulk fetch wallets for all ride-mode driver UUIDs
+            const rideModeDriverIds = rideModeDrivers.map(d => d.driverId);
+
+            const wallets = await DriverWallet.findAll({
+                where: {
+                    driverId: { [Op.in]: rideModeDriverIds },
+                    status:   'ACTIVE',                        // frozen/suspended wallets also blocked
+                },
+                attributes: ['driverId', 'balance'],
+            });
+
+            // Build lookup map: driverId → balance
+            const balanceMap = new Map(wallets.map(w => [w.driverId, w.balance]));
+
+            // Filter: keep only drivers with sufficient balance
+            const eligibleDrivers = rideModeDrivers.filter(d => {
+                const balance = balanceMap.get(d.driverId) ?? -1;   // no wallet row = treat as -1
+                const eligible = balance >= commissionRequired;
+                if (!eligible) {
+                    console.log(`   ⛔ Driver ${d.driverId} skipped — balance ${balance} XAF < ${commissionRequired} XAF required`);
+                }
+                return eligible;
+            });
+
+            console.log(`✅ [MATCHING] ${eligibleDrivers.length}/${rideModeDrivers.length} drivers have sufficient balance\n`);
+
+            if (eligibleDrivers.length === 0) {
+                console.log(`❌ [MATCHING] No drivers with sufficient wallet balance for trip ${tripId}`);
+                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+            }
+
+            // ── STEP 4: Build trip offer payload ────────────────────────────
             const baseTripOffer = {
                 tripId:        trip.id,
-
                 pickup: {
                     lat:     trip.pickupLat,
                     lng:     trip.pickupLng,
@@ -110,16 +180,13 @@ class TripMatchingService {
                     lng:     trip.dropoffLng,
                     address: trip.dropoffAddress,
                 },
-
-                distanceM:    trip.distanceM,
-                durationS:    trip.durationS,
-                fareEstimate: trip.fareEstimate,
+                distanceM:     trip.distanceM,
+                durationS:     trip.durationS,
+                fareEstimate:  trip.fareEstimate,
                 fare_estimate: trip.fareEstimate,
                 distance:      trip.distanceM,
                 duration:      trip.durationS,
-
                 paymentMethod: trip.paymentMethod,
-
                 passenger: {
                     uuid:       passengerAccount.uuid,
                     name:       `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
@@ -133,16 +200,15 @@ class TripMatchingService {
                     avatar_url: passengerAccount.avatar_url,
                     rating:     passengerRating,
                 },
-
                 expiresAt: Date.now() + this.offerTtlMs,
                 expiresIn: Math.floor(this.offerTtlMs / 1000),
                 timestamp: new Date().toISOString(),
             };
 
-            // ── Emit to each filtered (ride-mode) driver ────────────────
+            // ── STEP 5: Emit to each eligible driver ────────────────────────
             const notifiedDriverIds = [];
 
-            for (const driver of filteredDrivers) {
+            for (const driver of eligibleDrivers) {
                 const driverId = driver.driverId;
                 try {
                     const offerWithDistance = {
@@ -186,7 +252,7 @@ class TripMatchingService {
                 }
             }
 
-            // ── Save notified drivers to Redis ──────────────────────────
+            // ── STEP 6: Persist notified driver list to Redis ───────────────
             if (notifiedDriverIds.length > 0) {
                 const ttlSeconds = Math.ceil(this.offerTtlMs / 1000) + 60;
                 await redisHelpers.setJson(
@@ -202,7 +268,7 @@ class TripMatchingService {
                 console.log(`✅ [MATCHING] Offers record saved — ${notifiedDriverIds.length} drivers`);
             }
 
-            // ── Set expiry timeout ──────────────────────────────────────
+            // ── STEP 7: Set expiry timeout ──────────────────────────────────
             console.log(`⏰ [MATCHING] Setting ${this.offerTtlMs}ms expiry for trip ${tripId}`);
 
             const timeoutId = setTimeout(async () => {
@@ -220,6 +286,7 @@ class TripMatchingService {
             );
 
             console.log(`✅ [MATCHING] Broadcast done — ${notifiedDriverIds.length} drivers notified`);
+
             return {
                 success:         notifiedDriverIds.length > 0,
                 driversNotified: notifiedDriverIds.length,
@@ -234,11 +301,12 @@ class TripMatchingService {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ACCEPT TRIP
-    // ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC: ACCEPT TRIP
+    // ═══════════════════════════════════════════════════════════════════════
+
     async acceptTrip(tripId, driverId, io) {
-        const lockKey = REDIS_KEYS.TRIP_LOCK ? REDIS_KEYS.TRIP_LOCK(tripId) : `trip:lock:${tripId}`;
+        const lockKey   = REDIS_KEYS.TRIP_LOCK ? REDIS_KEYS.TRIP_LOCK(tripId) : `trip:lock:${tripId}`;
         const lockValue = uuidv4();
 
         try {
@@ -251,27 +319,49 @@ class TripMatchingService {
             }
 
             try {
+                // ── Fetch trip ──────────────────────────────────────────────
                 const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
-                if (!tripData) {
-                    return { success: false, reason: 'Trip no longer available' };
-                }
-                if (tripData.status !== 'SEARCHING') {
+                if (!tripData || tripData.status !== 'SEARCHING') {
                     return { success: false, reason: 'Trip no longer available' };
                 }
 
-                // ── ✅ VERIFY driver is still in ride mode at accept time ──
-                // Edge case: driver could switch mode between offer and accept
+                // ── Re-check: driver still in ride mode ─────────────────────
+                // Edge case: driver switches mode between receiving offer and tapping accept
                 const driver = await Driver.findOne({
-                    where: { id: driverId },
+                    where:      { id: driverId },
                     attributes: ['id', 'current_mode', 'status'],
                 });
-
                 if (!driver || driver.current_mode !== 'ride') {
-                    console.log(`⚠️  [MATCHING] Driver ${driverId} is no longer in ride mode — rejecting accept`);
+                    console.log(`⚠️  [MATCHING] Driver ${driverId} no longer in ride mode — rejecting`);
                     return { success: false, reason: 'Driver switched to delivery mode' };
                 }
 
-                // ── Clear timeout ───────────────────────────────────────
+                // ── Re-check: wallet still has sufficient balance ────────────
+                // Time-of-check ≠ time-of-use: an admin penalty or another commission
+                // deduction could have reduced the balance between offer and accept.
+                const fareEstimate       = Math.round(tripData.fareEstimate || 0);
+                const commissionRate     = await this._getCommissionRate(fareEstimate);
+                const commissionRequired = Math.ceil(fareEstimate * commissionRate);
+
+                const wallet = await DriverWallet.findOne({
+                    where:      { driverId, status: 'ACTIVE' },
+                    attributes: ['balance', 'status'],
+                });
+
+                const currentBalance = wallet?.balance ?? 0;
+
+                if (currentBalance < commissionRequired) {
+                    console.log(`⛔ [MATCHING] Driver ${driverId} wallet insufficient at accept time`);
+                    console.log(`   Balance : ${currentBalance} XAF`);
+                    console.log(`   Required: ${commissionRequired} XAF`);
+                    return {
+                        success: false,
+                        reason:  'Insufficient wallet balance',
+                        code:    'INSUFFICIENT_WALLET_BALANCE',
+                    };
+                }
+
+                // ── Clear timeout ───────────────────────────────────────────
                 const timeoutId = this.activeTimeouts.get(tripId);
                 if (timeoutId) {
                     clearTimeout(timeoutId);
@@ -280,15 +370,14 @@ class TripMatchingService {
                 }
                 await redisClient.del(`trip:timeout:${tripId}`);
 
-                // ── Update Redis trip ───────────────────────────────────
+                // ── Update Redis trip ───────────────────────────────────────
                 tripData.driverId  = driverId;
                 tripData.status    = 'MATCHED';
                 tripData.matchedAt = new Date().toISOString();
                 await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, 7200);
-
                 await locationService.updateDriverStatus(driverId, 'busy', tripId);
 
-                // ── Notify other drivers their offer expired ────────────
+                // ── Notify other drivers their offer expired ─────────────────
                 const offersKey  = REDIS_KEYS.TRIP_OFFERS(tripId);
                 const offersData = await redisHelpers.getJson(offersKey);
                 const others     = offersData?.notifiedDrivers || offersData?.drivers || [];
@@ -303,10 +392,9 @@ class TripMatchingService {
                         }
                     }
                 }
-
                 await redisClient.del(offersKey);
 
-                // ── Fetch driver details ────────────────────────────────
+                // ── Fetch driver details ────────────────────────────────────
                 const driverAccount = await Account.findOne({
                     where:      { uuid: driverId },
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
@@ -340,7 +428,7 @@ class TripMatchingService {
 
                 const driverLocation = await locationService.getDriverLocation(driverId);
 
-                // ── Fetch passenger info ────────────────────────────────
+                // ── Fetch passenger info ────────────────────────────────────
                 const passengerAccount = await Account.findOne({
                     where:      { uuid: tripData.passengerId },
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
@@ -357,7 +445,7 @@ class TripMatchingService {
                     rating:    passengerRating,
                 } : { uuid: tripData.passengerId, name: 'Passenger' };
 
-                // ── Notify passenger ────────────────────────────────────
+                // ── Notify passenger ────────────────────────────────────────
                 const assignmentData = {
                     tripId,
                     driverId,
@@ -376,6 +464,7 @@ class TripMatchingService {
 
                 io.to(`passenger:${tripData.passengerId}`).emit('trip:driver_assigned', assignmentData);
                 io.to(`user:${tripData.passengerId}`).emit('trip:driver_assigned', assignmentData);
+
                 const pSid = await redisClient.get(REDIS_KEYS.USER_SOCKET(tripData.passengerId));
                 if (pSid && io.sockets.sockets.get(pSid)) {
                     io.to(pSid).emit('trip:driver_assigned', assignmentData);
@@ -400,9 +489,84 @@ class TripMatchingService {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // TRIP TIMEOUT HANDLER
-    // ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIVATE: GET COMMISSION RATE FOR A GIVEN FARE
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Reads from the same Redis cache key used by EarningsEngineService
+    // ('earnings:rules:active') so rules are never fetched twice within
+    // the same 5-minute TTL window.
+    //
+    // Returns a decimal rate, e.g. 0.10 for 10%.
+    // Falls back to FALLBACK_COMMISSION_RATE (default 0.10) if no rule matches.
+
+    async _getCommissionRate(fareEstimate) {
+        let rules = [];
+
+        // ── Try Redis cache first ─────────────────────────────────────────
+        try {
+            const cached = await redisClient.get(RULES_CACHE_KEY);
+            if (cached) {
+                rules = JSON.parse(cached);
+                console.log(`🧠 [MATCHING] Commission rules loaded from cache (${rules.length} rules)`);
+            }
+        } catch (e) {
+            console.warn('⚠️  [MATCHING] Redis cache miss for rules — loading from DB');
+        }
+
+        // ── Load from DB if cache missed ──────────────────────────────────
+        if (rules.length === 0) {
+            const today = new Date().toISOString().split('T')[0];
+            const dbRules = await EarningRule.findAll({
+                where: {
+                    isActive: true,
+                    type:     'COMMISSION_PERCENT',
+                    [Op.and]: [
+                        { [Op.or]: [{ validFrom: null }, { validFrom: { [Op.lte]: today } }] },
+                        { [Op.or]: [{ validTo:   null }, { validTo:   { [Op.gte]: today } }] },
+                    ],
+                },
+                order: [['priority', 'DESC']],
+            });
+
+            rules = dbRules.map(r => r.toJSON());
+
+            // Populate cache so the next call (and EarningsEngine) can use it
+            try {
+                await redisClient.setex(RULES_CACHE_KEY, RULES_CACHE_TTL_S, JSON.stringify(rules));
+            } catch (e) {
+                console.warn('⚠️  [MATCHING] Failed to cache commission rules');
+            }
+        }
+
+        // ── Find the highest-priority COMMISSION_PERCENT rule ─────────────
+        // Simple context: we only need fare for the pre-dispatch check.
+        // Time-of-day / zone conditions are intentionally skipped here —
+        // we want a conservative estimate, and the earnings engine applies
+        // the precise rule at completion time anyway.
+        for (const rule of rules) {
+            if (rule.type !== 'COMMISSION_PERCENT') continue;
+            if (!rule.isActive) continue;
+
+            // Check fare-range conditions if present
+            const c = rule.conditions || {};
+            if (c.min_fare !== undefined && fareEstimate < c.min_fare) continue;
+            if (c.max_fare !== undefined && fareEstimate > c.max_fare) continue;
+
+            const rate = parseFloat(rule.value);
+            console.log(`   💡 [MATCHING] Commission rule matched: "${rule.name}" (${(rate * 100).toFixed(1)}%)`);
+            return rate;
+        }
+
+        // ── Fallback ──────────────────────────────────────────────────────
+        console.log(`   ⚠️  [MATCHING] No commission rule matched — using fallback ${(FALLBACK_COMMISSION_RATE * 100)}%`);
+        return FALLBACK_COMMISSION_RATE;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIVATE: TRIP TIMEOUT HANDLER
+    // ═══════════════════════════════════════════════════════════════════════
+
     async _checkTripTimeout(tripId, io) {
         try {
             console.log(`⏰ [MATCHING] _checkTripTimeout(${tripId})`);
@@ -414,7 +578,6 @@ class TripMatchingService {
             }
 
             const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
-
             if (!tripData) {
                 console.log(`⚠️  [MATCHING] Trip ${tripId} already gone from Redis`);
                 await redisClient.del(`trip:timeout:${tripId}`);
@@ -456,9 +619,10 @@ class TripMatchingService {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // HELPER: Real passenger rating from DB
-    // ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIVATE: GET PASSENGER RATING
+    // ═══════════════════════════════════════════════════════════════════════
+
     async _getPassengerRating(passengerId) {
         try {
             const rows = await Rating.findAll({
