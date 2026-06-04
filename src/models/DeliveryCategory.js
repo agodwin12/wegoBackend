@@ -62,8 +62,9 @@ module.exports = (sequelize) => {
             defaultValue: 0,
         },
 
+        // ✅ FIX: must be plain INTEGER (not UNSIGED) o match Eployd
         created_by: {
-            type:      DataTypes.INTEGER.UNSIGNED,
+            type:      DataTypes.INTEGER,
             allowNull: true,
         },
 

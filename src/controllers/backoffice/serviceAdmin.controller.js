@@ -77,7 +77,7 @@ exports.getDashboardStats = async (req, res) => {
         const verifiedProviders = await Account.count({
             where: {
                 uuid: { [Op.in]: allProviders.map(p => p.provider_id) },
-                is_verified: true
+                phone_verified: true
             }
         });
 
@@ -85,7 +85,7 @@ exports.getDashboardStats = async (req, res) => {
         const suspendedProviders = await Account.count({
             where: {
                 uuid: { [Op.in]: allProviders.map(p => p.provider_id) },
-                account_status: 'suspended'
+                status: 'SUSPENDED'
             }
         });
 

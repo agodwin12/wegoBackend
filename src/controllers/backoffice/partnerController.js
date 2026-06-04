@@ -2,7 +2,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
-const { Account, PartnerProfile, Vehicle, Employee, VehicleRental, PassengerProfile } = require('../../models');
+const { Account, PartnerProfile, Vehicle, Employee, VehicleRental } = require('../../models');
 const { Op } = require('sequelize');
 const sequelize = require('../../config/database');
 
@@ -680,14 +680,7 @@ exports.getPartnerRentals = async (req, res) => {
                 {
                     model: Account,
                     as: 'user',
-                    attributes: ['uuid', 'email'],
-                    include: [
-                        {
-                            model: PassengerProfile,
-                            as: 'passengerProfile',
-                            attributes: ['firstName', 'lastName', 'phoneE164']
-                        }
-                    ]
+                    attributes: ['uuid', 'email', 'first_name', 'last_name', 'phone_e164'],
                 }
             ],
             distinct: true
@@ -716,7 +709,6 @@ exports.getPartnerRentals = async (req, res) => {
 
         const formattedRentals = rentals.map(rental => {
             const user = rental.user;
-            const passengerProfile = user?.passengerProfile;
 
             return {
                 id: rental.id,
@@ -732,10 +724,10 @@ exports.getPartnerRentals = async (req, res) => {
                 user: {
                     uuid: user?.uuid,
                     email: user?.email,
-                    firstName: passengerProfile?.firstName,
-                    lastName: passengerProfile?.lastName,
-                    phoneNumber: passengerProfile?.phoneE164
-                }
+                    firstName: user?.first_name,
+                    lastName: user?.last_name,
+                    phoneNumber: user?.phone_e164,
+                },
             };
         });
 

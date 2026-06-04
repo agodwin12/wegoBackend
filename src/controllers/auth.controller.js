@@ -1,8 +1,16 @@
 // src/controllers/auth.controller.js
+'use strict';
+
 const { validationResult } = require('express-validator');
 const multer = require('multer');
+const { googleAuth: googleAuthService } = require('../services/googleAccount.service');
 const { signupPassenger, signupDriver } = require('../services/auth.services');
-const { sendOtpByIdentifier, verifyOtpAndCreateAccount } = require('../services/otp.service');
+
+const {
+    sendOtpByIdentifier,
+    verifyOtpAndCreateAccount,
+} = require('../services/otp.service');
+
 const {
     findAccountByIdentifier,
     verifyPassword,
@@ -15,17 +23,26 @@ const {
     invalidateRefreshToken,
     invalidateAllRefreshTokens,
 } = require('../services/login.service');
+
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Upload');
+
 const { Account, PassengerProfile, DriverProfile } = require('../models');
 
-/**
- * Validation helper - returns user-friendly error messages
- */
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+
 function handleValidation(req) {
     const errors = validationResult(req);
+
     if (!errors.isEmpty()) {
-        const message = errors.array().map(e => `${e.param}: ${e.msg}`).join(', ');
+        const message = errors
+            .array()
+            .map(e => `${e.param || e.path}: ${e.msg}`)
+            .join(', ');
+
         console.log('❌ [VALIDATION ERROR]:', message);
+
         const err = new Error(message);
         err.status = 400;
         err.code = 'VALIDATION_ERROR';
@@ -33,8 +50,113 @@ function handleValidation(req) {
     }
 }
 
+function buildCompleteUser(account) {
+    if (!account) return null;
+
+    const accountData = account.toJSON ? account.toJSON() : account;
+
+    const {
+        password_hash,
+        password_algo,
+        passenger_profile,
+        driver_profile,
+        ...safeAccount
+    } = accountData;
+
+    const completeUser = {
+        ...safeAccount,
+        user_type: account.user_type,
+        active_mode: account.active_mode || null,
+        status: account.status,
+    };
+
+    if (account.user_type === 'PASSENGER' && account.passenger_profile) {
+        const profile = account.passenger_profile.toJSON
+            ? account.passenger_profile.toJSON()
+            : account.passenger_profile;
+
+        completeUser.profile = {
+            address_text: profile.address_text,
+            notes: profile.notes,
+        };
+    }
+
+    if (account.user_type === 'DRIVER' && account.driver_profile) {
+        const profile = account.driver_profile.toJSON
+            ? account.driver_profile.toJSON()
+            : account.driver_profile;
+
+        completeUser.profile = {
+            cni_number: profile.cni_number,
+            license_number: profile.license_number,
+            license_expiry: profile.license_expiry,
+            license_document_url: profile.license_document_url,
+
+            insurance_number: profile.insurance_number,
+            insurance_expiry: profile.insurance_expiry,
+            insurance_document_url: profile.insurance_document_url,
+
+            vehicle_type: profile.vehicle_type,
+            vehicle_make_model: profile.vehicle_make_model,
+            vehicle_color: profile.vehicle_color,
+            vehicle_year: profile.vehicle_year,
+            vehicle_plate: profile.vehicle_plate,
+            vehicle_photo_url: profile.vehicle_photo_url,
+
+            verification_state: profile.verification_state,
+            is_online: profile.is_online,
+            is_available: profile.is_available,
+        };
+    }
+
+    if (account.user_type === 'DELIVERY_AGENT' && account.driver_record) {
+        const driverRecord = account.driver_record.toJSON
+            ? account.driver_record.toJSON()
+            : account.driver_record;
+
+        completeUser.driver_record = {
+            id: driverRecord.id,
+            userId: driverRecord.userId,
+            status: driverRecord.status,
+            current_mode: driverRecord.current_mode,
+            phone: driverRecord.phone,
+            rating: driverRecord.rating,
+            lat: driverRecord.lat,
+            lng: driverRecord.lng,
+            delivery_wallet: driverRecord.delivery_wallet || null,
+        };
+    }
+
+    return completeUser;
+}
+
+function getClientTokenOptions(req) {
+    return {
+        ip_address: req.ip || req.headers['x-forwarded-for'] || null,
+        user_agent: req.headers['user-agent'] || null,
+    };
+}
+
+
+
+
+function cleanupUploadedUrls(uploadedUrls) {
+    return Promise.all(
+        Object.values(uploadedUrls || {}).map(async url => {
+            try {
+                if (url) {
+                    await deleteFromR2(url);
+                    console.log('   ✅ Deleted:', url);
+                }
+            } catch (err) {
+                console.warn('   ⚠️ Failed to delete uploaded file:', url, err.message);
+            }
+        })
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// MULTER CONFIGURATION - MEMORY STORAGE FOR R2 UPLOAD
+// MULTER CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════
 
 const memoryStorage = multer.memoryStorage();
@@ -50,31 +172,29 @@ const fileFilter = (req, file, cb) => {
 
     if (isExtValid && isMimeValid) {
         return cb(null, true);
-    } else {
-        return cb(
-            new Error(
-                `Invalid file type for ${file.fieldname}. Only JPEG, JPG, PNG, PDF, WEBP allowed.`
-            )
-        );
     }
+
+    return cb(
+        new Error(
+            `Invalid file type for ${file.fieldname}. Only JPEG, JPG, PNG, PDF, WEBP allowed.`
+        )
+    );
 };
 
-/**
- * Multer middleware for single profile photo upload (Passenger)
- */
 const uploadPassengerPhoto = multer({
     storage: memoryStorage,
-    fileFilter: fileFilter,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+    fileFilter,
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+    },
 }).single('avatar');
 
-/**
- * Multer middleware for multiple driver files
- */
 const uploadDriverFiles = multer({
     storage: memoryStorage,
-    fileFilter: fileFilter,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB per file
+    fileFilter,
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+    },
 }).fields([
     { name: 'avatar', maxCount: 1 },
     { name: 'license', maxCount: 1 },
@@ -84,9 +204,100 @@ const uploadDriverFiles = multer({
 
 // ═══════════════════════════════════════════════════════════════════════
 // REFRESH TOKEN
+// POST /api/auth/refresh
+// POST /api/auth/refresh-token if you added route alias
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.refreshToken = async (req, res, next) => {
+exports.googleAuth = async (req, res) => {
+    try {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🔐 [GOOGLE AUTH] Request received');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+        const {
+            id_token,
+            user_type,
+        } = req.body || {};
+
+        if (!id_token) {
+            return res.status(400).json({
+                success: false,
+                message: 'Google ID token is required.',
+                code: 'GOOGLE_ID_TOKEN_REQUIRED',
+            });
+        }
+
+        if (!user_type) {
+            return res.status(400).json({
+                success: false,
+                message: 'User type is required. Use PASSENGER or DRIVER.',
+                code: 'GOOGLE_USER_TYPE_REQUIRED',
+            });
+        }
+
+        const result = await googleAuthService({
+            idToken: id_token,
+            userType: user_type,
+            tokenOptions: getClientTokenOptions(req),
+        });
+
+        const {
+            tokens,
+            user,
+            flags,
+            isNewAccount,
+        } = result;
+
+        console.log('✅ [GOOGLE AUTH] Successful');
+        console.log('   User UUID  :', user?.uuid);
+        console.log('   User Type  :', user?.user_type);
+        console.log('   Active Mode:', user?.active_mode);
+        console.log('   New Account:', isNewAccount);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        let message = 'Google authentication successful.';
+
+        if (user?.user_type === 'DRIVER' && flags.requires_driver_profile) {
+            message = 'Google authentication successful. Please complete your driver profile.';
+        } else if (flags.requires_phone_verification) {
+            message = 'Google authentication successful. Please verify your phone number.';
+        }
+
+        return res.status(200).json({
+            success: true,
+            message,
+            data: {
+                access_token: tokens.accessToken,
+                refresh_token: tokens.refreshToken,
+                expires_in: tokens.expiresIn,
+                refresh_expires_in: tokens.refreshExpiresIn,
+
+                user,
+
+                is_new_account: isNewAccount,
+
+                requires_phone_verification: flags.requires_phone_verification,
+                requires_driver_profile: flags.requires_driver_profile,
+                requires_admin_approval: flags.requires_admin_approval,
+            },
+        });
+
+    } catch (err) {
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.error('❌ [GOOGLE AUTH ERROR]:', err.message);
+        console.error(err.stack);
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        return res.status(err.status || 500).json({
+            success: false,
+            message: err.message || 'Google authentication failed.',
+            code: err.code || 'GOOGLE_AUTH_ERROR',
+        });
+    }
+};
+
+
+exports.refreshToken = async (req, res) => {
     try {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔄 [REFRESH TOKEN] Request received');
@@ -95,7 +306,6 @@ exports.refreshToken = async (req, res, next) => {
         const { refresh_token } = req.body;
 
         if (!refresh_token) {
-            console.log('❌ [REFRESH TOKEN] Missing refresh token');
             return res.status(400).json({
                 success: false,
                 message: 'Refresh token is required',
@@ -103,97 +313,77 @@ exports.refreshToken = async (req, res, next) => {
             });
         }
 
-        console.log('🔍 [REFRESH TOKEN] Verifying and refreshing token...');
-
-        // Use the new refresh service
-        const result = await refreshAccessToken(refresh_token);
+        const result = await refreshAccessToken(
+            refresh_token,
+            getClientTokenOptions(req)
+        );
 
         if (!result.success) {
             console.log('❌ [REFRESH TOKEN] Failed:', result.error);
 
             const errorMessages = {
-                'INVALID_REFRESH_TOKEN': 'Invalid or expired refresh token. Please login again.',
-                'ACCOUNT_INACTIVE': 'Account is no longer active',
-                'REFRESH_FAILED': 'Failed to refresh token'
+                MISSING_REFRESH_TOKEN: 'Refresh token is required.',
+                INVALID_REFRESH_TOKEN: 'Invalid or expired refresh token. Please login again.',
+                ACCOUNT_NOT_FOUND: 'Account not found. Please login again.',
+                ACCOUNT_DELETED: 'This account has been deleted.',
+                ACCOUNT_SUSPENDED: 'Your account has been suspended. Please contact support.',
+                ACCOUNT_INACTIVE: 'Account is no longer active.',
+                WALLET_FROZEN: 'Your delivery wallet is frozen. Please contact support.',
+                WALLET_SUSPENDED: 'Your delivery wallet is suspended. Please contact support.',
+                REFRESH_FAILED: 'Failed to refresh token.',
             };
 
             const statusCodes = {
-                'INVALID_REFRESH_TOKEN': 401,
-                'ACCOUNT_INACTIVE': 403,
-                'REFRESH_FAILED': 500
+                MISSING_REFRESH_TOKEN: 400,
+                INVALID_REFRESH_TOKEN: 401,
+                ACCOUNT_NOT_FOUND: 401,
+                ACCOUNT_DELETED: 403,
+                ACCOUNT_SUSPENDED: 403,
+                ACCOUNT_INACTIVE: 403,
+                WALLET_FROZEN: 403,
+                WALLET_SUSPENDED: 403,
+                REFRESH_FAILED: 500,
             };
 
             return res.status(statusCodes[result.error] || 500).json({
                 success: false,
                 message: errorMessages[result.error] || 'Failed to refresh token',
                 code: result.error,
+                shouldRelogin: [
+                    'INVALID_REFRESH_TOKEN',
+                    'ACCOUNT_NOT_FOUND',
+                    'ACCOUNT_DELETED',
+                ].includes(result.error),
             });
         }
 
-        // Build complete user object
-        const account = result.account;
-        const accountData = account.toJSON ? account.toJSON() : account;
-        const { password_hash, password_algo, ...safeAccount } = accountData;
-        let completeUser = { ...safeAccount };
+        const completeUser = buildCompleteUser(result.account);
 
-        // Include profile data
-        if (account.user_type === 'PASSENGER' && account.passenger_profile) {
-            const profile = account.passenger_profile.toJSON
-                ? account.passenger_profile.toJSON()
-                : account.passenger_profile;
-
-            completeUser.profile = {
-                address_text: profile.address_text,
-                notes: profile.notes,
-            };
-        }
-
-        if (account.user_type === 'DRIVER' && account.driver_profile) {
-            const profile = account.driver_profile.toJSON
-                ? account.driver_profile.toJSON()
-                : account.driver_profile;
-
-            completeUser.profile = {
-                cni_number: profile.cni_number,
-                license_number: profile.license_number,
-                license_expiry: profile.license_expiry,
-                license_document_url: profile.license_document_url,
-                insurance_number: profile.insurance_number,
-                insurance_expiry: profile.insurance_expiry,
-                insurance_document_url: profile.insurance_document_url,
-                vehicle_type: profile.vehicle_type,
-                vehicle_make_model: profile.vehicle_make_model,
-                vehicle_color: profile.vehicle_color,
-                vehicle_year: profile.vehicle_year,
-                vehicle_plate: profile.vehicle_plate,
-                vehicle_photo_url: profile.vehicle_photo_url,
-                verification_state: profile.verification_state,
-                is_online: profile.is_online,
-                is_available: profile.is_available,
-            };
-        }
-
-        delete completeUser.passenger_profile;
-        delete completeUser.driver_profile;
-
-        console.log('✅ [REFRESH TOKEN] Token refreshed successfully');
+        console.log('✅ [REFRESH TOKEN] Token refreshed and rotated successfully');
+        console.log('   User UUID  :', completeUser?.uuid);
+        console.log('   User Type  :', completeUser?.user_type);
+        console.log('   Active Mode:', completeUser?.active_mode || '(natural fallback)');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'Token refreshed successfully',
             data: {
                 access_token: result.accessToken,
+                refresh_token: result.refreshToken,
                 expires_in: result.expiresIn,
+                refresh_expires_in: result.refreshExpiresIn,
                 user: completeUser,
             },
         });
+
     } catch (err) {
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('❌ [REFRESH TOKEN ERROR]:', err.message);
+        console.error(err.stack);
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Failed to refresh token',
             code: err.code || 'REFRESH_TOKEN_ERROR',
@@ -202,12 +392,15 @@ exports.refreshToken = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// REGISTER PASSENGER - CREATE PENDING SIGNUP
+// REGISTER PASSENGER
+// POST /api/auth/signup/passenger
+// Sends BOTH email OTP and SMS OTP.
+// If either delivery fails, signup service throws and this endpoint fails.
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.registerPassenger = [
     uploadPassengerPhoto,
-    async (req, res, next) => {
+    async (req, res) => {
         try {
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             console.log('📝 [REGISTER PASSENGER] Request received');
@@ -217,9 +410,9 @@ exports.registerPassenger = [
 
             handleValidation(req);
 
-            // Upload profile photo to R2 if provided
             if (req.file) {
                 console.log('📤 [PASSENGER] Uploading profile photo to R2...');
+
                 try {
                     const avatarUrl = await uploadToR2(
                         req.file.buffer,
@@ -227,10 +420,13 @@ exports.registerPassenger = [
                         'profiles',
                         req.file.mimetype
                     );
+
                     req.body.avatar_url = avatarUrl;
                     console.log('✅ [AVATAR] Profile photo uploaded:', avatarUrl);
+
                 } catch (uploadError) {
                     console.error('❌ [AVATAR] Upload failed:', uploadError.message);
+
                     return res.status(500).json({
                         success: false,
                         message: 'Failed to upload profile photo',
@@ -239,17 +435,15 @@ exports.registerPassenger = [
                 }
             }
 
-            // Create pending signup (not real account yet!)
             const pendingSignup = await signupPassenger(req.body);
 
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('✅ [REGISTER PASSENGER] Pending signup created!');
+            console.log('✅ [REGISTER PASSENGER] Pending signup created and both OTPs sent!');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-            // Return signup_id instead of account details
             return res.status(200).json({
                 success: true,
-                message: 'Verification code sent. Please verify to complete registration.',
+                message: 'Verification codes sent by email and SMS. Please verify to complete registration.',
                 data: {
                     signup_id: pendingSignup.uuid,
                     user_type: pendingSignup.user_type,
@@ -260,18 +454,18 @@ exports.registerPassenger = [
                     otp_delivery: pendingSignup.otpDelivery,
                 },
             });
+
         } catch (err) {
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             console.error('❌ [REGISTER PASSENGER ERROR]:', err.message);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-            // Clean up uploaded file if registration failed
             if (req.body.avatar_url) {
-                console.log('🗑️  [CLEANUP] Deleting uploaded avatar from R2...');
+                console.log('🗑️ [CLEANUP] Deleting uploaded avatar from R2...');
                 await deleteFromR2(req.body.avatar_url);
             }
 
-            res.status(err.status || 500).json({
+            return res.status(err.status || 500).json({
                 success: false,
                 message: err.message || 'Failed to register passenger',
                 code: err.code || 'REGISTRATION_ERROR',
@@ -281,12 +475,17 @@ exports.registerPassenger = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
-// REGISTER DRIVER - CREATE PENDING SIGNUP
+// REGISTER DRIVER
+// POST /api/auth/signup/driver
+// Sends BOTH email OTP and SMS OTP.
+// If either delivery fails, signup service throws and this endpoint fails.
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.registerDriver = [
     uploadDriverFiles,
-    async (req, res, next) => {
+    async (req, res) => {
+        const uploadedUrls = {};
+
         try {
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             console.log('🚗 [REGISTER DRIVER] Request received');
@@ -296,41 +495,43 @@ exports.registerDriver = [
 
             handleValidation(req);
 
-            const uploadedUrls = {}; // Track uploaded URLs for cleanup on error
-
-            // ─────────────────────────────────────────────────────────────
-            // UPLOAD FILES TO R2
-            // ─────────────────────────────────────────────────────────────
-
             try {
-                // Avatar (optional)
-                if (req.files.avatar && req.files.avatar[0]) {
+                if (req.files?.avatar?.[0]) {
                     console.log('📤 [DRIVER] Uploading avatar to R2...');
+
                     const avatarUrl = await uploadToR2(
                         req.files.avatar[0].buffer,
                         req.files.avatar[0].originalname,
                         'profiles',
                         req.files.avatar[0].mimetype
                     );
+
                     req.body.avatar_url = avatarUrl;
                     uploadedUrls.avatar_url = avatarUrl;
+
                     console.log('✅ [AVATAR] Uploaded:', avatarUrl);
                 }
 
-                // Driver's License (REQUIRED)
-                if (req.files.license && req.files.license[0]) {
+                if (req.files?.license?.[0]) {
                     console.log('📤 [DRIVER] Uploading license document to R2...');
+
                     const licenseUrl = await uploadToR2(
                         req.files.license[0].buffer,
                         req.files.license[0].originalname,
                         'documents',
                         req.files.license[0].mimetype
                     );
+
                     req.body.license_document_url = licenseUrl;
                     uploadedUrls.license_document_url = licenseUrl;
+
                     console.log('✅ [LICENSE] Uploaded:', licenseUrl);
+
                 } else {
                     console.log('❌ [LICENSE] License document is required');
+
+                    await cleanupUploadedUrls(uploadedUrls);
+
                     return res.status(400).json({
                         success: false,
                         message: 'Driver license document is required',
@@ -338,41 +539,41 @@ exports.registerDriver = [
                     });
                 }
 
-                // Insurance document (optional)
-                if (req.files.insurance && req.files.insurance[0]) {
+                if (req.files?.insurance?.[0]) {
                     console.log('📤 [DRIVER] Uploading insurance document to R2...');
+
                     const insuranceUrl = await uploadToR2(
                         req.files.insurance[0].buffer,
                         req.files.insurance[0].originalname,
                         'documents',
                         req.files.insurance[0].mimetype
                     );
+
                     req.body.insurance_document_url = insuranceUrl;
                     uploadedUrls.insurance_document_url = insuranceUrl;
+
                     console.log('✅ [INSURANCE] Uploaded:', insuranceUrl);
                 }
 
-                // Vehicle photo (optional)
-                if (req.files.vehicle_photo && req.files.vehicle_photo[0]) {
+                if (req.files?.vehicle_photo?.[0]) {
                     console.log('📤 [DRIVER] Uploading vehicle photo to R2...');
+
                     const vehicleUrl = await uploadToR2(
                         req.files.vehicle_photo[0].buffer,
                         req.files.vehicle_photo[0].originalname,
                         'vehicles',
                         req.files.vehicle_photo[0].mimetype
                     );
+
                     req.body.vehicle_photo_url = vehicleUrl;
                     uploadedUrls.vehicle_photo_url = vehicleUrl;
+
                     console.log('✅ [VEHICLE] Uploaded:', vehicleUrl);
                 }
+
             } catch (uploadError) {
                 console.error('❌ [UPLOAD ERROR]:', uploadError.message);
-
-                // Cleanup any files that were uploaded before the error
-                console.log('🗑️  [CLEANUP] Deleting uploaded files from R2...');
-                for (const url of Object.values(uploadedUrls)) {
-                    await deleteFromR2(url);
-                }
+                await cleanupUploadedUrls(uploadedUrls);
 
                 return res.status(500).json({
                     success: false,
@@ -382,22 +583,16 @@ exports.registerDriver = [
                 });
             }
 
-            // ─────────────────────────────────────────────────────────────
-            // CREATE PENDING DRIVER SIGNUP
-            // ─────────────────────────────────────────────────────────────
-
             try {
-                // Create pending signup (not real account yet!)
                 const pendingSignup = await signupDriver(req.body);
 
                 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-                console.log('✅ [REGISTER DRIVER] Pending signup created!');
+                console.log('✅ [REGISTER DRIVER] Pending signup created and both OTPs sent!');
                 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-                // Return signup_id instead of account details
                 return res.status(200).json({
                     success: true,
-                    message: 'Verification code sent. Please verify to complete registration.',
+                    message: 'Verification codes sent by email and SMS. Please verify to complete registration.',
                     data: {
                         signup_id: pendingSignup.uuid,
                         user_type: pendingSignup.user_type,
@@ -408,20 +603,19 @@ exports.registerDriver = [
                         otp_delivery: pendingSignup.otpDelivery,
                     },
                 });
+
             } catch (signupError) {
-                // If signup fails, cleanup uploaded files
-                console.log('🗑️  [CLEANUP] Signup failed, deleting uploaded files from R2...');
-                for (const url of Object.values(uploadedUrls)) {
-                    await deleteFromR2(url);
-                }
+                console.log('🗑️ [CLEANUP] Signup failed, deleting uploaded files from R2...');
+                await cleanupUploadedUrls(uploadedUrls);
                 throw signupError;
             }
+
         } catch (err) {
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             console.error('❌ [REGISTER DRIVER ERROR]:', err.message);
             console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-            res.status(err.status || 500).json({
+            return res.status(err.status || 500).json({
                 success: false,
                 message: err.message || 'Failed to register driver',
                 code: err.code || 'REGISTRATION_ERROR',
@@ -434,21 +628,30 @@ exports.registerDriver = [
 // OTP ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.sendOtp = async (req, res, next) => {
+exports.sendOtp = async (req, res) => {
     try {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('📨 [SEND OTP] Request received');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
         handleValidation(req);
-        const { identifier, channel, purpose } = req.body;
 
-        const { account, otp } = await sendOtpByIdentifier({ identifier, channel, purpose });
+        const {
+            identifier,
+            channel,
+            purpose,
+        } = req.body;
+
+        const { account, otp } = await sendOtpByIdentifier({
+            identifier,
+            channel,
+            purpose,
+        });
 
         console.log('✅ [SEND OTP] OTP sent successfully!');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'OTP sent successfully',
             data: {
@@ -458,12 +661,13 @@ exports.sendOtp = async (req, res, next) => {
                 target: otp.target,
             },
         });
+
     } catch (err) {
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('❌ [SEND OTP ERROR]:', err.message);
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Failed to send OTP',
             code: err.code || 'OTP_SEND_ERROR',
@@ -471,27 +675,36 @@ exports.sendOtp = async (req, res, next) => {
     }
 };
 
-exports.verifyOtp = async (req, res, next) => {
+exports.verifyOtp = async (req, res) => {
     try {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔍 [VERIFY OTP] Request received');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
         handleValidation(req);
-        const { identifier, purpose, code } = req.body;
 
-        // This now creates the account!
-        const { account } = await verifyOtpAndCreateAccount({ identifier, purpose, code });
+        const {
+            identifier,
+            purpose,
+            code,
+        } = req.body;
+
+        const { account } = await verifyOtpAndCreateAccount({
+            identifier,
+            purpose,
+            code,
+        });
 
         console.log('✅ [VERIFY OTP] OTP verified and account created!');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'Account created successfully! You can now login.',
             data: {
                 uuid: account.uuid,
                 user_type: account.user_type,
+                active_mode: account.active_mode || null,
                 email: account.email,
                 phone_e164: account.phone_e164,
                 first_name: account.first_name,
@@ -501,12 +714,13 @@ exports.verifyOtp = async (req, res, next) => {
                 phone_verified: account.phone_verified,
             },
         });
+
     } catch (err) {
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('❌ [VERIFY OTP ERROR]:', err.message);
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Failed to verify OTP',
             code: err.code || 'OTP_VERIFY_ERROR',
@@ -515,19 +729,22 @@ exports.verifyOtp = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// LOGIN ENDPOINT (WITH REFRESH TOKEN & SECURITY)
+// LOGIN ENDPOINT
+// POST /api/auth/login
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.login = async (req, res, next) => {
+exports.login = async (req, res) => {
     try {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔐 [LOGIN] Request received');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-        const { identifier, password } = req.body;
+        const {
+            identifier,
+            password,
+        } = req.body;
 
         if (!identifier || !password) {
-            console.log('❌ [LOGIN] Missing credentials');
             return res.status(400).json({
                 success: false,
                 message: 'Identifier and password are required',
@@ -535,12 +752,9 @@ exports.login = async (req, res, next) => {
             });
         }
 
-        console.log('🔍 [LOGIN] Looking up account...');
-
         const account = await findAccountByIdentifier(identifier);
 
         if (!account) {
-            console.log('❌ [LOGIN] Account not found');
             return res.status(401).json({
                 success: false,
                 message: 'Invalid credentials',
@@ -548,10 +762,9 @@ exports.login = async (req, res, next) => {
             });
         }
 
-        // Check if account is locked
         const lockStatus = await isAccountLocked(account.uuid);
+
         if (lockStatus.locked) {
-            console.log('🔒 [LOGIN] Account is locked');
             return res.status(429).json({
                 success: false,
                 message: `Too many failed login attempts. Account locked for ${Math.ceil(lockStatus.remainingTime / 60)} more minutes.`,
@@ -562,14 +775,24 @@ exports.login = async (req, res, next) => {
             });
         }
 
-        console.log('🔑 [LOGIN] Verifying password...');
+        const passwordResult = await verifyPassword(
+            password,
+            account.password_hash,
+            account
+        );
 
-        const isPasswordValid = await verifyPassword(password, account.password_hash);
+        if (!passwordResult.valid) {
+            console.log('❌ [LOGIN] Password login failed:', passwordResult.reason);
 
-        if (!isPasswordValid) {
-            console.log('❌ [LOGIN] Invalid password');
+            if (passwordResult.reason === 'USE_GOOGLE_LOGIN') {
+                return res.status(403).json({
+                    success: false,
+                    message: passwordResult.message || 'This account uses Google sign-in. Please continue with Google.',
+                    code: 'USE_GOOGLE_LOGIN',
+                    provider: 'GOOGLE',
+                });
+            }
 
-            // Track failed attempt
             const attemptResult = await trackFailedLoginAttempt(account.uuid);
 
             if (attemptResult.locked) {
@@ -594,19 +817,18 @@ exports.login = async (req, res, next) => {
             });
         }
 
-        console.log('✅ [LOGIN] Password verified');
-
-        // Check if account can login
         const eligibility = canAccountLogin(account);
-        if (!eligibility.allowed) {
-            console.log('❌ [LOGIN] Login not allowed:', eligibility.reason);
 
+        if (!eligibility.allowed) {
             const statusCodes = {
-                'ACCOUNT_SUSPENDED': 403,
-                'ACCOUNT_INACTIVE': 403,
-                'PHONE_NOT_VERIFIED': 403,
-                'PROFILE_INCOMPLETE': 403,
-                'VERIFICATION_REJECTED': 403,
+                ACCOUNT_DELETED: 403,
+                ACCOUNT_SUSPENDED: 403,
+                ACCOUNT_INACTIVE: 403,
+                PHONE_NOT_VERIFIED: 403,
+                PROFILE_INCOMPLETE: 403,
+                VERIFICATION_REJECTED: 403,
+                WALLET_FROZEN: 403,
+                WALLET_SUSPENDED: 403,
             };
 
             return res.status(statusCodes[eligibility.reason] || 403).json({
@@ -617,68 +839,20 @@ exports.login = async (req, res, next) => {
             });
         }
 
-        console.log('✅ [LOGIN] Eligibility check passed');
-
-        // Reset failed attempts on successful login
         await resetFailedLoginAttempts(account.uuid);
 
-        // Generate tokens (access + refresh)
-        console.log('🎫 [LOGIN] Generating tokens...');
-        const tokens = await generateTokens(account);
+        const tokens = await generateTokens(
+            account,
+            getClientTokenOptions(req)
+        );
 
-        // Build complete user object
-        const accountData = account.toJSON ? account.toJSON() : account;
-        const { password_hash, password_algo, ...safeAccount } = accountData;
-        let completeUser = { ...safeAccount };
+        const completeUser = buildCompleteUser(account);
 
-        if (account.user_type === 'PASSENGER' && account.passenger_profile) {
-            console.log('👤 [LOGIN] Including passenger profile data');
-            const profile = account.passenger_profile.toJSON
-                ? account.passenger_profile.toJSON()
-                : account.passenger_profile;
+        const isPendingDriver =
+            account.user_type === 'DRIVER' &&
+            account.status === 'PENDING';
 
-            completeUser.profile = {
-                address_text: profile.address_text,
-                notes: profile.notes,
-            };
-        }
-
-        if (account.user_type === 'DRIVER' && account.driver_profile) {
-            console.log('🚗 [LOGIN] Including driver profile data');
-            const profile = account.driver_profile.toJSON
-                ? account.driver_profile.toJSON()
-                : account.driver_profile;
-
-            completeUser.profile = {
-                cni_number: profile.cni_number,
-                license_number: profile.license_number,
-                license_expiry: profile.license_expiry,
-                license_document_url: profile.license_document_url,
-                insurance_number: profile.insurance_number,
-                insurance_expiry: profile.insurance_expiry,
-                insurance_document_url: profile.insurance_document_url,
-                vehicle_type: profile.vehicle_type,
-                vehicle_make_model: profile.vehicle_make_model,
-                vehicle_color: profile.vehicle_color,
-                vehicle_year: profile.vehicle_year,
-                vehicle_plate: profile.vehicle_plate,
-                vehicle_photo_url: profile.vehicle_photo_url,
-                verification_state: profile.verification_state,
-                is_online: profile.is_online,
-                is_available: profile.is_available,
-            };
-        }
-
-        delete completeUser.passenger_profile;
-        delete completeUser.driver_profile;
-
-        // Check for pending driver
-        if (account.user_type === 'DRIVER' && account.status === 'PENDING') {
-            console.log('⏳ [LOGIN] Driver status: PENDING approval');
-
-            console.log('✅ [LOGIN] Login successful (PENDING driver)');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
+        if (isPendingDriver) {
             return res.status(200).json({
                 success: true,
                 message: 'Login successful. Your account is pending admin approval.',
@@ -696,9 +870,12 @@ exports.login = async (req, res, next) => {
 
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('✅ [LOGIN] Login successful!');
+        console.log('   User UUID  :', completeUser.uuid);
+        console.log('   User Type  :', completeUser.user_type);
+        console.log('   Active Mode:', completeUser.active_mode || '(natural fallback)');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'Login successful',
             data: {
@@ -710,12 +887,14 @@ exports.login = async (req, res, next) => {
                 isPending: false,
             },
         });
+
     } catch (err) {
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('❌ [LOGIN ERROR]:', err.message);
+        console.error(err.stack);
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Login failed',
             code: err.code || 'LOGIN_ERROR',
@@ -727,7 +906,7 @@ exports.login = async (req, res, next) => {
 // PROFILE ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.getProfile = async (req, res, next) => {
+exports.getProfile = async (req, res) => {
     try {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('👤 [GET PROFILE] Request received');
@@ -741,24 +920,16 @@ exports.getProfile = async (req, res, next) => {
             });
         }
 
-        const { password_hash, password_algo, ...safeUser } = req.user.toJSON
-            ? req.user.toJSON()
-            : req.user;
+        const completeUser = buildCompleteUser(req.user);
 
-        console.log('✅ [GET PROFILE] Profile retrieved');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'Profile retrieved successfully',
-            data: safeUser,
+            data: completeUser,
         });
-    } catch (err) {
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('❌ [GET PROFILE ERROR]:', err.message);
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+    } catch (err) {
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Failed to retrieve profile',
             code: err.code || 'PROFILE_ERROR',
@@ -768,14 +939,11 @@ exports.getProfile = async (req, res, next) => {
 
 exports.updateAvatar = [
     uploadPassengerPhoto,
-    async (req, res, next) => {
-        try {
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('🖼️  [UPDATE AVATAR] Request received');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    async (req, res) => {
+        let newAvatarUrl = null;
 
+        try {
             if (!req.file) {
-                console.log('❌ [UPDATE AVATAR] No file uploaded');
                 return res.status(400).json({
                     success: false,
                     message: 'No file uploaded',
@@ -783,25 +951,24 @@ exports.updateAvatar = [
                 });
             }
 
-            // Upload new avatar to R2
-            console.log('📤 [UPDATE AVATAR] Uploading to R2...');
-            const newAvatarUrl = await uploadToR2(
+            newAvatarUrl = await uploadToR2(
                 req.file.buffer,
                 req.file.originalname,
                 'profiles',
                 req.file.mimetype
             );
 
-            // Delete old avatar from R2 if exists
             if (req.user.avatar_url) {
-                console.log('🗑️  [UPDATE AVATAR] Deleting old avatar from R2...');
                 await deleteFromR2(req.user.avatar_url);
             }
 
             const account = await Account.findByPk(req.user.uuid);
+
             if (!account) {
-                // Cleanup uploaded file
-                await deleteFromR2(newAvatarUrl);
+                if (newAvatarUrl) {
+                    await deleteFromR2(newAvatarUrl);
+                }
+
                 return res.status(404).json({
                     success: false,
                     message: 'Account not found',
@@ -809,26 +976,29 @@ exports.updateAvatar = [
                 });
             }
 
-            await account.update({ avatar_url: newAvatarUrl });
-            const { password_hash, password_algo, ...safeAccount } = account.toJSON();
+            await account.update({
+                avatar_url: newAvatarUrl,
+            });
 
-            console.log('✅ [UPDATE AVATAR] Avatar updated successfully!');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+            const completeUser = buildCompleteUser(account);
 
-            res.status(200).json({
+            return res.status(200).json({
                 success: true,
                 message: 'Avatar updated successfully',
                 data: {
                     avatar_url: newAvatarUrl,
-                    user: safeAccount,
+                    user: completeUser,
                 },
             });
-        } catch (err) {
-            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.error('❌ [UPDATE AVATAR ERROR]:', err.message);
-            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-            res.status(err.status || 500).json({
+        } catch (err) {
+            if (newAvatarUrl) {
+                try {
+                    await deleteFromR2(newAvatarUrl);
+                } catch (_) {}
+            }
+
+            return res.status(err.status || 500).json({
                 success: false,
                 message: err.message || 'Failed to update avatar',
                 code: err.code || 'AVATAR_UPDATE_ERROR',
@@ -838,47 +1008,38 @@ exports.updateAvatar = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
-// LOGOUT (INVALIDATE REFRESH TOKEN)
+// LOGOUT
+// POST /api/auth/logout
 // ═══════════════════════════════════════════════════════════════════════
 
-exports.logout = async (req, res, next) => {
+exports.logout = async (req, res) => {
     try {
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('👋 [LOGOUT] Request received');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-        const { refresh_token, logout_all } = req.body;
+        const {
+            refresh_token,
+            logout_all,
+        } = req.body || {};
 
         if (logout_all) {
-            // Logout from all devices
-            console.log('🚪 [LOGOUT] Logging out from ALL devices...');
             await invalidateAllRefreshTokens(req.user.uuid);
-            console.log('✅ [LOGOUT] All refresh tokens invalidated');
         } else if (refresh_token) {
-            // Logout from this device only
-            console.log('🚪 [LOGOUT] Logging out from this device...');
             await invalidateRefreshToken(refresh_token);
-            console.log('✅ [LOGOUT] Refresh token invalidated');
-        } else {
-            console.log('⚠️ [LOGOUT] No refresh token provided, client-side logout only');
         }
 
-        console.log('✅ [LOGOUT] Logout successful');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             message: 'Logged out successfully',
         });
-    } catch (err) {
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('❌ [LOGOUT ERROR]:', err.message);
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        res.status(err.status || 500).json({
+    } catch (err) {
+        return res.status(err.status || 500).json({
             success: false,
             message: err.message || 'Logout failed',
             code: err.code || 'LOGOUT_ERROR',
         });
     }
 };
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+

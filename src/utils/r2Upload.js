@@ -1,46 +1,45 @@
 // backend/utils/r2Upload.js
 // Cloudflare R2 Upload Utility using AWS S3 SDK
+// Handles images AND videos for service listings
 
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const crypto = require('crypto');
-const path = require('path');
+const path   = require('path');
 
-// Configure R2 Client (S3-compatible)
+// ── R2 Client ─────────────────────────────────────────────────────────────────
 const r2Client = new S3Client({
-    region: process.env.R2_REGION || 'auto',
+    region:   process.env.R2_REGION || 'auto',
     endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
     credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        accessKeyId:     process.env.R2_ACCESS_KEY_ID,
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
 });
 
-/**
- * Upload file to Cloudflare R2
- * @param {Buffer} fileBuffer - File buffer
- * @param {string} fileName - Original file name
- * @param {string} folder - Folder path in bucket (e.g., 'employees', 'drivers')
- * @param {string} mimeType - File MIME type
- * @returns {Promise<string>} - Public URL of uploaded file
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// UPLOAD SINGLE FILE TO R2
+// Works for any file type — images, videos, PDFs.
+// @param {Buffer} fileBuffer  - File content as Buffer
+// @param {string} fileName    - Original filename (used for extension only)
+// @param {string} folder      - Destination folder in bucket
+// @param {string} mimeType    - MIME type (e.g. 'image/jpeg', 'video/mp4')
+// @returns {Promise<string>}  - Public URL
+// ─────────────────────────────────────────────────────────────────────────────
 async function uploadToR2(fileBuffer, fileName, folder = 'uploads', mimeType = 'image/jpeg') {
     try {
-        // Generate unique file name
-        const fileExt = path.extname(fileName);
+        const fileExt   = path.extname(fileName).toLowerCase();
         const uniqueName = `${crypto.randomBytes(16).toString('hex')}${fileExt}`;
-        const key = `${folder}/${uniqueName}`;
+        const key        = `${folder}/${uniqueName}`;
 
-        // Upload to R2
         const command = new PutObjectCommand({
-            Bucket: process.env.R2_BUCKET_NAME,
-            Key: key,
-            Body: fileBuffer,
+            Bucket:      process.env.R2_BUCKET_NAME,
+            Key:         key,
+            Body:        fileBuffer,
             ContentType: mimeType,
         });
 
         await r2Client.send(command);
 
-        // Return public URL
         const publicUrl = `${process.env.R2_PUBLIC_URL}/${key}`;
         return publicUrl;
     } catch (error) {
@@ -49,20 +48,17 @@ async function uploadToR2(fileBuffer, fileName, folder = 'uploads', mimeType = '
     }
 }
 
-/**
- * Delete file from Cloudflare R2
- * @param {string} fileUrl - Full public URL of file
- * @returns {Promise<boolean>}
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE FILE FROM R2
+// ─────────────────────────────────────────────────────────────────────────────
 async function deleteFromR2(fileUrl) {
     try {
-        // Extract key from URL
         const urlObj = new URL(fileUrl);
-        const key = urlObj.pathname.substring(1); // Remove leading slash
+        const key    = urlObj.pathname.substring(1); // remove leading slash
 
         const command = new DeleteObjectCommand({
             Bucket: process.env.R2_BUCKET_NAME,
-            Key: key,
+            Key:    key,
         });
 
         await r2Client.send(command);
@@ -73,12 +69,9 @@ async function deleteFromR2(fileUrl) {
     }
 }
 
-/**
- * Upload multiple files to R2
- * @param {Array} files - Array of file objects with buffer, name, mimeType
- * @param {string} folder - Folder path in bucket
- * @returns {Promise<Array<string>>} - Array of public URLs
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// UPLOAD MULTIPLE FILES TO R2
+// ─────────────────────────────────────────────────────────────────────────────
 async function uploadMultipleToR2(files, folder = 'uploads') {
     const uploadPromises = files.map((file) =>
         uploadToR2(file.buffer, file.name, folder, file.mimeType)

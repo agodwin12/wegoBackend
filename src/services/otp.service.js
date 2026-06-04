@@ -41,10 +41,27 @@ async function issueOtp({ accountUuid, purpose, channel, target }, tx) {
     console.log("🚀 [ISSUE OTP] Starting OTP issuance...");
     console.log(`📋 UUID: ${accountUuid} | purpose: ${purpose} | channel: ${channel} | target: ${target}`);
 
+    const normalizedChannel = String(channel || '').toUpperCase();
+
+    if (!['EMAIL', 'SMS'].includes(normalizedChannel)) {
+        const err = new Error(`Unsupported OTP channel: ${channel}`);
+        err.status = 400;
+        err.code = 'UNSUPPORTED_OTP_CHANNEL';
+        throw err;
+    }
+
+    if (!target) {
+        const err = new Error(`Missing OTP target for channel ${normalizedChannel}`);
+        err.status = 400;
+        err.code = 'MISSING_OTP_TARGET';
+        throw err;
+    }
+
     // 1. Generate + hash
-    const code       = generateNumericCode();
-    const code_hash  = await bcrypt.hash(code, ROUNDS);
+    const code = generateNumericCode();
+    const code_hash = await bcrypt.hash(code, ROUNDS);
     const expires_at = new Date(Date.now() + OTP_TTL_MIN * 60 * 1000);
+
     console.log(`⏳ [OTP] Expires at: ${expires_at.toISOString()}`);
 
     // 2. Persist to DB
@@ -52,46 +69,86 @@ async function issueOtp({ accountUuid, purpose, channel, target }, tx) {
         {
             account_uuid: accountUuid,
             purpose,
-            channel,
+            channel: normalizedChannel,
             target,
             code_hash,
             expires_at,
-            attempts:     0,
+            attempts: 0,
             max_attempts: 5,
         },
         { transaction: tx }
     );
+
     console.log(`✅ [OTP DB] VerificationCode ID: ${vc.id}`);
 
     // 3. Deliver
-    let delivery = 'SENT';
     try {
-        if (channel === 'EMAIL') {
+        if (normalizedChannel === 'EMAIL') {
             console.log(`📧 [OTP] Sending via EMAIL to ${target}...`);
             await sendEmailOtp(target, code);
-        } else if (channel === 'SMS') {
+        }
+
+        if (normalizedChannel === 'SMS') {
             console.log(`📱 [OTP] Sending via SMS to ${target}...`);
             await sendSmsOtp(target, code);
-        } else {
-            throw new Error(`Unsupported channel: ${channel}`);
         }
-        console.log(`✅ [OTP DELIVERED] ${channel} → ${target}`);
+
+        console.log(`✅ [OTP DELIVERED] ${normalizedChannel} → ${target}`);
+
     } catch (err) {
-        delivery = 'FAILED';
-        console.warn(`⚠️ [OTP DELIVERY FAILED] ${channel} → ${target} | ${err?.message}`);
+        console.error(`❌ [OTP DELIVERY FAILED] ${normalizedChannel} → ${target}`);
+        console.error(`   Error: ${err.message}`);
+
+        try {
+            await vc.update(
+                {
+                    consumed_at: new Date(),
+                },
+                { transaction: tx }
+            );
+        } catch (consumeErr) {
+            console.warn('⚠️ [OTP CLEANUP] Failed to consume failed OTP:', consumeErr.message);
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('🔍 [DEV OTP - DELIVERY FAILED]');
+            console.log(`   UUID    : ${accountUuid}`);
+            console.log(`   Channel : ${normalizedChannel}`);
+            console.log(`   Target  : ${target}`);
+            console.log(`   Code    : ${code}`);
+            console.log(`   Status  : FAILED`);
+        }
+
+        const e = new Error(
+            normalizedChannel === 'SMS'
+                ? 'Failed to send OTP via SMS. Please try again.'
+                : 'Failed to send OTP via email. Please try again.'
+        );
+
+        e.status = 503;
+        e.code = normalizedChannel === 'SMS'
+            ? 'SMS_SEND_FAILED'
+            : 'EMAIL_SEND_FAILED';
+
+        throw e;
     }
 
     // 4. Dev mode: log plaintext code
     if (process.env.NODE_ENV !== 'production') {
         console.log('🔍 [DEV OTP]');
         console.log(`   UUID    : ${accountUuid}`);
-        console.log(`   Channel : ${channel}`);
+        console.log(`   Channel : ${normalizedChannel}`);
         console.log(`   Target  : ${target}`);
         console.log(`   Code    : ${code}`);
-        console.log(`   Status  : ${delivery}`);
+        console.log(`   Status  : SENT`);
     }
 
-    return { id: vc.id, delivery, channel, target };
+    return {
+        id: vc.id,
+        delivery: 'SENT',
+        channel: normalizedChannel,
+        target,
+    };
 }
 
 // ═══════════════════════════════════════════════════════════════════════

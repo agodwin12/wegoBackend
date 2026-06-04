@@ -6,70 +6,54 @@
 //
 // POST /api/auth/switch-mode
 //
-// Allows drivers and delivery agents to switch their active operating
-// context. The switch updates accounts.active_mode in the DB, then
-// issues a fresh token pair so every subsequent API call carries the
-// correct active_mode claim without requiring a full re-login.
-//
 // ── Allowed transitions ───────────────────────────────────────────────
 //
-//   DRIVER          → PASSENGER          always allowed
-//   DRIVER          → DELIVERY_AGENT     allowed (auto-creates DeliveryWallet
-//                                        if this is the driver's first time)
-//   DELIVERY_AGENT  → PASSENGER          always allowed
-//   DELIVERY_AGENT  → DRIVER             NOT allowed (wrong base role)
-//   PASSENGER       → anything           NOT allowed (can't self-promote)
-//   Same mode       → Same mode          rejected (no-op)
+//   DRIVER in DRIVER mode          → PASSENGER, DELIVERY_AGENT
+//   DRIVER in DELIVERY_AGENT mode  → DRIVER, PASSENGER
+//   DRIVER in PASSENGER mode       → DRIVER, DELIVERY_AGENT
+//
+//   DELIVERY_AGENT in DELIVERY_AGENT mode → PASSENGER
+//   DELIVERY_AGENT in PASSENGER mode      → DELIVERY_AGENT
+//
+//   PASSENGER → nothing
 //
 // ── Side effects ──────────────────────────────────────────────────────
 //
-//   Switching to PASSENGER:
-//     • Driver is removed from Redis geo-index (DRIVERS_GEO)
-//     • Driver is removed from ONLINE_DRIVERS and AVAILABLE_DRIVERS sets
-//     • Driver.status set to 'offline' in DB
-//     → They can no longer receive trip or delivery offers.
+//   → PASSENGER:
+//     • Driver removed from Redis geo-index + availability sets
+//     • Driver.status = offline
 //
-//   DRIVER → DELIVERY_AGENT:
-//     • Driver.current_mode set to 'delivery' (the legacy per-record mode)
-//     • DeliveryWallet auto-created if not exists
-//     • Driver removed from Redis (they must re-call goOnline in delivery mode)
+//   → DELIVERY_AGENT:
+//     • Redis cleaned (must re-call goOnline in delivery mode)
+//     • Driver.current_mode = delivery
+//     • DeliveryWallet auto-created if first time
 //
-//   Any → DRIVER:
-//     (only DELIVERY_AGENT → DRIVER is blocked; this path is DRIVER coming
-//      back from PASSENGER or DELIVERY_AGENT mode)
-//     • Driver.current_mode set back to 'ride'
-//     • Redis cleaned — must re-call goOnline
-//
-// ── Response ──────────────────────────────────────────────────────────
-//
-//   {
-//     success: true,
-//     data: {
-//       active_mode:   'PASSENGER' | 'DRIVER' | 'DELIVERY_AGENT',
-//       previous_mode: '...',
-//       access_token:  '<new JWT>',
-//       dashboard:     'passenger' | 'driver' | 'delivery',
-//     }
-//   }
-//
-//   Flutter reads `dashboard` to know which screen to navigate to.
+//   → DRIVER:
+//     • Redis cleaned (must re-call goOnline in ride mode)
+//     • Driver.current_mode = ride
 //
 // ═══════════════════════════════════════════════════════════════════════
 
 'use strict';
 
-const { v4: uuidv4 }         = require('uuid');
-const { Account, Driver }    = require('../models');
+const { v4: uuidv4 }      = require('uuid');
+const { Account, Driver } = require('../models');
 const { signAccessToken, generateRefreshToken } = require('../utils/jwt');
 const { redisClient, REDIS_KEYS }               = require('../config/redis');
 
-// ── Allowed transition map ────────────────────────────────────────────
-// Key   = user_type (permanent base role)
-// Value = set of modes that user_type can switch TO
+// ── Mode-aware allowed transitions ───────────────────────────────────
+// ALLOWED_TRANSITIONS[user_type][current_active_mode] → Set of allowed targets
 const ALLOWED_TRANSITIONS = {
-    DRIVER:          new Set(['PASSENGER', 'DELIVERY_AGENT']),
-    DELIVERY_AGENT:  new Set(['PASSENGER']),
-    // PASSENGER, PARTNER, ADMIN have no allowed transitions
+    DRIVER: {
+        DRIVER:         new Set(['PASSENGER', 'DELIVERY_AGENT']),
+        DELIVERY_AGENT: new Set(['DRIVER',    'PASSENGER']),
+        PASSENGER:      new Set(['DRIVER',    'DELIVERY_AGENT']),
+    },
+    DELIVERY_AGENT: {
+        DELIVERY_AGENT: new Set(['PASSENGER']),
+        PASSENGER:      new Set(['DELIVERY_AGENT']),
+    },
+    // PASSENGER, PARTNER, ADMIN — no switching
 };
 
 // ── Dashboard routing hint for Flutter ───────────────────────────────
@@ -85,8 +69,8 @@ const DASHBOARD_FOR_MODE = {
 
 exports.switchMode = async (req, res, next) => {
     try {
-        const driverId   = req.user.uuid;
-        const userType   = req.user.user_type;
+        const driverId    = req.user.uuid;
+        const userType    = req.user.user_type;
         const currentMode = req.auth.active_mode; // resolved by auth middleware
 
         const { target_mode } = req.body;
@@ -99,7 +83,8 @@ exports.switchMode = async (req, res, next) => {
         console.log('   target     :', target_mode);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-        // ── Validate target_mode provided ─────────────────────────────
+        // ── 1. Validate target_mode provided ──────────────────────────
+
         if (!target_mode) {
             return res.status(400).json({
                 success: false,
@@ -117,7 +102,8 @@ exports.switchMode = async (req, res, next) => {
             });
         }
 
-        // ── Guard: no-op switch ───────────────────────────────────────
+        // ── 2. No-op guard ────────────────────────────────────────────
+
         if (target_mode === currentMode) {
             return res.status(400).json({
                 success: false,
@@ -127,41 +113,43 @@ exports.switchMode = async (req, res, next) => {
             });
         }
 
-        // ── Guard: check allowed transitions ──────────────────────────
-        const allowed = ALLOWED_TRANSITIONS[userType];
-        if (!allowed || !allowed.has(target_mode)) {
-            const reason = !allowed
-                ? `${userType} accounts cannot switch modes.`
-                : `${userType} accounts cannot switch to ${target_mode} mode.`;
+        // ── 3. Mode-aware permission check ────────────────────────────
 
-            console.log('❌ [SWITCH-MODE] Transition not allowed:', userType, '→', target_mode);
+        const allowedForType = ALLOWED_TRANSITIONS[userType];
+        const allowedFromMode = allowedForType?.[currentMode];
+
+        if (!allowedFromMode || !allowedFromMode.has(target_mode)) {
+            const allowedList = allowedFromMode ? [...allowedFromMode] : [];
+            console.log(`❌ [SWITCH-MODE] Not allowed: ${userType} in ${currentMode} → ${target_mode}`);
+            console.log('   allowed    :', allowedList.join(', ') || '(none)');
+
             return res.status(403).json({
                 success: false,
-                message: reason,
+                message: `Cannot switch from ${currentMode} to ${target_mode}.`,
                 code:    'TRANSITION_NOT_ALLOWED',
                 data: {
-                    user_type:    userType,
-                    current_mode: currentMode,
+                    user_type:       userType,
+                    current_mode:    currentMode,
                     target_mode,
-                    allowed_targets: allowed ? [...allowed] : [],
+                    allowed_targets: allowedList,
                 },
             });
         }
 
-        // ── Side effects based on target mode ─────────────────────────
+        console.log('   allowed    :', [...allowedFromMode].join(', '));
+
+        // ── 4. Side effects based on target mode ──────────────────────
 
         if (target_mode === 'PASSENGER') {
             await _sideEffectsToPassenger(driverId, userType);
         } else if (target_mode === 'DELIVERY_AGENT') {
-            // Only DRIVER can reach here (ALLOWED_TRANSITIONS enforced above)
             await _sideEffectsToDelivery(driverId);
         } else if (target_mode === 'DRIVER') {
-            // A DRIVER returning from PASSENGER mode (DELIVERY_AGENT → DRIVER
-            // is blocked by ALLOWED_TRANSITIONS so only DRIVER can hit this)
             await _sideEffectsToDriver(driverId);
         }
 
-        // ── Persist new active_mode to DB ─────────────────────────────
+        // ── 5. Persist new active_mode to DB ──────────────────────────
+
         await Account.update(
             { active_mode: target_mode },
             { where: { uuid: driverId } }
@@ -169,33 +157,28 @@ exports.switchMode = async (req, res, next) => {
 
         console.log(`✅ [SWITCH-MODE] DB updated: active_mode = ${target_mode}`);
 
-        // ── Issue fresh token pair ────────────────────────────────────
-        // Re-fetch the account so signAccessToken gets the updated active_mode.
-        const updatedAccount = await Account.findByPk(driverId);
+        // ── 6. Issue fresh token pair ─────────────────────────────────
 
+        const updatedAccount  = await Account.findByPk(driverId);
         const newAccessToken  = signAccessToken(updatedAccount);
         const newRefreshToken = generateRefreshToken();
 
-        // Persist new refresh token to DB (replace old one)
-        // We reuse the existing RefreshToken model pattern from auth_controller
+        // Persist new refresh token (non-fatal if it fails)
         try {
             const { RefreshToken } = require('../models');
             const expiresAt = new Date();
             expiresAt.setFullYear(expiresAt.getFullYear() + 1);
 
-            // Invalidate all existing refresh tokens for this account
-            await RefreshToken.destroy({ where: { account_id: driverId } });
+            await RefreshToken.destroy({ where: { account_uuid: driverId } });
 
             await RefreshToken.create({
-                id:         uuidv4(),
-                account_id: driverId,
-                token:      newRefreshToken,
-                expires_at: expiresAt,
+                id:           uuidv4(),
+                account_uuid: driverId,
+                token:        newRefreshToken,
+                expires_at:   expiresAt,
             });
             console.log('✅ [SWITCH-MODE] Refresh token rotated');
         } catch (tokenErr) {
-            // Non-fatal — the access token is already issued.
-            // The old refresh token will still work until it expires naturally.
             console.warn('⚠️  [SWITCH-MODE] Refresh token rotation failed (non-fatal):', tokenErr.message);
         }
 
@@ -209,7 +192,6 @@ exports.switchMode = async (req, res, next) => {
                 previous_mode: currentMode,
                 active_mode:   target_mode,
                 user_type:     userType,
-                // Flutter reads `dashboard` to know which screen to push
                 dashboard:     DASHBOARD_FOR_MODE[target_mode],
                 access_token:  newAccessToken,
                 refresh_token: newRefreshToken,
@@ -226,14 +208,17 @@ exports.switchMode = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 // GET /api/auth/mode  —  current mode info
 // ═══════════════════════════════════════════════════════════════════════
-//
-// Lightweight endpoint Flutter calls on app resume to confirm the
-// current mode without a full re-login.
 
 exports.getCurrentMode = async (req, res) => {
-    const userType    = req.user.user_type;
-    const activeMode  = req.auth.active_mode;
-    const allowed     = ALLOWED_TRANSITIONS[userType];
+    const userType   = req.user.user_type;
+    const activeMode = req.auth.active_mode;
+
+    const allowedFromMode =
+        ALLOWED_TRANSITIONS[userType]?.[activeMode];
+
+    const allowedTargets = allowedFromMode
+        ? [...allowedFromMode].filter(m => m !== activeMode)
+        : [];
 
     return res.status(200).json({
         success: true,
@@ -241,7 +226,7 @@ exports.getCurrentMode = async (req, res) => {
             user_type:       userType,
             active_mode:     activeMode,
             dashboard:       DASHBOARD_FOR_MODE[activeMode] || null,
-            allowed_targets: allowed ? [...allowed].filter(m => m !== activeMode) : [],
+            allowed_targets: allowedTargets,
         },
     });
 };
@@ -250,19 +235,11 @@ exports.getCurrentMode = async (req, res) => {
 // PRIVATE SIDE-EFFECT HELPERS
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Side effects when switching TO passenger mode.
- * The driver/agent goes invisible to dispatch — removed from geo-index,
- * availability sets, and their Driver record is set to offline.
- */
 async function _sideEffectsToPassenger(accountUuid, userType) {
     console.log(`🚶 [SWITCH-MODE] Side effects: → PASSENGER for ${accountUuid}`);
 
-    // Remove from Redis geo-index and availability sets
     await _cleanRedisPresence(accountUuid);
 
-    // Update Driver record to offline
-    // Driver.id === Account.uuid for both DRIVER and DELIVERY_AGENT accounts
     try {
         await Driver.update(
             { status: 'offline', current_mode: 'ride' },
@@ -270,25 +247,15 @@ async function _sideEffectsToPassenger(accountUuid, userType) {
         );
         console.log('✅ [SWITCH-MODE] Driver record set to offline');
     } catch (e) {
-        // Non-fatal — Redis is the source of truth for real-time availability.
-        // If the DB update fails the driver won't appear online anyway
-        // because we already removed them from Redis.
         console.warn('⚠️  [SWITCH-MODE] Driver DB update failed (non-fatal):', e.message);
     }
 }
 
-/**
- * Side effects when a DRIVER switches TO delivery agent mode.
- * Updates Driver.current_mode to 'delivery' and ensures a
- * DeliveryWallet exists (auto-creates on first switch).
- */
 async function _sideEffectsToDelivery(accountUuid) {
     console.log(`📦 [SWITCH-MODE] Side effects: → DELIVERY_AGENT for ${accountUuid}`);
 
-    // Remove from Redis — must re-call goOnline in delivery mode
     await _cleanRedisPresence(accountUuid);
 
-    // Update Driver.current_mode so existing delivery dispatch logic works
     try {
         await Driver.update(
             { status: 'offline', current_mode: 'delivery' },
@@ -299,8 +266,7 @@ async function _sideEffectsToDelivery(accountUuid) {
         console.warn('⚠️  [SWITCH-MODE] Driver mode update failed (non-fatal):', e.message);
     }
 
-    // Auto-create DeliveryWallet if this is the driver's first time
-    // in delivery mode — they need a wallet to accept deliveries.
+    // Auto-create DeliveryWallet on first delivery mode switch
     try {
         const { DeliveryWallet } = require('../models');
         const [wallet, created]  = await DeliveryWallet.findOrCreate({
@@ -324,21 +290,13 @@ async function _sideEffectsToDelivery(accountUuid) {
             console.log('ℹ️  [SWITCH-MODE] DeliveryWallet already exists — balance:', wallet.balance, 'XAF');
         }
     } catch (e) {
-        // Non-fatal — driver can still switch but should top up before accepting deliveries.
-        // The delivery accept endpoint will enforce the balance requirement.
         console.warn('⚠️  [SWITCH-MODE] DeliveryWallet findOrCreate failed (non-fatal):', e.message);
     }
 }
 
-/**
- * Side effects when a DRIVER returns TO driver mode
- * (from PASSENGER or DELIVERY_AGENT mode).
- * Resets Driver.current_mode back to 'ride'.
- */
 async function _sideEffectsToDriver(accountUuid) {
     console.log(`🚗 [SWITCH-MODE] Side effects: → DRIVER for ${accountUuid}`);
 
-    // Remove from Redis — must re-call goOnline in ride mode
     await _cleanRedisPresence(accountUuid);
 
     try {
@@ -352,11 +310,6 @@ async function _sideEffectsToDriver(accountUuid) {
     }
 }
 
-/**
- * Removes the driver from all Redis online/availability structures.
- * Used by all mode transitions — in every case the driver must
- * re-call goOnline from their new dashboard.
- */
 async function _cleanRedisPresence(accountUuid) {
     try {
         const id = accountUuid.toString();
@@ -369,7 +322,6 @@ async function _cleanRedisPresence(accountUuid) {
         ]);
         console.log('✅ [SWITCH-MODE] Redis presence cleared for:', accountUuid);
     } catch (e) {
-        // Non-fatal — geo entry expiry will clean it up naturally
         console.warn('⚠️  [SWITCH-MODE] Redis cleanup failed (non-fatal):', e.message);
     }
 }

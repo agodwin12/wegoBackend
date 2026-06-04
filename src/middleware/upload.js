@@ -1,274 +1,299 @@
-const multer = require("multer");
-const path = require("path");
-const { uploadToR2, deleteFromR2 } = require("../utils/r2Upload");
+// backend/middleware/upload.js
+// Multer + R2 upload middleware
+// Handles images, documents, vehicles, AND service listing media (photos + video)
 
-/* ================================
-   STORAGE CONFIGURATION
-   Using memoryStorage for R2 upload
-================================= */
+'use strict';
 
-// Memory storage - files stored in memory as Buffer for R2 upload
+const multer  = require('multer');
+const path    = require('path');
+const { uploadToR2, deleteFromR2 } = require('../utils/r2Upload');
+
+/* ============================================================
+   STORAGE — memory only (buffers go straight to R2)
+============================================================ */
 const memoryStorage = multer.memoryStorage();
 
-/* ================================
-   FILE FILTERS (FIXED)
-================================= */
+/* ============================================================
+   FILE FILTERS
+============================================================ */
 
-// Accepts png even if Flutter sends wrong MIME "application/octet-stream"
+// Images only (JPEG, PNG, WEBP)
+// Accepts application/octet-stream because Flutter sometimes sends that
 const imageFilter = (req, file, cb) => {
-    const allowedExtensions = /\.(jpg|jpeg|png|webp)$/i;
+    const validExt  = /\.(jpg|jpeg|png|webp)$/i.test(file.originalname);
+    const validMime = file.mimetype.startsWith('image/') ||
+        file.mimetype === 'application/octet-stream';
 
-    const isValidExt = allowedExtensions.test(file.originalname);
-    const isValidMime =
-        file.mimetype.startsWith("image/") || file.mimetype === "application/octet-stream";
-
-    if (isValidExt && isValidMime) {
+    if (validExt && validMime) {
         cb(null, true);
     } else {
-        cb(new Error("Only image files (JPEG, JPG, PNG, WEBP) are allowed!"), false);
+        cb(new Error('Only image files (JPEG, PNG, WEBP) are allowed.'), false);
     }
 };
 
-// Allow images + PDF for documents
+// Images + PDF for driver/vehicle documents
 const documentFilter = (req, file, cb) => {
-    const allowedExtensions = /\.(jpg|jpeg|png|pdf)$/i;
+    const validExt  = /\.(jpg|jpeg|png|pdf)$/i.test(file.originalname);
+    const validMime = file.mimetype.startsWith('image/') ||
+        file.mimetype === 'application/pdf'  ||
+        file.mimetype === 'application/octet-stream';
 
-    const isValidExt = allowedExtensions.test(file.originalname);
-    const isValidMime =
-        file.mimetype.startsWith("image/") ||
-        file.mimetype === "application/pdf" ||
-        file.mimetype === "application/octet-stream";
-
-    if (isValidExt && isValidMime) {
+    if (validExt && validMime) {
         cb(null, true);
     } else {
-        cb(new Error("Only JPG, PNG or PDF files are allowed!"), false);
+        cb(new Error('Only JPG, PNG or PDF files are allowed.'), false);
     }
 };
 
-/* ================================
-   MULTER CONFIG
-================================= */
+// Service listing photos — same as imageFilter but higher size limit
+const servicePhotoFilter = imageFilter;
 
+// Service listing VIDEO — MP4, MOV, AVI, MKV, WEBM
+// Also accepts application/octet-stream (Flutter quirk)
+const serviceVideoFilter = (req, file, cb) => {
+    const validExt  = /\.(mp4|mov|avi|mkv|webm)$/i.test(file.originalname);
+    const validMime = file.mimetype.startsWith('video/') ||
+        file.mimetype === 'application/octet-stream';
+
+    if (validExt && validMime) {
+        cb(null, true);
+    } else {
+        cb(
+            new Error('Only video files (MP4, MOV, AVI, MKV, WEBM) are allowed.'),
+            false
+        );
+    }
+};
+
+// Mixed filter — accepts both images AND videos
+// Used by uploadServiceMedia (photos + optional video in one multipart request)
+const serviceMediaFilter = (req, file, cb) => {
+    const isImage = /\.(jpg|jpeg|png|webp)$/i.test(file.originalname) &&
+        (file.mimetype.startsWith('image/') ||
+            file.mimetype === 'application/octet-stream');
+
+    const isVideo = /\.(mp4|mov|avi|mkv|webm)$/i.test(file.originalname) &&
+        (file.mimetype.startsWith('video/') ||
+            file.mimetype === 'application/octet-stream');
+
+    if (isImage || isVideo) {
+        cb(null, true);
+    } else {
+        cb(
+            new Error('Only images (JPG, PNG, WEBP) and videos (MP4, MOV) are allowed.'),
+            false
+        );
+    }
+};
+
+/* ============================================================
+   MULTER INSTANCES
+============================================================ */
+
+// Profile picture — 5 MB
 const uploadProfile = multer({
-    storage: memoryStorage,
+    storage:    memoryStorage,
     fileFilter: imageFilter,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+    limits:     { fileSize: 5 * 1024 * 1024 },
 });
 
+// Driver / vehicle documents — 10 MB
 const uploadDocuments = multer({
-    storage: memoryStorage,
+    storage:    memoryStorage,
     fileFilter: documentFilter,
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+    limits:     { fileSize: 10 * 1024 * 1024 },
 });
 
+// Vehicle photos — 5 MB
 const uploadVehicle = multer({
-    storage: memoryStorage,
+    storage:    memoryStorage,
     fileFilter: imageFilter,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+    limits:     { fileSize: 5 * 1024 * 1024 },
 });
 
-/* ================================
+// Service listing PHOTOS — up to 5 files, 10 MB each
+// Usage in route: uploadServicePhotos.array('photos', 5)
+const uploadServicePhotos = multer({
+    storage:    memoryStorage,
+    fileFilter: servicePhotoFilter,
+    limits:     { fileSize: 10 * 1024 * 1024 },
+});
+
+// Service listing VIDEO — single file, 100 MB
+// Usage in route: uploadServiceVideo.single('video')
+const uploadServiceVideo = multer({
+    storage:    memoryStorage,
+    fileFilter: serviceVideoFilter,
+    limits:     { fileSize: 100 * 1024 * 1024 },
+});
+
+// Service listing PHOTOS + VIDEO in one request
+// Route usage:
+//   uploadServiceMedia.fields([
+//     { name: 'photos', maxCount: 5 },
+//     { name: 'video',  maxCount: 1 },
+//   ])
+//
+// In controller:
+//   const photos = req.files['photos'] || [];   // array of image files
+//   const video  = req.files['video']?.[0];     // single video file or undefined
+const uploadServiceMedia = multer({
+    storage:    memoryStorage,
+    fileFilter: serviceMediaFilter,
+    limits: {
+        fileSize: 100 * 1024 * 1024, // 100 MB — covers both photos and video
+    },
+});
+
+// Generic fallback (backward compat)
+const upload = multer({
+    storage:    memoryStorage,
+    fileFilter: imageFilter,
+    limits:     { fileSize: 5 * 1024 * 1024 },
+});
+
+/* ============================================================
    R2 UPLOAD HELPERS
-================================= */
+============================================================ */
 
 /**
- * Upload single file to R2
- * @param {Object} file - Multer file object with buffer
- * @param {string} folder - R2 folder (profiles, documents, vehicles)
- * @returns {Promise<string>} - Public URL
+ * Upload a single multer file object to R2.
+ * Works for any file type — images, videos, PDFs.
+ * @param {Object} file   - Multer file object (must have .buffer and .originalname)
+ * @param {string} folder - R2 folder path
+ * @returns {Promise<string>} Public URL
  */
-const uploadFileToR2 = async (file, folder = "uploads") => {
-    if (!file || !file.buffer) {
-        throw new Error("No file buffer provided");
-    }
+const uploadFileToR2 = async (file, folder = 'uploads') => {
+    if (!file || !file.buffer) throw new Error('No file buffer provided');
+    const mimeType = file.mimetype || 'application/octet-stream';
+    return uploadToR2(file.buffer, file.originalname, folder, mimeType);
+};
 
-    const mimeType = file.mimetype || "application/octet-stream";
-    return await uploadToR2(file.buffer, file.originalname, folder, mimeType);
+const uploadProfileToR2 = (file) => uploadFileToR2(file, 'profiles');
+const uploadDocumentToR2 = (file) => uploadFileToR2(file, 'documents');
+const uploadVehicleToR2  = (file) => uploadFileToR2(file, 'vehicles');
+
+/**
+ * Upload multiple multer file objects to R2 in parallel.
+ * @param {Object[]} files  - Array of multer file objects
+ * @param {string}   folder - R2 folder path
+ * @returns {Promise<string[]>} Array of public URLs
+ */
+const uploadMultipleFilesToR2 = async (files, folder = 'uploads') => {
+    if (!files || files.length === 0) return [];
+    return Promise.all(files.map((f) => uploadFileToR2(f, folder)));
 };
 
 /**
- * Upload profile picture to R2
- * @param {Object} file - Multer file object
- * @returns {Promise<string>} - Public URL
- */
-const uploadProfileToR2 = async (file) => {
-    return await uploadFileToR2(file, "profiles");
-};
-
-/**
- * Upload document to R2
- * @param {Object} file - Multer file object
- * @returns {Promise<string>} - Public URL
- */
-const uploadDocumentToR2 = async (file) => {
-    return await uploadFileToR2(file, "documents");
-};
-
-/**
- * Upload vehicle photo to R2
- * @param {Object} file - Multer file object
- * @returns {Promise<string>} - Public URL
- */
-const uploadVehicleToR2 = async (file) => {
-    return await uploadFileToR2(file, "vehicles");
-};
-
-/**
- * Upload multiple files to R2
- * @param {Array} files - Array of multer file objects
- * @param {string} folder - R2 folder
- * @returns {Promise<Array<string>>} - Array of public URLs
- */
-const uploadMultipleFilesToR2 = async (files, folder = "uploads") => {
-    if (!files || files.length === 0) {
-        return [];
-    }
-
-    const uploadPromises = files.map((file) => uploadFileToR2(file, folder));
-    return await Promise.all(uploadPromises);
-};
-
-/**
- * Delete file from R2
- * @param {string} fileUrl - Full public URL
- * @returns {Promise<boolean>}
+ * Delete a file from R2 by its public URL.
  */
 const deleteFile = async (fileUrl) => {
     try {
         if (!fileUrl) return false;
-
         const result = await deleteFromR2(fileUrl);
-        if (result) {
-            console.log(`🗑️ Deleted file from R2: ${fileUrl}`);
-        }
+        if (result) console.log(`🗑️  Deleted from R2: ${fileUrl}`);
         return result;
     } catch (err) {
-        console.error("❌ Error deleting file from R2:", err);
+        console.error('❌ Error deleting from R2:', err);
         return false;
     }
 };
 
 /**
- * Delete multiple files from R2
- * @param {Array<string>} fileUrls - Array of public URLs
- * @returns {Promise<boolean>}
+ * Delete multiple files from R2.
  */
 const deleteMultipleFiles = async (fileUrls) => {
     if (!fileUrls || fileUrls.length === 0) return true;
-
-    const deletePromises = fileUrls.map((url) => deleteFile(url));
-    const results = await Promise.all(deletePromises);
-    return results.every((result) => result === true);
+    const results = await Promise.all(fileUrls.map(deleteFile));
+    return results.every(Boolean);
 };
 
-/* ================================
-   BACKWARD COMPATIBILITY HELPERS
-================================= */
+/* ============================================================
+   BACKWARD-COMPAT HELPERS
+============================================================ */
 
-/**
- * Get file URL (for backward compatibility)
- * Now returns the full R2 URL
- */
-const getFileUrl = (filename, type = "profile") => {
+const getFileUrl = (filename, type = 'profile') => {
     if (!filename) return null;
-
-    // If it's already a full URL, return it
-    if (filename.startsWith("http")) return filename;
-
-    // Otherwise, construct R2 URL
+    if (filename.startsWith('http')) return filename;
     return `${process.env.R2_PUBLIC_URL}/${type}s/${filename}`;
 };
 
-/**
- * Get filename from URL
- */
 const getFilenameFromUrl = (url) => {
     if (!url) return null;
-    return path.basename(url);
+    return require('path').basename(url);
 };
 
-/* ================================
-   MIDDLEWARE FOR AUTO R2 UPLOAD
-================================= */
+/* ============================================================
+   AUTO-UPLOAD MIDDLEWARE
+   Attach after multer — automatically uploads all files to R2
+   and adds .r2Url to each file object.
+============================================================ */
+const autoUploadToR2 = (folderName) => async (req, res, next) => {
+    try {
+        if (req.file) {
+            req.file.r2Url = await uploadFileToR2(req.file, folderName);
+            console.log(`✅ Uploaded to R2: ${req.file.r2Url}`);
+        }
 
-const upload = multer({
-    storage: memoryStorage,
-    fileFilter: imageFilter,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB
-});
-
-
-/**
- * Middleware to automatically upload files to R2 after multer processing
- * Use after multer middleware
- */
-const autoUploadToR2 = (folderName) => {
-    return async (req, res, next) => {
-        try {
-            // Handle single file
-            if (req.file) {
-                req.file.r2Url = await uploadFileToR2(req.file, folderName);
-                console.log(`✅ Uploaded to R2: ${req.file.r2Url}`);
-            }
-
-            // Handle multiple files
-            if (req.files) {
-                if (Array.isArray(req.files)) {
-                    // req.files is array
-                    req.files = await Promise.all(
-                        req.files.map(async (file) => {
-                            file.r2Url = await uploadFileToR2(file, folderName);
-                            console.log(`✅ Uploaded to R2: ${file.r2Url}`);
-                            return file;
+        if (req.files) {
+            if (Array.isArray(req.files)) {
+                req.files = await Promise.all(
+                    req.files.map(async (f) => {
+                        f.r2Url = await uploadFileToR2(f, folderName);
+                        console.log(`✅ Uploaded to R2: ${f.r2Url}`);
+                        return f;
+                    })
+                );
+            } else {
+                // fields() format: { photos: [...], video: [...] }
+                for (const field of Object.keys(req.files)) {
+                    req.files[field] = await Promise.all(
+                        req.files[field].map(async (f) => {
+                            f.r2Url = await uploadFileToR2(f, folderName);
+                            console.log(`✅ Uploaded to R2: ${f.r2Url}`);
+                            return f;
                         })
                     );
-                } else {
-                    // req.files is object (multiple fields)
-                    for (const fieldName in req.files) {
-                        req.files[fieldName] = await Promise.all(
-                            req.files[fieldName].map(async (file) => {
-                                file.r2Url = await uploadFileToR2(file, folderName);
-                                console.log(`✅ Uploaded to R2: ${file.r2Url}`);
-                                return file;
-                            })
-                        );
-                    }
                 }
             }
-
-            next();
-        } catch (error) {
-            console.error("❌ R2 Upload Error:", error);
-            next(error);
         }
-    };
+
+        next();
+    } catch (error) {
+        console.error('❌ autoUploadToR2 error:', error);
+        next(error);
+    }
 };
 
-/* ================================
+/* ============================================================
    EXPORTS
-================================= */
+============================================================ */
 module.exports = {
-    // Multer middleware (same as before)
+    // ── Multer middleware ──────────────────────────────────────────────────
     uploadProfile,
     uploadDocuments,
     uploadVehicle,
 
-    // R2 upload functions
+    // Service listing media (use these in serviceListing routes)
+    uploadServicePhotos,   // array('photos', 5)         — images only, 10 MB
+    uploadServiceVideo,    // single('video')             — video only, 100 MB
+    uploadServiceMedia,    // fields([photos×5, video×1]) — both in one request
+
+    upload,                // generic fallback
+
+    // ── R2 helpers ────────────────────────────────────────────────────────
     uploadFileToR2,
     uploadProfileToR2,
     uploadDocumentToR2,
     uploadVehicleToR2,
     uploadMultipleFilesToR2,
 
-    // Delete functions
+    // ── Delete helpers ─────────────────────────────────────────────────────
     deleteFile,
     deleteMultipleFiles,
 
-    // Helper functions (backward compatible)
+    // ── Misc ──────────────────────────────────────────────────────────────
     getFileUrl,
     getFilenameFromUrl,
-    upload,
-    // Middleware
     autoUploadToR2,
 };

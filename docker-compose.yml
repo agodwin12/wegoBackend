@@ -1,0 +1,116 @@
+# ═══════════════════════════════════════════════════════════════════════
+# WeGo Backend — docker-compose.yml
+#
+# Services:
+#   api      — Node.js/Express/Socket.IO backend  → port 8000
+#   redis    — Redis (geo-index, socket rooms, CamPay token cache, etc.)
+#
+# MySQL runs directly on the VPS — no db container needed.
+# The api container connects to MySQL via host.docker.internal (see below).
+#
+# Usage:
+#   Build & start:   docker compose up --build -d
+#   Logs:            docker compose logs -f wego_backend
+#   Stop:            docker compose down
+#   Teardown + vols: docker compose down -v
+# ═══════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────
+  # API  —  WeGo Express Backend
+  # ──────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: wego_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 8000
+      # ── MySQL is on the VPS host, not in a container ──────────────
+      # host.docker.internal resolves to the host machine from inside
+      # a Docker container on Linux you may need to add the extra_hosts
+      # block below. On Docker Desktop (Windows/Mac) it works out of
+      # the box.
+      DB_HOST: host.docker.internal
+      DB_PORT: ${DB_PORT:-3306}
+      # ── Redis is the container below ─────────────────────────────
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    extra_hosts:
+      # Makes host.docker.internal resolve correctly on Linux VPS
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+    networks:
+      - wego_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────
+  # REDIS  —  Redis 7
+  #
+  # Used for:
+  #   • Driver geo-index (GEOADD / GEORADIUS)
+  #   • Online / available driver sets
+  #   • Socket room → socket ID mapping
+  #   • CamPay auth token cache (50-minute TTL)
+  #   • Earnings rules + bonus program cache (5-minute TTL)
+  #   • Balance sheet cron state
+  #   • Idempotency helpers
+  # ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: wego_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1
+      --loglevel notice
+    volumes:
+      - redis_data:/data
+    ports:
+      # Exposed for redis-cli debugging from the VPS
+      - "6379:6379"
+    networks:
+      - wego_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# ────────────────────────────────────────────────────────────────────
+# NAMED VOLUMES
+# ────────────────────────────────────────────────────────────────────
+volumes:
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+
+# ────────────────────────────────────────────────────────────────────
+# NETWORKS
+# ────────────────────────────────────────────────────────────────────
+networks:
+  wego_net:
+    driver: bridge

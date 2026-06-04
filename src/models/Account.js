@@ -1,174 +1,307 @@
 // src/models/Account.js
+'use strict';
+
 //
 // ═══════════════════════════════════════════════════════════════════════
 // ACCOUNT MODEL
 // ═══════════════════════════════════════════════════════════════════════
 //
-// ⚠️  MIGRATION REQUIRED for active_mode:
+// Required DB migration for Google OAuth:
 //
-//   ALTER TABLE accounts
-//     ADD COLUMN active_mode ENUM('PASSENGER','DRIVER','DELIVERY_AGENT')
-//     NULL AFTER user_type;
+// ALTER TABLE accounts
+//   ADD COLUMN google_id VARCHAR(255) NULL AFTER active_mode,
+//   ADD COLUMN auth_provider ENUM('LOCAL', 'GOOGLE', 'LOCAL_GOOGLE')
+//     NOT NULL DEFAULT 'LOCAL' AFTER google_id,
+//   ADD COLUMN last_login_provider ENUM('LOCAL', 'GOOGLE')
+//     NULL AFTER auth_provider,
+//   ADD COLUMN google_avatar_url VARCHAR(500)
+//     NULL AFTER last_login_provider;
 //
-//   -- Backfill existing rows so every account has an active_mode
-//   -- that matches their base user_type:
-//   UPDATE accounts SET active_mode = 'PASSENGER'       WHERE user_type = 'PASSENGER';
-//   UPDATE accounts SET active_mode = 'DRIVER'          WHERE user_type = 'DRIVER';
-//   UPDATE accounts SET active_mode = 'DELIVERY_AGENT'  WHERE user_type = 'DELIVERY_AGENT';
-//   -- PARTNER and ADMIN don't switch modes — leave them NULL.
+// ALTER TABLE accounts
+//   MODIFY COLUMN password_hash VARCHAR(255) NULL,
+//   MODIFY COLUMN password_algo VARCHAR(32) NULL DEFAULT 'bcrypt';
+//
+// CREATE UNIQUE INDEX accounts_google_id_unique
+//   ON accounts (google_id);
+//
+// CREATE INDEX accounts_auth_provider_idx
+//   ON accounts (auth_provider);
+//
+// CREATE INDEX accounts_email_provider_idx
+//   ON accounts (email, auth_provider);
 //
 // ═══════════════════════════════════════════════════════════════════════
 
 const { DataTypes, Model } = require('sequelize');
 const sequelize = require('../config/database');
 
-const PassengerProfile = require('./PassengerProfile');
-const DriverProfile    = require('./DriverProfile');
-
 class Account extends Model {}
 
 Account.init(
     {
-        // ── Primary key ───────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
+        // PRIMARY KEY
+        // ─────────────────────────────────────────────────────────────
+
         uuid: {
-            type:         DataTypes.CHAR(36),
+            type: DataTypes.CHAR(36),
             defaultValue: DataTypes.UUIDV4,
-            allowNull:    false,
-            unique:       true,
-            primaryKey:   true,
+            allowNull: false,
+            unique: true,
+            primaryKey: true,
         },
 
-        // ── Base role — never changes after registration ───────────────
-        // This is the permanent identity of the account.
-        // Use active_mode to know what the user is *currently acting as*.
+        // ─────────────────────────────────────────────────────────────
+        // BASE ROLE
+        // ─────────────────────────────────────────────────────────────
+        //
+        // user_type = permanent/base identity of the account.
+        // active_mode = current operating mode.
+        //
+        // Google OAuth is allowed only for PASSENGER and DRIVER.
+        // DELIVERY_AGENT accounts must remain internally/admin-created.
+        // Enforcement is done in the Google auth service/controller.
+        // ─────────────────────────────────────────────────────────────
+
         user_type: {
-            type:      DataTypes.ENUM('PASSENGER', 'DRIVER', 'PARTNER', 'ADMIN', 'DELIVERY_AGENT'),
+            type: DataTypes.ENUM(
+                'PASSENGER',
+                'DRIVER',
+                'PARTNER',
+                'ADMIN',
+                'DELIVERY_AGENT'
+            ),
             allowNull: false,
-            comment:   'Permanent base role set at registration. Never changes.',
+            comment: 'Permanent base role set at registration. Never changes.',
         },
 
-        // ── Active mode — changes when user switches context ──────────
-        //
-        // This is the mode the user is currently operating in.
-        // The JWT carries active_mode so every API call and socket event
-        // knows which dashboard/capability set is currently active.
-        //
-        // Allowed transitions (enforced in switchMode controller):
-        //   DRIVER          → PASSENGER          (always allowed)
-        //   DRIVER          → DELIVERY_AGENT     (allowed — shared wallet)
-        //   DELIVERY_AGENT  → PASSENGER          (always allowed)
-        //   PASSENGER       → anything           (blocked — can't self-promote)
-        //
-        // NULL means the account never switched (PARTNER, ADMIN, etc.)
-        // or was created before this column existed. Treat NULL as equal
-        // to user_type when reading it.
         active_mode: {
-            type:         DataTypes.ENUM('PASSENGER', 'DRIVER', 'DELIVERY_AGENT'),
-            allowNull:    true,
+            type: DataTypes.ENUM(
+                'PASSENGER',
+                'DRIVER',
+                'DELIVERY_AGENT'
+            ),
+            allowNull: true,
             defaultValue: null,
-            comment:      'Current operating mode. NULL = same as user_type. Updated by POST /api/auth/switch-mode.',
+            comment:
+                'Current operating mode. NULL = same as user_type. Updated by switch-mode flow.',
         },
 
-        // ── Contact ───────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
+        // GOOGLE OAUTH
+        // ─────────────────────────────────────────────────────────────
+        //
+        // google_id = Google subject claim, stable unique Google user id.
+        //
+        // auth_provider:
+        //   LOCAL        → password account only
+        //   GOOGLE       → Google-created account, no password required
+        //   LOCAL_GOOGLE → local account later linked with Google
+        //
+        // last_login_provider helps analytics/security/debugging.
+        // google_avatar_url keeps original Google avatar separate from
+        // app avatar_url. You can copy it into avatar_url if desired.
+        // ─────────────────────────────────────────────────────────────
+
+        google_id: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+            unique: true,
+            comment: 'Google OAuth subject identifier.',
+        },
+
+        auth_provider: {
+            type: DataTypes.ENUM('LOCAL', 'GOOGLE', 'LOCAL_GOOGLE'),
+            allowNull: false,
+            defaultValue: 'LOCAL',
+            comment: 'Primary authentication provider for this account.',
+        },
+
+        last_login_provider: {
+            type: DataTypes.ENUM('LOCAL', 'GOOGLE'),
+            allowNull: true,
+            defaultValue: null,
+            comment: 'Provider used for the latest successful login.',
+        },
+
+        google_avatar_url: {
+            type: DataTypes.STRING(500),
+            allowNull: true,
+            comment: 'Original profile picture URL returned by Google.',
+        },
+
+        // ─────────────────────────────────────────────────────────────
+        // CONTACT
+        // ─────────────────────────────────────────────────────────────
+
         email: {
-            type:      DataTypes.STRING(190),
-            unique:    true,
+            type: DataTypes.STRING(190),
+            unique: true,
             allowNull: true,
-            validate:  { isEmail: true },
-        },
-        phone_e164: {
-            type:      DataTypes.STRING(32),
-            unique:    true,
-            allowNull: true,
-        },
-        phone_verified: {
-            type:         DataTypes.BOOLEAN,
-            defaultValue: false,
-        },
-        email_verified: {
-            type:         DataTypes.BOOLEAN,
-            defaultValue: false,
+            validate: {
+                isEmail: true,
+            },
         },
 
-        // ── Auth ──────────────────────────────────────────────────────
-        password_hash: {
-            type:      DataTypes.STRING(255),
+        phone_e164: {
+            type: DataTypes.STRING(32),
+            unique: true,
+            allowNull: true,
+        },
+
+        phone_verified: {
+            type: DataTypes.BOOLEAN,
+            defaultValue: false,
             allowNull: false,
         },
+
+        email_verified: {
+            type: DataTypes.BOOLEAN,
+            defaultValue: false,
+            allowNull: false,
+        },
+
+        // ─────────────────────────────────────────────────────────────
+        // AUTH
+        // ─────────────────────────────────────────────────────────────
+        //
+        // password_hash is nullable because Google-only accounts do not
+        // have a local password unless the user sets one later.
+        //
+        // Login service must handle:
+        //   password_hash === null && auth_provider === 'GOOGLE'
+        //   → ask user to continue with Google.
+        // ─────────────────────────────────────────────────────────────
+
+        password_hash: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+        },
+
         password_algo: {
-            type:         DataTypes.STRING(32),
+            type: DataTypes.STRING(32),
             defaultValue: 'bcrypt',
-            allowNull:    false,
+            allowNull: true,
         },
 
-        // ── Personal info ─────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
+        // PERSONAL INFO
+        // ─────────────────────────────────────────────────────────────
+
         civility: {
-            type:      DataTypes.ENUM('M.', 'Mme', 'Mlle'),
-            allowNull: true,
-        },
-        first_name: {
-            type:      DataTypes.STRING(100),
-            allowNull: true,
-        },
-        last_name: {
-            type:      DataTypes.STRING(100),
-            allowNull: true,
-        },
-        birth_date: {
-            type:      DataTypes.DATEONLY,
-            allowNull: true,
-        },
-        avatar_url: {
-            type:      DataTypes.STRING(255),
+            type: DataTypes.ENUM('M.', 'Mme', 'Mlle'),
             allowNull: true,
         },
 
-        // ── Account status ────────────────────────────────────────────
+        first_name: {
+            type: DataTypes.STRING(100),
+            allowNull: true,
+        },
+
+        last_name: {
+            type: DataTypes.STRING(100),
+            allowNull: true,
+        },
+
+        birth_date: {
+            type: DataTypes.DATEONLY,
+            allowNull: true,
+        },
+
+        avatar_url: {
+            type: DataTypes.STRING(255),
+            allowNull: true,
+        },
+
+        // ─────────────────────────────────────────────────────────────
+        // ACCOUNT STATUS
+        // ─────────────────────────────────────────────────────────────
+        //
+        // PASSENGER Google account:
+        //   status = ACTIVE
+        //
+        // DRIVER Google account:
+        //   status = PENDING until profile/documents/admin approval flow
+        //   is completed.
+        // ─────────────────────────────────────────────────────────────
+
         status: {
-            type:         DataTypes.ENUM('ACTIVE', 'PENDING', 'SUSPENDED', 'DELETED'),
-            allowNull:    false,
+            type: DataTypes.ENUM(
+                'ACTIVE',
+                'PENDING',
+                'SUSPENDED',
+                'DELETED'
+            ),
+            allowNull: false,
             defaultValue: 'PENDING',
         },
 
-        // ── Location ──────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
+        // LOCATION
+        // ─────────────────────────────────────────────────────────────
+
         lastLatitude: {
-            type:      DataTypes.DECIMAL(10, 7),
+            type: DataTypes.DECIMAL(10, 7),
             allowNull: true,
-            comment:   'Last known latitude',
-            field:     'lastLatitude',
-        },
-        lastLongitude: {
-            type:      DataTypes.DECIMAL(10, 7),
-            allowNull: true,
-            comment:   'Last known longitude',
-            field:     'lastLongitude',
+            comment: 'Last known latitude',
+            field: 'lastLatitude',
         },
 
-        // ── Availability ──────────────────────────────────────────────
-        isAvailable: {
-            type:         DataTypes.BOOLEAN,
-            defaultValue: false,
-            comment:      'Is driver available for trips (online)',
-            field:        'isAvailable',
-        },
-        lastSeenAt: {
-            type:      DataTypes.DATE,
+        lastLongitude: {
+            type: DataTypes.DECIMAL(10, 7),
             allowNull: true,
-            comment:   'Last time driver was seen online',
-            field:     'lastSeenAt',
+            comment: 'Last known longitude',
+            field: 'lastLongitude',
+        },
+
+        // ─────────────────────────────────────────────────────────────
+        // AVAILABILITY
+        // ─────────────────────────────────────────────────────────────
+
+        isAvailable: {
+            type: DataTypes.BOOLEAN,
+            defaultValue: false,
+            allowNull: false,
+            comment: 'Is driver available for trips online',
+            field: 'isAvailable',
+        },
+
+        lastSeenAt: {
+            type: DataTypes.DATE,
+            allowNull: true,
+            comment: 'Last time driver was seen online',
+            field: 'lastSeenAt',
         },
     },
     {
         sequelize,
-        modelName:   'Account',
-        tableName:   'accounts',
-        timestamps:  true,
+        modelName: 'Account',
+        tableName: 'accounts',
+        timestamps: true,
         underscored: true,
+
         indexes: [
-            // Fast lookup by active_mode for dispatch and socket routing
-            { fields: ['active_mode'], name: 'accounts_active_mode' },
-            // Combined: find all DRIVER accounts currently in PASSENGER mode
-            { fields: ['user_type', 'active_mode'], name: 'accounts_type_mode' },
+            {
+                fields: ['active_mode'],
+                name: 'accounts_active_mode',
+            },
+            {
+                fields: ['user_type', 'active_mode'],
+                name: 'accounts_type_mode',
+            },
+            {
+                fields: ['google_id'],
+                name: 'accounts_google_id_unique',
+                unique: true,
+            },
+            {
+                fields: ['auth_provider'],
+                name: 'accounts_auth_provider_idx',
+            },
+            {
+                fields: ['email', 'auth_provider'],
+                name: 'accounts_email_provider_idx',
+            },
         ],
     }
 );

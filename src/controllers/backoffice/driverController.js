@@ -1,578 +1,390 @@
 // src/controllers/backoffice/driverController.js
-const Account = require('../../models/Account');
-const DriverProfile = require('../../models/DriverProfile');
-const Trip = require('../../models/Trip');
-const { Op } = require('sequelize');
-const sequelize = require('../../config/database');
+'use strict';
 
-/**
- * 🔍 Get all drivers with pagination, search, and filtering
- */
+const Account       = require('../../models/Account');
+const DriverProfile = require('../../models/DriverProfile');
+const Trip          = require('../../models/Trip');
+const { Op }        = require('sequelize');
+const sequelize     = require('../../config/database');
+
+// ── Notification service (lazy — avoids circular dep at startup) ──────────────
+const getNotificationService = () => require('../../services/NotificationService');
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET ALL DRIVERS
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.getAllDrivers = async (req, res) => {
     try {
         const {
-            page = 1,
-            limit = 10,
-            search = '',
-            status = '',
-            verification_state = '',
-            sortBy = 'created_at',
-            sortOrder = 'DESC'
+            page = 1, limit = 10,
+            search = '', status = '', verification_state = '',
+            sortBy = 'created_at', sortOrder = 'DESC',
         } = req.query;
 
-        const offset = (parseInt(page) - 1) * parseInt(limit);
+        const offset       = (parseInt(page) - 1) * parseInt(limit);
+        const accountWhere = { user_type: 'DRIVER' };
 
-        // Build where clause for Account
-        const accountWhere = {
-            user_type: 'DRIVER'
-        };
-
-        // Add search filter
         if (search) {
             accountWhere[Op.or] = [
                 { first_name: { [Op.like]: `%${search}%` } },
-                { last_name: { [Op.like]: `%${search}%` } },
-                { email: { [Op.like]: `%${search}%` } },
-                { phone_e164: { [Op.like]: `%${search}%` } }
+                { last_name:  { [Op.like]: `%${search}%` } },
+                { email:      { [Op.like]: `%${search}%` } },
+                { phone_e164: { [Op.like]: `%${search}%` } },
             ];
         }
 
-        // Add status filter
-        if (status) {
-            accountWhere.status = status;
-        }
+        if (status) accountWhere.status = status;
 
-        // Build where clause for DriverProfile
         const profileWhere = {};
-        if (verification_state) {
-            profileWhere.verification_state = verification_state;
-        }
+        if (verification_state) profileWhere.verification_state = verification_state;
 
-        // Get drivers with pagination
         const { count, rows: drivers } = await Account.findAndCountAll({
-            where: accountWhere,
+            where:   accountWhere,
             include: [
                 {
-                    model: DriverProfile,
-                    as: 'driver_profile',
-                    where: Object.keys(profileWhere).length > 0 ? profileWhere : undefined,
-                    required: true,
+                    model:      DriverProfile,
+                    as:         'driver_profile',
+                    where:      Object.keys(profileWhere).length > 0 ? profileWhere : undefined,
+                    required:   true,
                     attributes: [
-                        'verification_state',
-                        'rating_avg',
-                        'rating_count',
-                        'vehicle_make_model',
-                        'vehicle_plate',
-                        'vehicle_color',
-                        'status',
-                        'license_number',
-                        'vehicle_photo_url'
-                    ]
-                }
+                        'verification_state', 'rating_avg', 'rating_count',
+                        'vehicle_make_model', 'vehicle_plate', 'vehicle_color',
+                        'status', 'license_number', 'vehicle_photo_url',
+                    ],
+                },
             ],
-            order: [[sortBy, sortOrder]],
-            limit: parseInt(limit),
-            offset: offset
+            order:  [[sortBy, sortOrder]],
+            limit:  parseInt(limit),
+            offset,
         });
 
-        // Get trip counts for each driver
         const driversWithStats = await Promise.all(
             drivers.map(async (driver) => {
-                const tripCount = await Trip.count({
-                    where: { driverId: driver.uuid }
-                });
+                const [tripCount, completedTrips] = await Promise.all([
+                    Trip.count({ where: { driverId: driver.uuid } }),
+                    Trip.count({ where: { driverId: driver.uuid, status: 'COMPLETED' } }),
+                ]);
 
-                const completedTrips = await Trip.count({
-                    where: {
-                        driverId: driver.uuid,
-                        status: 'COMPLETED'
-                    }
-                });
-
-                const driverData = driver.toJSON();
-
+                const d = driver.toJSON();
                 return {
-                    uuid: driverData.uuid,
-                    first_name: driverData.first_name,
-                    last_name: driverData.last_name,
-                    email: driverData.email,
-                    phone_e164: driverData.phone_e164,
-                    phone_verified: driverData.phone_verified,
-                    email_verified: driverData.email_verified,
-                    avatar_url: driverData.avatar_url,
-                    status: driverData.status,
-                    created_at: driverData.created_at,
-                    updated_at: driverData.updated_at,
-                    verification_state: driverData.driver_profile.verification_state,
-                    rating_avg: driverData.driver_profile.rating_avg,
-                    rating_count: driverData.driver_profile.rating_count,
-                    vehicle_make_model: driverData.driver_profile.vehicle_make_model,
-                    vehicle_plate: driverData.driver_profile.vehicle_plate,
-                    vehicle_color: driverData.driver_profile.vehicle_color,
-                    driver_status: driverData.driver_profile.status,
-                    trip_count: tripCount,
-                    completed_trips: completedTrips
+                    uuid:              d.uuid,
+                    first_name:        d.first_name,
+                    last_name:         d.last_name,
+                    email:             d.email,
+                    phone_e164:        d.phone_e164,
+                    phone_verified:    d.phone_verified,
+                    email_verified:    d.email_verified,
+                    avatar_url:        d.avatar_url,
+                    status:            d.status,
+                    created_at:        d.created_at,
+                    updated_at:        d.updated_at,
+                    verification_state: d.driver_profile.verification_state,
+                    rating_avg:         d.driver_profile.rating_avg,
+                    rating_count:       d.driver_profile.rating_count,
+                    vehicle_make_model: d.driver_profile.vehicle_make_model,
+                    vehicle_plate:      d.driver_profile.vehicle_plate,
+                    vehicle_color:      d.driver_profile.vehicle_color,
+                    driver_status:      d.driver_profile.status,
+                    trip_count:         tripCount,
+                    completed_trips:    completedTrips,
                 };
             })
         );
 
         console.log(`✅ Fetched ${drivers.length} drivers`);
 
-        res.status(200).json({
-            success: true,
-            data: driversWithStats,
-            pagination: {
-                total: count,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                totalPages: Math.ceil(count / parseInt(limit))
-            }
+        return res.status(200).json({
+            success:    true,
+            data:       driversWithStats,
+            pagination: { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / parseInt(limit)) },
         });
+
     } catch (error) {
         console.error('❌ Error fetching drivers:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch drivers',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to fetch drivers', error: error.message });
     }
 };
 
-/**
- * 🔍 Get single driver by UUID with complete profile
- */
+// ═══════════════════════════════════════════════════════════════════════
+// GET SINGLE DRIVER
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.getDriverById = async (req, res) => {
     try {
         const { id } = req.params;
 
         const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            },
-            include: [
-                {
-                    model: DriverProfile,
-                    as: 'driver_profile',
-                    required: true
-                }
-            ]
+            where:   { uuid: id, user_type: 'DRIVER' },
+            include: [{ model: DriverProfile, as: 'driver_profile', required: true }],
         });
 
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
-        // Get trip statistics
         const tripStats = await Trip.findAll({
-            where: { driverId: id },
+            where:      { driverId: id },
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_trips'],
                 [sequelize.fn('SUM', sequelize.literal("CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END")), 'completed_trips'],
-                [sequelize.fn('SUM', sequelize.literal("CASE WHEN status = 'CANCELED' THEN 1 ELSE 0 END")), 'canceled_trips'],
-                [sequelize.fn('SUM', sequelize.col('fareFinal')), 'total_earned']
+                [sequelize.fn('SUM', sequelize.literal("CASE WHEN status = 'CANCELED' THEN 1 ELSE 0 END")),  'canceled_trips'],
+                [sequelize.fn('SUM', sequelize.col('fareFinal')), 'total_earned'],
             ],
-            raw: true
+            raw: true,
         });
 
-        const driverData = driver.toJSON();
-        const profileData = driverData.driver_profile;
+        const d = driver.toJSON();
+        const p = d.driver_profile;
 
         console.log(`✅ Fetched driver: ${driver.uuid}`);
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             driver: {
-                // Account info
-                uuid: driverData.uuid,
-                first_name: driverData.first_name,
-                last_name: driverData.last_name,
-                email: driverData.email,
-                phone_e164: driverData.phone_e164,
-                phone_verified: driverData.phone_verified,
-                email_verified: driverData.email_verified,
-                avatar_url: driverData.avatar_url,
-                status: driverData.status,
-                civility: driverData.civility,
-                birth_date: driverData.birth_date,
-                created_at: driverData.created_at,
-                updated_at: driverData.updated_at,
-
-                // Driver profile
+                uuid: d.uuid, first_name: d.first_name, last_name: d.last_name,
+                email: d.email, phone_e164: d.phone_e164, phone_verified: d.phone_verified,
+                email_verified: d.email_verified, avatar_url: d.avatar_url, status: d.status,
+                civility: d.civility, birth_date: d.birth_date, created_at: d.created_at, updated_at: d.updated_at,
                 profile: {
-                    // Identity & Documents
-                    cni_number: profileData.cni_number,
-                    license_number: profileData.license_number,
-                    license_expiry: profileData.license_expiry,
-                    license_document_url: profileData.license_document_url,
-                    insurance_number: profileData.insurance_number,
-                    insurance_expiry: profileData.insurance_expiry,
-                    insurance_document_url: profileData.insurance_document_url,
-                    verification_state: profileData.verification_state,
-
-                    // Vehicle info
-                    vehicle_type: profileData.vehicle_type,
-                    vehicle_make_model: profileData.vehicle_make_model,
-                    vehicle_color: profileData.vehicle_color,
-                    vehicle_year: profileData.vehicle_year,
-                    vehicle_plate: profileData.vehicle_plate,
-                    vehicle_photo_url: profileData.vehicle_photo_url,
-
-                    // Status & ratings
-                    driver_status: profileData.status,
-                    rating_avg: profileData.rating_avg,
-                    rating_count: profileData.rating_count,
-                    current_lat: profileData.current_lat,
-                    current_lng: profileData.current_lng
+                    cni_number: p.cni_number, license_number: p.license_number,
+                    license_expiry: p.license_expiry, license_document_url: p.license_document_url,
+                    insurance_number: p.insurance_number, insurance_expiry: p.insurance_expiry,
+                    insurance_document_url: p.insurance_document_url, verification_state: p.verification_state,
+                    vehicle_type: p.vehicle_type, vehicle_make_model: p.vehicle_make_model,
+                    vehicle_color: p.vehicle_color, vehicle_year: p.vehicle_year,
+                    vehicle_plate: p.vehicle_plate, vehicle_photo_url: p.vehicle_photo_url,
+                    driver_status: p.status, rating_avg: p.rating_avg, rating_count: p.rating_count,
+                    current_lat: p.current_lat, current_lng: p.current_lng,
                 },
-
-                // Trip statistics
-                stats: tripStats[0] || {
-                    total_trips: 0,
-                    completed_trips: 0,
-                    canceled_trips: 0,
-                    total_earned: 0
-                }
-            }
+                stats: tripStats[0] || { total_trips: 0, completed_trips: 0, canceled_trips: 0, total_earned: 0 },
+            },
         });
+
     } catch (error) {
         console.error('❌ Error fetching driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch driver details',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to fetch driver details', error: error.message });
     }
 };
 
-/**
- * 📋 Get driver trip history
- */
+// ═══════════════════════════════════════════════════════════════════════
+// GET DRIVER TRIPS
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.getDriverTrips = async (req, res) => {
     try {
-        const { id } = req.params;
-        const {
-            page = 1,
-            limit = 10,
-            status = ''
-        } = req.query;
-
-        const offset = (parseInt(page) - 1) * parseInt(limit);
-
-        // Build where clause
+        const { id }                              = req.params;
+        const { page = 1, limit = 10, status = '' } = req.query;
+        const offset      = (parseInt(page) - 1) * parseInt(limit);
         const whereClause = { driverId: id };
-        if (status) {
-            whereClause.status = status;
-        }
+        if (status) whereClause.status = status;
 
         const { count, rows: trips } = await Trip.findAndCountAll({
-            where: whereClause,
-            order: [['createdAt', 'DESC']],
-            limit: parseInt(limit),
-            offset: offset
+            where:  whereClause,
+            order:  [['createdAt', 'DESC']],
+            limit:  parseInt(limit),
+            offset,
         });
 
-        console.log(`✅ Fetched ${trips.length} trips for driver ${id}`);
-
-        res.status(200).json({
-            success: true,
-            data: trips,
-            pagination: {
-                total: count,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                totalPages: Math.ceil(count / parseInt(limit))
-            }
+        return res.status(200).json({
+            success:    true,
+            data:       trips,
+            pagination: { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / parseInt(limit)) },
         });
+
     } catch (error) {
         console.error('❌ Error fetching driver trips:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch driver trips',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to fetch driver trips', error: error.message });
     }
 };
 
-/**
- * ✅ Approve/Activate driver (PENDING → ACTIVE)
- */
+// ═══════════════════════════════════════════════════════════════════════
+// APPROVE DRIVER (PENDING → ACTIVE)
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.approveDriver = async (req, res) => {
     try {
         const { id } = req.params;
 
         const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            },
-            include: [
-                {
-                    model: DriverProfile,
-                    as: 'driver_profile',
-                    required: true
-                }
-            ]
+            where:   { uuid: id, user_type: 'DRIVER' },
+            include: [{ model: DriverProfile, as: 'driver_profile', required: true }],
         });
 
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
-        // Update account status to ACTIVE
         await driver.update({ status: 'ACTIVE' });
-
-        // Update verification state to VERIFIED
         await driver.driver_profile.update({ verification_state: 'VERIFIED' });
 
         console.log(`✅ Approved driver: ${id}`);
 
-        res.status(200).json({
-            success: true,
-            message: 'Driver approved and activated successfully'
-        });
+        // ── 🔔 NOTIFICATION: Account approved → driver ────────────────────────
+        getNotificationService().send({
+            accountUuid: id,
+            type:        'ACCOUNT_APPROVED',
+            title:       '🎉 Your account has been approved!',
+            body:        'Congratulations! Your driver account has been verified and activated. You can now go online and start accepting trips.',
+            data: { screen: 'home' },
+        }).catch(e => console.warn('⚠️  [DRIVER] Approval push failed:', e.message));
+
+        return res.status(200).json({ success: true, message: 'Driver approved and activated successfully' });
+
     } catch (error) {
         console.error('❌ Error approving driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to approve driver',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to approve driver', error: error.message });
     }
 };
 
-/**
- * ❌ Reject driver verification
- */
+// ═══════════════════════════════════════════════════════════════════════
+// REJECT DRIVER VERIFICATION
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.rejectDriver = async (req, res) => {
     try {
-        const { id } = req.params;
+        const { id }     = req.params;
         const { reason } = req.body;
 
         const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            },
-            include: [
-                {
-                    model: DriverProfile,
-                    as: 'driver_profile',
-                    required: true
-                }
-            ]
+            where:   { uuid: id, user_type: 'DRIVER' },
+            include: [{ model: DriverProfile, as: 'driver_profile', required: true }],
         });
 
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
-        // Update verification state to REJECTED
-        await driver.driver_profile.update({
-            verification_state: 'REJECTED'
-        });
+        await driver.driver_profile.update({ verification_state: 'REJECTED' });
 
-        console.log(`❌ Rejected driver: ${id}`);
-        console.log(`   Reason: ${reason || 'Not provided'}`);
+        console.log(`❌ Rejected driver: ${id} | Reason: ${reason || 'Not provided'}`);
 
-        res.status(200).json({
-            success: true,
-            message: 'Driver verification rejected'
-        });
+        return res.status(200).json({ success: true, message: 'Driver verification rejected' });
+
     } catch (error) {
         console.error('❌ Error rejecting driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to reject driver',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to reject driver', error: error.message });
     }
 };
 
-/**
- * 🚫 Block driver (suspend account)
- */
+// ═══════════════════════════════════════════════════════════════════════
+// BLOCK DRIVER (ACTIVE → SUSPENDED)
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.blockDriver = async (req, res) => {
     try {
-        const { id } = req.params;
+        const { id }     = req.params;
+        const { reason } = req.body;
 
-        const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            }
-        });
-
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
+        const driver = await Account.findOne({ where: { uuid: id, user_type: 'DRIVER' } });
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
         await driver.update({ status: 'SUSPENDED' });
 
         console.log(`🚫 Blocked driver: ${id}`);
 
-        res.status(200).json({
-            success: true,
-            message: 'Driver blocked successfully'
-        });
+        // ── 🔔 NOTIFICATION: Account suspended → driver ───────────────────────
+        getNotificationService().send({
+            accountUuid: id,
+            type:        'ACCOUNT_SUSPENDED',
+            title:       'Account suspended',
+            body:        reason
+                ? `Your account has been suspended. Reason: ${reason}. Please contact support for assistance.`
+                : 'Your account has been suspended. Please contact support for assistance.',
+            data: { screen: 'support' },
+        }).catch(e => console.warn('⚠️  [DRIVER] Suspension push failed:', e.message));
+
+        return res.status(200).json({ success: true, message: 'Driver blocked successfully' });
+
     } catch (error) {
         console.error('❌ Error blocking driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to block driver',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to block driver', error: error.message });
     }
 };
 
-/**
- * ✅ Unblock driver
- */
+// ═══════════════════════════════════════════════════════════════════════
+// UNBLOCK DRIVER (SUSPENDED → ACTIVE)
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.unblockDriver = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            }
-        });
-
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
+        const driver = await Account.findOne({ where: { uuid: id, user_type: 'DRIVER' } });
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
         await driver.update({ status: 'ACTIVE' });
 
         console.log(`✅ Unblocked driver: ${id}`);
 
-        res.status(200).json({
-            success: true,
-            message: 'Driver unblocked successfully'
-        });
+        // ── 🔔 NOTIFICATION: Account reactivated → driver ─────────────────────
+        getNotificationService().send({
+            accountUuid: id,
+            type:        'ACCOUNT_APPROVED',
+            title:       '✅ Account reactivated',
+            body:        'Your driver account has been reactivated. You can now go online and accept trips again.',
+            data: { screen: 'home' },
+        }).catch(e => console.warn('⚠️  [DRIVER] Reactivation push failed:', e.message));
+
+        return res.status(200).json({ success: true, message: 'Driver unblocked successfully' });
+
     } catch (error) {
         console.error('❌ Error unblocking driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to unblock driver',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to unblock driver', error: error.message });
     }
 };
 
-/**
- * 🗑️ Delete driver
- */
+// ═══════════════════════════════════════════════════════════════════════
+// DELETE DRIVER (soft delete)
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.deleteDriver = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const driver = await Account.findOne({
-            where: {
-                uuid: id,
-                user_type: 'DRIVER'
-            }
-        });
+        const driver = await Account.findOne({ where: { uuid: id, user_type: 'DRIVER' } });
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver not found'
-            });
-        }
-
-        // Soft delete
         await driver.update({ status: 'DELETED' });
 
         console.log(`🗑️ Deleted driver: ${id}`);
 
-        res.status(200).json({
-            success: true,
-            message: 'Driver deleted successfully'
-        });
+        return res.status(200).json({ success: true, message: 'Driver deleted successfully' });
+
     } catch (error) {
         console.error('❌ Error deleting driver:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to delete driver',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to delete driver', error: error.message });
     }
 };
 
-/**
- * 📊 Get driver statistics
- */
+// ═══════════════════════════════════════════════════════════════════════
+// DRIVER STATS
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.getDriverStats = async (req, res) => {
     try {
-        const totalDrivers = await Account.count({
-            where: { user_type: 'DRIVER' }
-        });
-
-        const activeDrivers = await Account.count({
-            where: {
-                user_type: 'DRIVER',
-                status: 'ACTIVE'
-            }
-        });
-
-        const pendingDrivers = await Account.count({
-            where: {
-                user_type: 'DRIVER',
-                status: 'PENDING'
-            }
-        });
-
-        const suspendedDrivers = await Account.count({
-            where: {
-                user_type: 'DRIVER',
-                status: 'SUSPENDED'
-            }
-        });
-
-        const verifiedDrivers = await DriverProfile.count({
-            where: { verification_state: 'VERIFIED' }
-        });
-
-        const onlineDrivers = await DriverProfile.count({
-            where: { status: 'online' }
-        });
+        const [
+            totalDrivers, activeDrivers, pendingDrivers,
+            suspendedDrivers, verifiedDrivers, onlineDrivers,
+        ] = await Promise.all([
+            Account.count({ where: { user_type: 'DRIVER' } }),
+            Account.count({ where: { user_type: 'DRIVER', status: 'ACTIVE' } }),
+            Account.count({ where: { user_type: 'DRIVER', status: 'PENDING' } }),
+            Account.count({ where: { user_type: 'DRIVER', status: 'SUSPENDED' } }),
+            DriverProfile.count({ where: { verification_state: 'VERIFIED' } }),
+            DriverProfile.count({ where: { status: 'online' } }),
+        ]);
 
         console.log('✅ Fetched driver statistics');
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
             stats: {
-                total: totalDrivers,
-                active: activeDrivers,
-                pending: pendingDrivers,
+                total:     totalDrivers,
+                active:    activeDrivers,
+                pending:   pendingDrivers,
                 suspended: suspendedDrivers,
-                verified: verifiedDrivers,
-                online: onlineDrivers
-            }
+                verified:  verifiedDrivers,
+                online:    onlineDrivers,
+            },
         });
+
     } catch (error) {
         console.error('❌ Error fetching driver stats:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch statistics',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to fetch statistics', error: error.message });
     }
 };

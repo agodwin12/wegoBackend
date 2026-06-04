@@ -1,7 +1,6 @@
 // src/sockets/index.js
 
 const { Server } = require('socket.io');
-const jwt        = require('jsonwebtoken');
 const { redisClient, storeUserSocket, removeUserSocket, REDIS_KEYS, redisHelpers } = require('../config/redis');
 const {
     handleDriverOnline,
@@ -24,6 +23,26 @@ const { Op } = require('sequelize');
 // ═══════════════════════════════════════════════════════════════════════
 
 let io = null;
+
+// ═══════════════════════════════════════════════════════════════════════
+// SANITIZE HELPER
+//
+// Strips undefined values from any object before it is passed to
+// socket.emit(). socket.io-parser throws "invalid payload" if the
+// serialised data contains undefined — JSON.parse(JSON.stringify())
+// drops undefined fields and converts undefined array slots to null,
+// which is safe for the client to receive.
+// ═══════════════════════════════════════════════════════════════════════
+
+function _sanitize(data) {
+    if (data === null || data === undefined) return null;
+    try {
+        return JSON.parse(JSON.stringify(data));
+    } catch (e) {
+        console.warn('⚠️  [SOCKET] _sanitize failed — returning empty object:', e.message);
+        return {};
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SETUP
@@ -56,18 +75,22 @@ function setupSocketIO(server) {
                 return next(new Error('Authentication error: No token provided'));
             }
 
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            // Use the same verifyAccessToken() as the HTTP middleware
+            // so secret, issuer, and audience all match exactly
+            const { verifyAccessToken } = require('../utils/jwt');
+            const decoded = verifyAccessToken(token);
 
-            socket.userId   = decoded.uuid;
-            socket.userType = decoded.user_type;
-            socket.email    = decoded.email;
+            socket.userId     = decoded.uuid;
+            socket.userType   = decoded.user_type;
+            socket.activeMode = decoded.active_mode;
+            socket.email      = decoded.email;
 
-            console.log(`✅ [SOCKET] Auth OK — ${socket.userType} ${socket.userId}`);
+            console.log(`✅ [SOCKET] Auth OK — ${socket.userType} ${socket.userId} (mode: ${socket.activeMode})`);
             next();
 
         } catch (error) {
             console.error('❌ [SOCKET] Auth error:', error.message);
-            next(new Error('Authentication error: Invalid token'));
+            next(new Error('Authentication error: ' + error.message));
         }
     });
 
@@ -78,9 +101,10 @@ function setupSocketIO(server) {
     io.on('connection', async (socket) => {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔌 [SOCKET] Connected');
-        console.log('   Socket:', socket.id);
-        console.log('   User:  ', socket.userId);
-        console.log('   Type:  ', socket.userType);
+        console.log('   Socket:    ', socket.id);
+        console.log('   User:      ', socket.userId);
+        console.log('   Type:      ', socket.userType);
+        console.log('   Mode:      ', socket.activeMode);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         // ── Room joining ──────────────────────────────────────────
@@ -105,20 +129,39 @@ function setupSocketIO(server) {
             console.error('⚠️  [SOCKET] Redis socket store failed:', redisErr.message);
         }
 
-        socket.emit('connection:success', {
-            socketId:  socket.id,
-            userId:    socket.userId,
-            userType:  socket.userType,
-            message:   'Connected successfully',
-            timestamp: new Date().toISOString(),
-        });
+        socket.emit('connection:success', _sanitize({
+            socketId:   socket.id,
+            userId:     socket.userId,
+            userType:   socket.userType,
+            activeMode: socket.activeMode,
+            message:    'Connected successfully',
+            timestamp:  new Date().toISOString(),
+        }));
 
-        // Replay missed events on reconnect
-        if (socket.userType === 'DRIVER' || socket.userType === 'DELIVERY_AGENT') {
+        // ── Replay missed events on reconnect ─────────────────────
+        //
+        // IMPORTANT: After a mode switch the client reconnects with a
+        // fresh token whose active_mode reflects the NEW mode.  We must
+        // NOT replay ride-mode trip state into a DELIVERY_AGENT socket
+        // (or vice-versa) because the data is irrelevant and the stale
+        // Redis keys may contain fields that cause "invalid payload".
+        //
+        // Rule: only replay driver trip events when active_mode === 'DRIVER'.
+        //       only replay delivery events when active_mode === 'DELIVERY_AGENT'.
+        //       PASSENGER replay is always safe.
+        if (socket.userType === 'DRIVER' && socket.activeMode === 'DRIVER') {
             await _replayMissedDriverEvents(socket).catch(e =>
                 console.warn('⚠️  [SOCKET] replayMissedDriverEvents failed (non-fatal):', e.message)
             );
+        } else if (socket.userType === 'DELIVERY_AGENT' && socket.activeMode === 'DELIVERY_AGENT') {
+            await _replayMissedDriverEvents(socket).catch(e =>
+                console.warn('⚠️  [SOCKET] replayMissedDriverEvents failed (non-fatal):', e.message)
+            );
+        } else if (socket.userType === 'DRIVER' && socket.activeMode !== 'DRIVER') {
+            // Post-mode-switch reconnect — skip stale trip replay
+            console.log(`ℹ️  [SOCKET] Skipping trip replay — driver connected in ${socket.activeMode} mode`);
         }
+
         if (socket.userType === 'PASSENGER') {
             await _replayMissedPassengerEvents(socket).catch(e =>
                 console.warn('⚠️  [SOCKET] replayMissedPassengerEvents failed (non-fatal):', e.message)
@@ -273,7 +316,7 @@ function setupSocketIO(server) {
 
                 const recipientId = trip.driverId === userId ? trip.passengerId : trip.driverId;
 
-                const messageData = {
+                const messageData = _sanitize({
                     id:         message.id,
                     tripId:     message.tripId,
                     text:       message.text,
@@ -286,7 +329,7 @@ function setupSocketIO(server) {
                     } : null,
                     readAt:    message.readAt,
                     createdAt: message.createdAt,
-                };
+                });
 
                 socket.emit('chat:message_sent', { success: true, message: messageData });
                 io.to(`user:${recipientId}`).emit('chat:new_message', { tripId, message: messageData });
@@ -386,11 +429,12 @@ function setupSocketIO(server) {
 
         socket.on('connection:test', () => {
             socket.emit('connection:test:response', {
-                socketId:  socket.id,
-                userId:    socket.userId,
-                userType:  socket.userType,
-                connected: true,
-                timestamp: new Date().toISOString(),
+                socketId:   socket.id,
+                userId:     socket.userId,
+                userType:   socket.userType,
+                activeMode: socket.activeMode,
+                connected:  true,
+                timestamp:  new Date().toISOString(),
             });
         });
 
@@ -430,34 +474,43 @@ function setupSocketIO(server) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // RECONNECT REPLAY — DRIVER / DELIVERY_AGENT
+//
+// Called only when active_mode matches the user_type, so stale trip
+// state from a previous mode is never replayed into a different-mode
+// socket (which was the root cause of "invalid payload" crashes).
+//
+// All emitted payloads pass through _sanitize() to strip undefined
+// values before socket.io-parser serialises them.
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _replayMissedDriverEvents(socket) {
     const driverId = socket.userId;
-    console.log(`🔄 [SOCKET] Replaying missed events for driver ${driverId}`);
+    console.log(`🔄 [SOCKET] Replaying missed events for driver ${driverId} (mode: ${socket.activeMode})`);
 
     try {
+        // ── Pending trip offers ───────────────────────────────────
         const pendingOffers = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
         if (Array.isArray(pendingOffers) && pendingOffers.length > 0) {
             for (const offer of pendingOffers) {
                 const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(offer.tripId));
                 if (tripData && tripData.status === 'SEARCHING') {
-                    socket.emit('trip:new_request', offer);
+                    socket.emit('trip:new_request', _sanitize(offer));
                     console.log(`✅ [SOCKET] Re-sent pending offer ${offer.tripId} to driver ${driverId}`);
                 }
             }
         }
 
+        // ── Active trip state sync ────────────────────────────────
         const activeTrip = await redisHelpers.getJson(`driver:active_trip:${driverId}`);
         if (activeTrip && activeTrip.tripId) {
             const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTrip.tripId));
             if (tripData && tripData.status !== 'COMPLETED' && tripData.status !== 'CANCELED') {
-                socket.emit('trip:state_sync', {
+                socket.emit('trip:state_sync', _sanitize({
                     tripId:    activeTrip.tripId,
                     status:    tripData.status,
                     trip:      tripData,
                     timestamp: new Date().toISOString(),
-                });
+                }));
                 console.log(`✅ [SOCKET] Re-synced active trip ${activeTrip.tripId} to driver ${driverId}`);
             }
         }
@@ -483,19 +536,19 @@ async function _replayMissedPassengerEvents(socket) {
         if (!tripData) return;
 
         if (tripData.status === 'SEARCHING') {
-            socket.emit('trip:state_sync', {
+            socket.emit('trip:state_sync', _sanitize({
                 tripId:    activeTripRef.tripId,
                 status:    'SEARCHING',
                 trip:      tripData,
                 timestamp: new Date().toISOString(),
-            });
+            }));
         } else if (['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'].includes(tripData.status)) {
-            socket.emit('trip:driver_assigned', {
+            socket.emit('trip:driver_assigned', _sanitize({
                 tripId:    activeTripRef.tripId,
                 driverId:  tripData.driverId,
                 trip:      tripData,
                 timestamp: new Date().toISOString(),
-            });
+            }));
         }
 
         console.log(`✅ [SOCKET] Re-synced trip ${activeTripRef.tripId} to passenger ${passengerId}`);

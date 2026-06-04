@@ -35,26 +35,10 @@ router.post('/signup/passenger', authController.registerPassenger);
  */
 router.post('/signup/driver', authController.registerDriver);
 
-// ═══════════════════════════════════════════════════════════════════════
-// TOKEN REFRESH
-// ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Refresh access token using refresh token
- * POST /api/auth/refresh
- * Body: { refresh_token: string }
- */
-router.post('/refresh', authController.refreshToken);
 
-// ═══════════════════════════════════════════════════════════════════════
-// OTP ROUTES
-// ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Send OTP to user for verification
- * POST /api/auth/otp/send
- * Body: { identifier: string, channel: 'EMAIL'|'SMS', purpose: string }
- */
+
 router.post('/otp/send', authController.sendOtp);
 
 /**
@@ -86,6 +70,8 @@ router.post('/login', authController.login);
  */
 router.get('/me', authenticate, authController.getProfile);
 
+
+
 /**
  * Update user avatar (profile picture)
  * PATCH /api/auth/me/avatar
@@ -96,6 +82,19 @@ router.get('/me', authenticate, authController.getProfile);
  * ✅ NOTE: Multer middleware is handled inside the controller
  */
 router.patch('/me/avatar', authenticate, authController.updateAvatar);
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// GOOGLE OAUTH
+// ═══════════════════════════════════════════════════════════════════════
+
+router.post('/google', authController.googleAuth);
+
+// ═══════════════════════════════════════════════════════════════════════
+// TOKEN REFRESH
+// ═══════════════════════════════════════════════════════════════════════
+
+router.post('/refresh', authController.refreshToken);
 
 // ═══════════════════════════════════════════════════════════════════════
 // LOGOUT

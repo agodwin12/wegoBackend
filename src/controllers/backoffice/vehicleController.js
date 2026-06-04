@@ -32,7 +32,7 @@ exports.createVehicle = async (req, res) => {
             permitExpiry
         } = req.body;
 
-        // ✅ FIX: Use req.user (set by middleware)
+        // FIX: Use req.user (set by middleware)
         console.log('🔍 Employee object:', {
             id: req.user.id,
             accountId: req.user.accountId,

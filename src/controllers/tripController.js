@@ -1,13 +1,20 @@
 // src/controllers/tripController.js
 
 const { v4: uuidv4 } = require('uuid');
-const { Op } = require('sequelize'); // ✅ FIX STEP 2: Added missing Op import
-const { Trip, TripEvent, Account, DriverProfile } = require('../models'); // ✅ FIX STEP 2: Added DriverProfile (was 'Driver' which doesn't exist)
+const { Op } = require('sequelize');
+const { Trip, TripEvent, Account, DriverProfile } = require('../models');
 const fareCalculatorService = require('../services/fareCalculatorService');
-const tripMatchingService = require('../services/tripMatchingService');
-const locationService = require('../services/locationService'); // ✅ FIX LOW: Moved from dynamic require() inside cancelTrip
+const tripMatchingService   = require('../services/tripMatchingService');
+const locationService       = require('../services/locationService');
+const campayService         = require('../services/campay/campayService');
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets');
+
+// ── Notification service (lazy — avoids circular dep at startup) ──────────────
+const getNotificationService = () => require('../services/NotificationService');
+
+// Payment methods that require CamPay confirmation before driver matching starts
+const DIGITAL_PAYMENT_METHODS = ['MOMO', 'OM'];
 
 // ═══════════════════════════════════════════════════════════════════════
 // CREATE TRIP (PASSENGER)
@@ -20,7 +27,6 @@ exports.createTrip = async (req, res, next) => {
         console.log('👤 User UUID:', req.user.uuid);
         console.log('👤 User Type:', req.user.user_type);
 
-        // Authorization check
         if (req.user.user_type !== 'PASSENGER') {
             console.log('❌ [CREATE TRIP] Access denied. User type is not PASSENGER.');
             const err = new Error('Only passengers can create trips');
@@ -35,12 +41,11 @@ exports.createTrip = async (req, res, next) => {
             dropoffLat,
             dropoffLng,
             dropoffAddress,
-            payment_method
+            payment_method,
         } = req.body;
 
         console.log('📦 [CREATE TRIP] Received body:', req.body);
 
-        // Validate coordinates
         if (!pickupLat || !pickupLng || !dropoffLat || !dropoffLng) {
             console.log('❌ [CREATE TRIP] Missing coordinates.');
             const err = new Error('Pickup and dropoff coordinates are required');
@@ -48,7 +53,6 @@ exports.createTrip = async (req, res, next) => {
             throw err;
         }
 
-        // Validate coordinate ranges
         const pLat = parseFloat(pickupLat);
         const pLng = parseFloat(pickupLng);
         const dLat = parseFloat(dropoffLat);
@@ -59,134 +63,137 @@ exports.createTrip = async (req, res, next) => {
             err.status = 400;
             throw err;
         }
-
         if (pLat < -90 || pLat > 90 || dLat < -90 || dLat > 90) {
             const err = new Error('Latitude must be between -90 and 90');
             err.status = 400;
             throw err;
         }
-
         if (pLng < -180 || pLng > 180 || dLng < -180 || dLng > 180) {
             const err = new Error('Longitude must be between -180 and 180');
             err.status = 400;
             throw err;
         }
 
-        // Check for existing active trip in Redis
         const existingActiveTripKey = `passenger:active_trip:${req.user.uuid}`;
-        const existingActiveTrip = await redisHelpers.getJson(existingActiveTripKey);
+        const existingActiveTrip    = await redisHelpers.getJson(existingActiveTripKey);
         console.log('🔍 [REDIS] Checking for existing active trip key:', existingActiveTripKey);
 
         if (existingActiveTrip) {
             console.log('⚠️ [CREATE TRIP] Active trip already found in Redis:', existingActiveTrip);
             return res.status(409).json({
-                error: true,
+                error:   true,
                 message: 'You already have an active trip',
-                data: { tripId: existingActiveTrip.tripId }
+                data:    { tripId: existingActiveTrip.tripId },
             });
         }
 
-        // Check for existing active trip in Database
         console.log('🔍 [DB] Checking for active trips in database...');
         const dbActiveTrip = await Trip.findOne({
             where: {
                 passengerId: req.user.uuid,
                 status: {
-                    [Op.in]: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS']
-                }
-            }
+                    [Op.in]: ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
+                },
+            },
         });
 
         if (dbActiveTrip) {
             console.log('⚠️ [CREATE TRIP] Active trip found in DB:', dbActiveTrip.id);
             return res.status(409).json({
-                error: true,
+                error:   true,
                 message: 'You already have an active trip',
-                data: { tripId: dbActiveTrip.id }
+                data:    { tripId: dbActiveTrip.id },
             });
         }
 
-        // Calculate route and fare estimate
         console.log('📍 [CREATE TRIP] Estimating route and fare...');
-        const estimate = await fareCalculatorService.estimateFullTrip(
-            pLat,
-            pLng,
-            dLat,
-            dLng
-        );
+        const estimate = await fareCalculatorService.estimateFullTrip(pLat, pLng, dLat, dLng);
         console.log('📏 [CREATE TRIP] Estimate:', estimate);
 
-        // ✅ Handle fare/route errors gracefully
         if (estimate.error) {
             console.log('❌ [CREATE TRIP] Fare estimation failed:', estimate.message);
             return res.status(estimate.status || 400).json({
-                error: true,
+                error:   true,
                 message: estimate.message || 'Failed to calculate route. Please check your pickup and dropoff locations.',
-                data: null
+                data:    null,
             });
         }
 
-        // Generate trip ID
-        const tripId = uuidv4();
+        const tripId        = uuidv4();
+        const paymentMethod = (payment_method || 'CASH').toUpperCase();
+
         console.log('🆔 [CREATE TRIP] Generated tripId:', tripId);
+        console.log('💳 [CREATE TRIP] Payment method:', paymentMethod);
 
-        // Prepare trip data
         const tripData = {
-            id: tripId,
-            passengerId: req.user.uuid,
-            status: 'SEARCHING',
-            pickupLat: pLat,
-            pickupLng: pLng,
-            pickupAddress: pickupAddress || estimate.start_address,
-            dropoffLat: dLat,
-            dropoffLng: dLng,
+            id:             tripId,
+            passengerId:    req.user.uuid,
+            status:         'SEARCHING',
+            pickupLat:      pLat,
+            pickupLng:      pLng,
+            pickupAddress:  pickupAddress  || estimate.start_address,
+            dropoffLat:     dLat,
+            dropoffLng:     dLng,
             dropoffAddress: dropoffAddress || estimate.end_address,
-            routePolyline: estimate.polyline,
-            distanceM: estimate.distance_m,
-            durationS: estimate.duration_s,
-            fareEstimate: estimate.fare_estimate,
-            fareBreakdown: estimate.breakdown || null, // ✅ Store breakdown for Flutter
-            paymentMethod: payment_method || 'CASH',
-            createdAt: new Date().toISOString()
+            routePolyline:  estimate.polyline,
+            distanceM:      estimate.distance_m,
+            durationS:      estimate.duration_s,
+            fareEstimate:   estimate.fare_estimate,
+            fareBreakdown:  estimate.breakdown || null,
+            paymentMethod,
+            createdAt:      new Date().toISOString(),
         };
-        console.log('💾 [CREATE TRIP] Trip data prepared:', {
-            id: tripData.id,
-            fareEstimate: tripData.fareEstimate,
-            distanceM: tripData.distanceM,
-            durationS: tripData.durationS
-        });
 
-        // Calculate TTL for Redis
         const ttl = parseInt(process.env.OFFER_TTL_MS || 20000, 10) / 1000 + 60;
         console.log('⏳ [CREATE TRIP] TTL for Redis (seconds):', ttl);
 
-        // Save trip to Redis
+        console.log('💾 [DB] Persisting SEARCHING trip to database...');
+        await Trip.create({
+            id:             tripId,
+            passengerId:    req.user.uuid,
+            status:         'SEARCHING',
+            pickupLat:      pLat,
+            pickupLng:      pLng,
+            pickupAddress:  tripData.pickupAddress,
+            dropoffLat:     dLat,
+            dropoffLng:     dLng,
+            dropoffAddress: tripData.dropoffAddress,
+            distanceM:      estimate.distance_m,
+            durationS:      estimate.duration_s,
+            fareEstimate:   estimate.fare_estimate,
+            routePolyline:  estimate.polyline,
+            paymentMethod,
+        });
+        console.log('✅ [DB] Trip persisted with status=SEARCHING');
+
         console.log('🧠 [REDIS] Saving trip data to Redis...');
         await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, ttl);
-
-        // Save passenger active trip reference
-        console.log('🧠 [REDIS] Saving passenger active trip reference...');
         await redisHelpers.setJson(existingActiveTripKey, { tripId, status: 'SEARCHING' }, ttl);
 
-        // Broadcast trip to nearby drivers
-        console.log('📢 [CREATE TRIP] Broadcasting trip to nearby drivers...');
-        const io = getIO();
-        const broadcast = await tripMatchingService.broadcastTripToDrivers(tripId, io);
-        console.log('📡 [CREATE TRIP] Broadcast result:', broadcast);
+        const isDigitalPayment = DIGITAL_PAYMENT_METHODS.includes(paymentMethod);
+        let driversNotified    = 0;
 
-        if (!broadcast.success && broadcast.reason === 'No drivers available') {
-            console.log('⚠️ [CREATE TRIP] No drivers notified via socket — keeping trip alive for HTTP accept.');
-            // DO NOT delete Redis — driver can still accept via POST /api/driver/trips/:tripId/accept
+        if (!isDigitalPayment) {
+            console.log('📢 [CREATE TRIP] Cash payment — broadcasting to nearby drivers...');
+            const io        = getIO();
+            const broadcast = await tripMatchingService.broadcastTripToDrivers(tripId, io);
+            console.log('📡 [CREATE TRIP] Broadcast result:', broadcast);
+            driversNotified = broadcast.driversNotified || 0;
+        } else {
+            console.log(`💳 [CREATE TRIP] Digital payment (${paymentMethod}) — holding matching until payment confirmed`);
         }
 
-        console.log('✅ [CREATE TRIP] Trip successfully created in Redis:', tripId);
+        console.log('✅ [CREATE TRIP] Trip successfully created:', tripId);
 
         res.status(201).json({
-            message: 'Trip created successfully, searching for drivers...',
+            message: isDigitalPayment
+                ? 'Trip created. Please complete your mobile money payment to find a driver.'
+                : 'Trip created successfully, searching for drivers...',
+            requiresPayment: isDigitalPayment,
             data: {
-                trip: tripData,
-                driversNotified: broadcast.driversNotified
-            }
+                trip:            tripData,
+                driversNotified,
+            },
         });
 
     } catch (error) {
@@ -196,90 +203,176 @@ exports.createTrip = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET RECENT TRIPS — ✅ FULLY FIXED (Steps 2 + 3)
+// INITIATE TRIP PAYMENT
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Get recent completed/canceled trips for the logged-in passenger
- * GET /api/trips/recent
- */
+exports.initiatePayment = async (req, res, next) => {
+    console.log('========================');
+    console.log('💳 [TRIP_CONTROLLER:initiatePayment] Request initiated');
+    try {
+        const { tripId }  = req.params;
+        const { phone }   = req.body;
+        const passengerId = req.user.uuid;
+
+        console.log(`🆔 Trip: ${tripId} | Passenger: ${passengerId} | Phone: ${phone}`);
+
+        if (!phone) {
+            return res.status(400).json({
+                success: false,
+                error:   'MISSING_PHONE',
+                message: 'phone is required — the mobile money number to charge.',
+            });
+        }
+
+        const trip = await Trip.findOne({
+            where:      { id: tripId, passengerId },
+            attributes: ['id', 'passengerId', 'status', 'paymentMethod', 'fareEstimate'],
+        });
+
+        if (!trip) {
+            return res.status(404).json({
+                success: false,
+                error:   'TRIP_NOT_FOUND',
+                message: 'Trip not found.',
+            });
+        }
+
+        if (!DIGITAL_PAYMENT_METHODS.includes(trip.paymentMethod)) {
+            return res.status(400).json({
+                success: false,
+                error:   'NOT_DIGITAL_PAYMENT',
+                message: 'This trip uses cash payment — no mobile money charge required.',
+            });
+        }
+
+        if (trip.status !== 'SEARCHING') {
+            return res.status(409).json({
+                success: false,
+                error:   'TRIP_NOT_SEARCHING',
+                message: `Trip is already ${trip.status} — payment may have already been processed.`,
+            });
+        }
+
+        const { WegoPayment } = require('../models');
+        const existingPayment = await WegoPayment.findOne({
+            where: {
+                vertical:    'trip',
+                vertical_id: tripId,
+                status:      { [Op.in]: ['PENDING', 'SUCCESSFUL'] },
+            },
+        });
+
+        if (existingPayment) {
+            return res.status(409).json({
+                success: false,
+                error:   'PAYMENT_ALREADY_INITIATED',
+                message: existingPayment.status === 'SUCCESSFUL'
+                    ? 'Payment already confirmed — your trip is being matched.'
+                    : 'Payment already initiated. Please approve the prompt on your phone.',
+                data: {
+                    paymentId: existingPayment.id,
+                    campayRef: existingPayment.campay_ref,
+                    status:    existingPayment.status,
+                },
+            });
+        }
+
+        const campayResult = await campayService.initiateCollection({
+            vertical:    'trip',
+            verticalId:  tripId,
+            phone,
+            initiatedBy: passengerId,
+        });
+
+        console.log(`✅ [PAY TRIP] Payment initiated — campayRef: ${campayResult.campayRef}`);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                pending:     true,
+                paymentId:   campayResult.paymentId,
+                campayRef:   campayResult.campayRef,
+                externalRef: campayResult.externalRef,
+                ussdCode:    campayResult.ussdCode  || null,
+                operator:    campayResult.operator  || null,
+                amount:      trip.fareEstimate,
+                currency:    'XAF',
+                message:     'A payment prompt has been sent to your phone. Approve it to find a driver.',
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [PAY TRIP] Error:', error.message);
+        if (error.message?.includes('[CAMPAY')) {
+            return res.status(502).json({
+                success: false,
+                error:   'CAMPAY_ERROR',
+                message: 'Could not initiate payment. Please check your number and try again.',
+            });
+        }
+        next(error);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET RECENT TRIPS
+// ═══════════════════════════════════════════════════════════════════════
+
 exports.getRecentTrips = async (req, res) => {
     try {
         const userId = req.user.uuid;
-        const limit = parseInt(req.query.limit) || 10;
+        const limit  = parseInt(req.query.limit) || 10;
 
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📋 [RECENT TRIPS] Fetching recent trips');
-        console.log(`👤 User ID: ${userId}`);
-        console.log(`📊 Limit: ${limit}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        // ✅ FIX STEP 2+3: Op is now imported — this query works
-        // ✅ FIX STEP 2+3: model: DriverProfile (was model: Driver which crashed)
         const trips = await Trip.findAll({
             where: {
                 passengerId: userId,
-                status: {
-                    [Op.in]: ['COMPLETED', 'CANCELED']
-                }
+                status:      { [Op.in]: ['COMPLETED', 'CANCELED'] },
             },
             include: [
                 {
-                    model: Account,
-                    as: 'driver',
+                    model:      Account,
+                    as:         'driver',
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                    required: false, // LEFT JOIN — some trips may have no driver (e.g. canceled while searching)
+                    required:   false,
                     include: [
                         {
-                            model: DriverProfile,      // ✅ FIXED: was 'Driver' (undefined) → DriverProfile
-                            as: 'driverProfile',
+                            model:      DriverProfile,
+                            as:         'driverProfile',
                             attributes: [
-                                'vehicle_type',
-                                'vehicle_plate',
-                                'vehicle_make_model',
-                                'vehicle_color',
-                                'vehicle_year',
-                                'rating_avg',
-                                'total_trips'
+                                'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
+                                'vehicle_color', 'vehicle_year', 'rating_avg', 'total_trips',
                             ],
-                            required: false
-                        }
-                    ]
-                }
+                            required: false,
+                        },
+                    ],
+                },
             ],
             order: [['updatedAt', 'DESC']],
-            limit: limit
+            limit,
         });
 
-        console.log(`✅ [RECENT TRIPS] Found ${trips.length} trips\n`);
-
-        // ✅ FIX STEP 3: ALL field names corrected from snake_case → camelCase
-        // Sequelize auto-converts DB column names (snake_case) to camelCase in JS objects.
-        // e.g. DB column pickup_address → trip.pickupAddress in JS
         const formattedTrips = trips.map(trip => ({
-            tripId:        trip.id,               // ✅ was trip.trip_id       → trip.id
-            status:        trip.status,
-            pickupAddress: trip.pickupAddress,     // ✅ was trip.pickup_address
-            dropoffAddress:trip.dropoffAddress,    // ✅ was trip.dropoff_address
-            pickupLat:     trip.pickupLat,         // ✅ was trip.pickup_lat
-            pickupLng:     trip.pickupLng,         // ✅ was trip.pickup_lng
-            dropoffLat:    trip.dropoffLat,        // ✅ was trip.dropoff_lat
-            dropoffLng:    trip.dropoffLng,        // ✅ was trip.dropoff_lng
-            fareEstimate:  trip.fareEstimate,      // ✅ was trip.fare_estimate
-            finalFare:     trip.fareFinal,         // ✅ was trip.final_fare → trip.fareFinal
-            distanceM:     trip.distanceM,         // ✅ was trip.distance_m
-            durationS:     trip.durationS,         // ✅ was trip.duration_s
-            paymentMethod: trip.paymentMethod,
-            createdAt:     trip.createdAt,
-            updatedAt:     trip.updatedAt,
-
+            tripId:         trip.id,
+            status:         trip.status,
+            pickupAddress:  trip.pickupAddress,
+            dropoffAddress: trip.dropoffAddress,
+            pickupLat:      trip.pickupLat,
+            pickupLng:      trip.pickupLng,
+            dropoffLat:     trip.dropoffLat,
+            dropoffLng:     trip.dropoffLng,
+            fareEstimate:   trip.fareEstimate,
+            finalFare:      trip.fareFinal,
+            distanceM:      trip.distanceM,
+            durationS:      trip.durationS,
+            paymentMethod:  trip.paymentMethod,
+            createdAt:      trip.createdAt,
+            updatedAt:      trip.updatedAt,
             driver: trip.driver ? {
-                uuid:      trip.driver.uuid,
-                firstName: trip.driver.first_name,
-                lastName:  trip.driver.last_name,
-                phone:     trip.driver.phone_e164,
-                avatar:    trip.driver.avatar_url,
-
+                uuid:       trip.driver.uuid,
+                firstName:  trip.driver.first_name,
+                lastName:   trip.driver.last_name,
+                phone:      trip.driver.phone_e164,
+                avatar:     trip.driver.avatar_url,
                 vehicle: trip.driver.driverProfile ? {
                     type:      trip.driver.driverProfile.vehicle_type,
                     plate:     trip.driver.driverProfile.vehicle_plate,
@@ -287,18 +380,14 @@ exports.getRecentTrips = async (req, res) => {
                     color:     trip.driver.driverProfile.vehicle_color,
                     year:      trip.driver.driverProfile.vehicle_year,
                 } : null,
-
-                rating:     trip.driver.driverProfile?.rating_avg    || null,
+                rating:     trip.driver.driverProfile?.rating_avg  || null,
                 totalTrips: trip.driver.driverProfile?.total_trips || 0,
-            } : null
+            } : null,
         }));
 
         res.status(200).json({
             success: true,
-            data: {
-                trips: formattedTrips,
-                count: formattedTrips.length
-            }
+            data:    { trips: formattedTrips, count: formattedTrips.length },
         });
 
     } catch (error) {
@@ -306,7 +395,7 @@ exports.getRecentTrips = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to fetch recent trips',
-            error: error.message
+            error:   error.message,
         });
     }
 };
@@ -315,10 +404,6 @@ exports.getRecentTrips = async (req, res) => {
 // GET FARE ESTIMATE
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Estimate fare before booking a trip
- * GET /api/trips/estimate?pickupLat=&pickupLng=&dropoffLat=&dropoffLng=
- */
 exports.getFareEstimate = async (req, res, next) => {
     console.log('========================');
     console.log('💰 [TRIP_CONTROLLER:getFareEstimate] Request initiated');
@@ -327,8 +412,8 @@ exports.getFareEstimate = async (req, res, next) => {
 
         if (!pickupLat || !pickupLng || !dropoffLat || !dropoffLng) {
             return res.status(400).json({
-                error: true,
-                message: 'pickupLat, pickupLng, dropoffLat, dropoffLng are all required'
+                error:   true,
+                message: 'pickupLat, pickupLng, dropoffLat, dropoffLng are all required',
             });
         }
 
@@ -341,19 +426,11 @@ exports.getFareEstimate = async (req, res, next) => {
             return res.status(400).json({ error: true, message: 'Coordinates must be valid numbers' });
         }
 
-        console.log(`📍 Estimating: (${pLat}, ${pLng}) → (${dLat}, ${dLng})`);
-
         const estimate = await fareCalculatorService.estimateFullTrip(pLat, pLng, dLat, dLng);
 
         if (estimate.error) {
-            console.log('❌ [FARE ESTIMATE] Error:', estimate.message);
-            return res.status(estimate.status || 400).json({
-                error: true,
-                message: estimate.message
-            });
+            return res.status(estimate.status || 400).json({ error: true, message: estimate.message });
         }
-
-        console.log(`✅ [FARE ESTIMATE] Fare: ${estimate.fare_estimate} XAF`);
 
         res.status(200).json({
             success: true,
@@ -368,13 +445,13 @@ exports.getFareEstimate = async (req, res, next) => {
                 polyline:      estimate.polyline,
                 currency:      'XAF',
                 breakdown: {
-                    base:            estimate.breakdown?.base            || 0,
-                    distanceCharge:  estimate.breakdown?.distance_charge || 0,
-                    timeCharge:      estimate.breakdown?.time_charge     || 0,
+                    base:            estimate.breakdown?.base             || 0,
+                    distanceCharge:  estimate.breakdown?.distance_charge  || 0,
+                    timeCharge:      estimate.breakdown?.time_charge      || 0,
                     surgeMultiplier: estimate.breakdown?.surge_multiplier || 1.0,
-                    minFare:         estimate.breakdown?.min_fare        || 0,
-                }
-            }
+                    minFare:         estimate.breakdown?.min_fare         || 0,
+                },
+            },
         });
 
     } catch (error) {
@@ -388,76 +465,62 @@ exports.getFareEstimate = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.getTripDetails = async (req, res, next) => {
-    console.log('========================');
-    console.log('🔍 [TRIP_CONTROLLER:getTripDetails] Fetching trip details...');
     try {
         const { tripId } = req.params;
-        console.log('🆔 Trip ID:', tripId);
-        console.log('👤 Requesting User:', req.user.uuid);
 
-        // Try Redis first (fast path for active trips)
         let trip = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
-        console.log('🧠 [REDIS] Fetched trip:', trip ? 'FOUND' : 'NOT FOUND');
 
         if (trip) {
             if (trip.passengerId !== req.user.uuid && trip.driverId !== req.user.uuid) {
-                console.log('⚠️ Unauthorized access attempt:', req.user.uuid);
                 const err = new Error('Unauthorized to view this trip');
                 err.status = 403;
                 throw err;
             }
-
             return res.status(200).json({
                 message: 'Trip retrieved successfully',
-                data: { trip, source: 'redis' }
+                data:    { trip, source: 'redis' },
             });
         }
 
-        // Fallback to DB
-        console.log('💽 [DB] Fetching trip from database...');
         trip = await Trip.findOne({
-            where: { id: tripId },
+            where:   { id: tripId },
             include: [
                 {
-                    model: Account,
-                    as: 'driver',
+                    model:      Account,
+                    as:         'driver',
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                    required: false,
+                    required:   false,
                     include: [
                         {
-                            model: DriverProfile,
-                            as: 'driverProfile',
+                            model:      DriverProfile,
+                            as:         'driverProfile',
                             attributes: [
-                                'vehicle_type', 'vehicle_plate',
-                                'vehicle_make_model', 'vehicle_color',
-                                'vehicle_year', 'vehicle_photo_url',
-                                'rating_avg', 'total_trips'
+                                'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
+                                'vehicle_color', 'vehicle_year', 'vehicle_photo_url',
+                                'rating_avg', 'total_trips',
                             ],
-                            required: false
-                        }
-                    ]
-                }
-            ]
+                            required: false,
+                        },
+                    ],
+                },
+            ],
         });
 
         if (!trip) {
-            console.log('❌ Trip not found in DB');
             const err = new Error('Trip not found');
             err.status = 404;
             throw err;
         }
 
         if (trip.passengerId !== req.user.uuid && trip.driverId !== req.user.uuid) {
-            console.log('⚠️ Unauthorized access attempt:', req.user.uuid);
             const err = new Error('Unauthorized to view this trip');
             err.status = 403;
             throw err;
         }
 
-        console.log('✅ Trip found in database. Returning response.');
         res.status(200).json({
             message: 'Trip retrieved successfully',
-            data: { trip, source: 'database' }
+            data:    { trip, source: 'database' },
         });
 
     } catch (error) {
@@ -471,79 +534,65 @@ exports.getTripDetails = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.getActiveTrip = async (req, res, next) => {
-    console.log('========================');
-    console.log('🔍 [TRIP_CONTROLLER:getActiveTrip] Checking for active trip...');
     try {
-        console.log('👤 User UUID:', req.user.uuid);
-        console.log('👤 User Type:', req.user.user_type);
-
-        // For passengers: check Redis first (SEARCHING trips only exist here)
         if (req.user.user_type === 'PASSENGER') {
             const activeTripKey = `passenger:active_trip:${req.user.uuid}`;
             const activeTripRef = await redisHelpers.getJson(activeTripKey);
-            console.log('🧠 [REDIS] Active trip reference:', activeTripRef);
 
             if (activeTripRef && activeTripRef.tripId) {
                 const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTripRef.tripId));
                 if (tripData) {
-                    console.log('✅ Active trip found in Redis:', activeTripRef.tripId);
                     return res.status(200).json({
                         message: 'Active trip retrieved',
-                        data: { trip: tripData, source: 'redis' }
+                        data:    { trip: tripData, source: 'redis' },
                     });
                 }
             }
         }
 
-        // Check DB for MATCHED and beyond (these are always in DB)
-        console.log('💽 [DB] Checking for active trip in database...');
         const whereClause = req.user.user_type === 'PASSENGER'
             ? { passengerId: req.user.uuid }
-            : { driverId: req.user.uuid };
+            : { driverId:    req.user.uuid };
 
         const activeTrip = await Trip.findOne({
             where: {
                 ...whereClause,
                 status: {
-                    [Op.in]: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS']
-                }
+                    [Op.in]: ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
+                },
             },
             include: [
                 {
-                    model: Account,
-                    as: 'driver',
+                    model:      Account,
+                    as:         'driver',
                     attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                    required: false,
+                    required:   false,
                     include: [
                         {
-                            model: DriverProfile,
-                            as: 'driverProfile',
+                            model:      DriverProfile,
+                            as:         'driverProfile',
                             attributes: [
-                                'vehicle_type', 'vehicle_plate',
-                                'vehicle_make_model', 'vehicle_color',
-                                'vehicle_year', 'vehicle_photo_url',
-                                'rating_avg'
+                                'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
+                                'vehicle_color', 'vehicle_year', 'vehicle_photo_url', 'rating_avg',
                             ],
-                            required: false
-                        }
-                    ]
-                }
+                            required: false,
+                        },
+                    ],
+                },
             ],
-            order: [['createdAt', 'DESC']]
+            order: [['createdAt', 'DESC']],
         });
 
         if (!activeTrip) {
-            console.log('⚠️ No active trip found.');
             return res.status(200).json({
                 message: 'No active trip',
-                data: { trip: null }
+                data:    { trip: null },
             });
         }
 
-        console.log('✅ Active trip found in DB:', activeTrip.id, '— Status:', activeTrip.status);
         res.status(200).json({
             message: 'Active trip retrieved',
-            data: { trip: activeTrip, source: 'database' }
+            data:    { trip: activeTrip, source: 'database' },
         });
 
     } catch (error) {
@@ -557,60 +606,51 @@ exports.getActiveTrip = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.getTripHistory = async (req, res, next) => {
-    console.log('========================');
-    console.log('📜 [TRIP_CONTROLLER:getTripHistory] Fetching trip history...');
     try {
         const { page = 1, limit = 20 } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(limit);
 
-        console.log(`🔢 Page: ${page}, Limit: ${limit}, Offset: ${offset}`);
-        console.log('👤 User UUID:', req.user.uuid);
-
         const whereClause = req.user.user_type === 'PASSENGER'
             ? { passengerId: req.user.uuid }
-            : { driverId: req.user.uuid };
+            : { driverId:    req.user.uuid };
 
         const { count, rows: trips } = await Trip.findAndCountAll({
             where: {
                 ...whereClause,
-                status: {
-                    [Op.in]: ['COMPLETED', 'CANCELED']
-                }
+                status: { [Op.in]: ['COMPLETED', 'CANCELED'] },
             },
             include: [
                 {
-                    model: Account,
-                    as: 'driver',
+                    model:      Account,
+                    as:         'driver',
                     attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                    required: false,
+                    required:   false,
                     include: [
                         {
-                            model: DriverProfile,
-                            as: 'driverProfile',
+                            model:      DriverProfile,
+                            as:         'driverProfile',
                             attributes: ['vehicle_type', 'vehicle_plate', 'vehicle_make_model', 'rating_avg'],
-                            required: false
-                        }
-                    ]
-                }
+                            required:   false,
+                        },
+                    ],
+                },
             ],
-            order: [['createdAt', 'DESC']],
-            limit: parseInt(limit),
-            offset
+            order:  [['createdAt', 'DESC']],
+            limit:  parseInt(limit),
+            offset,
         });
-
-        console.log(`✅ Retrieved ${trips.length} trips (Total: ${count})`);
 
         res.status(200).json({
             message: 'Trip history retrieved',
             data: {
                 trips,
                 pagination: {
-                    total: count,
-                    page: parseInt(page),
-                    limit: parseInt(limit),
-                    totalPages: Math.ceil(count / parseInt(limit))
-                }
-            }
+                    total:      count,
+                    page:       parseInt(page),
+                    limit:      parseInt(limit),
+                    totalPages: Math.ceil(count / parseInt(limit)),
+                },
+            },
         });
 
     } catch (error) {
@@ -624,39 +664,31 @@ exports.getTripHistory = async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.getTripEvents = async (req, res, next) => {
-    console.log('========================');
-    console.log('📋 [TRIP_CONTROLLER:getTripEvents] Fetching trip events...');
     try {
         const { tripId } = req.params;
-        console.log('🆔 Trip ID:', tripId);
 
         const trip = await Trip.findOne({ where: { id: tripId } });
 
         if (!trip) {
-            console.log('❌ Trip not found in database');
             const err = new Error('Trip not found');
             err.status = 404;
             throw err;
         }
 
         if (trip.passengerId !== req.user.uuid && trip.driverId !== req.user.uuid) {
-            console.log('⚠️ Unauthorized access to trip events by:', req.user.uuid);
             const err = new Error('Unauthorized to view trip events');
             err.status = 403;
             throw err;
         }
 
-        console.log('💽 [DB] Fetching trip events...');
         const events = await TripEvent.findAll({
             where: { tripId },
-            order: [['createdAt', 'ASC']]
+            order: [['createdAt', 'ASC']],
         });
-
-        console.log(`✅ Retrieved ${events.length} events for trip ${tripId}`);
 
         res.status(200).json({
             message: 'Trip events retrieved',
-            data: { events }
+            data:    { events },
         });
 
     } catch (error) {
@@ -675,140 +707,130 @@ exports.cancelTrip = async (req, res, next) => {
     try {
         const { tripId } = req.params;
         const { reason } = req.body;
-        const userId = req.user.uuid;
-        const userType = req.user.user_type;
+        const userId     = req.user.uuid;
+        const userType   = req.user.user_type;
 
         console.log('🆔 Trip ID:', tripId);
-        console.log('👤 User:', userId);
-        console.log('👤 User Type:', userType);
+        console.log('👤 User:', userId, '| Type:', userType);
         console.log('📝 Reason:', reason || 'No reason provided');
 
-        // Try Redis first
-        let trip = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
-        let fromRedis = true;
+        let trip      = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        let fromRedis = !!trip;
 
         if (!trip) {
-            console.log('💽 [DB] Trip not in Redis, checking database...');
-            trip = await Trip.findOne({ where: { id: tripId } });
-            fromRedis = false;
-
-            if (!trip) {
-                console.log('❌ Trip not found');
+            const dbTrip = await Trip.findOne({ where: { id: tripId } });
+            if (!dbTrip) {
                 const err = new Error('Trip not found');
                 err.status = 404;
                 throw err;
             }
+            trip = dbTrip.toJSON ? dbTrip.toJSON() : dbTrip;
         }
 
-        // Authorization check
         const isPassenger = trip.passengerId === userId;
         const isDriver    = trip.driverId    === userId;
 
         if (!isPassenger && !isDriver) {
-            console.log('⚠️ Unauthorized cancellation attempt');
             const err = new Error('Unauthorized to cancel this trip');
             err.status = 403;
             throw err;
         }
 
-        // Check if status allows cancellation
         const cancelableStatuses = ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
         if (!cancelableStatuses.includes(trip.status)) {
-            console.log(`⚠️ Cannot cancel trip in status: ${trip.status}`);
             return res.status(400).json({
                 success: false,
-                message: `Cannot cancel a trip that is already ${trip.status}`
+                message: `Cannot cancel a trip that is already ${trip.status}`,
             });
         }
 
         const canceledBy = isPassenger ? 'PASSENGER' : 'DRIVER';
         console.log(`🚫 Trip being canceled by: ${canceledBy}`);
 
-        // ── CASE 1: Trip only in Redis (still SEARCHING, no driver yet) ──────
-        if (fromRedis && trip.status === 'SEARCHING') {
-            console.log('🧠 [REDIS] Canceling SEARCHING trip from Redis');
-
-            await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-            await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-            await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
-            await redisClient.del(`trip:timeout:${tripId}`);
-
-            const io = getIO();
-            const cancelPayload = { tripId, canceledBy, reason: reason || 'Trip canceled' };
-
-            io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', cancelPayload);
-            io.to(`user:${trip.passengerId}`).emit('trip:canceled', cancelPayload);
-
-            console.log('✅ SEARCHING trip canceled (Redis only)');
-
-            return res.status(200).json({
-                success: true,
-                message: 'Trip canceled successfully',
-                data: { tripId, status: 'CANCELED', canceledBy }
-            });
-        }
-
-        // ── CASE 2: Trip in database (MATCHED or beyond) ─────────────────────
-        console.log('💽 [DB] Updating trip status to CANCELED');
-
-        let dbTrip = trip;
-        if (fromRedis) {
-            dbTrip = await Trip.findOne({ where: { id: tripId } });
-            if (!dbTrip) {
-                const err = new Error('Trip not found in database');
-                err.status = 404;
-                throw err;
-            }
-        }
-
-        dbTrip.status     = 'CANCELED';
-        dbTrip.canceledBy = canceledBy;
-        dbTrip.cancelReason = reason || null;
-        dbTrip.canceledAt = new Date();
-        await dbTrip.save();
-
-        // Create audit event
-        await TripEvent.create({
-            id: uuidv4(),
-            tripId: tripId,
-            type: 'trip_canceled',
-            payload: {
+        await Trip.update(
+            {
+                status:       'CANCELED',
                 canceledBy,
-                reason: reason || 'No reason provided'
-            }
-        });
+                cancelReason: reason || null,
+                canceledAt:   new Date(),
+            },
+            { where: { id: tripId } }
+        );
 
-        // ✅ FIX LOW: locationService is now imported at top — no dynamic require()
-        if (dbTrip.driverId) {
-            await locationService.updateDriverStatus(dbTrip.driverId, 'available', null);
-            console.log(`✅ Driver ${dbTrip.driverId} status reset to available`);
+        try {
+            await TripEvent.create({
+                id:      uuidv4(),
+                tripId,
+                type:    'trip_canceled',
+                payload: { canceledBy, reason: reason || 'No reason provided' },
+            });
+        } catch (e) {
+            console.warn('⚠️  TripEvent create failed (non-fatal):', e.message);
         }
 
-        // Clean up all Redis keys
+        if (trip.driverId) {
+            await locationService.updateDriverStatus(trip.driverId, 'available', null);
+        }
+
+        // ── Clean up Redis ────────────────────────────────────────────
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-        await redisClient.del(`passenger:active_trip:${dbTrip.passengerId}`);
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+        await redisClient.del(REDIS_KEYS.TRIP_OFFERS ? REDIS_KEYS.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`);
         await redisClient.del(`trip:timeout:${tripId}`);
         await redisClient.del(`trip:accepting:${tripId}`);
         await redisClient.del(`trip:no_expire:${tripId}`);
-        if (dbTrip.driverId) {
-            await redisClient.del(`driver:active_trip:${dbTrip.driverId}`);
+        if (trip.driverId) {
+            await redisClient.del(`driver:active_trip:${trip.driverId}`);
         }
 
-        // Notify all parties via Socket.IO
-        const io = getIO();
+        // ── Emit socket events ────────────────────────────────────────
+        const io         = getIO();
         const cancelData = {
             tripId,
-            status: 'CANCELED',
+            status:     'CANCELED',
             canceledBy,
-            reason: reason || 'Trip canceled'
+            reason:     reason || 'Trip canceled',
         };
 
-        io.to(`passenger:${dbTrip.passengerId}`).emit('trip:canceled', cancelData);
-        io.to(`user:${dbTrip.passengerId}`).emit('trip:canceled', cancelData);
+        io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', cancelData);
+        io.to(`user:${trip.passengerId}`).emit('trip:canceled', cancelData);
 
-        if (dbTrip.driverId) {
-            io.to(`driver:${dbTrip.driverId}`).emit('trip:canceled', cancelData);
-            io.to(`user:${dbTrip.driverId}`).emit('trip:canceled', cancelData);
+        if (trip.driverId) {
+            io.to(`driver:${trip.driverId}`).emit('trip:canceled', cancelData);
+            io.to(`user:${trip.driverId}`).emit('trip:canceled', cancelData);
+        }
+
+        // ── 🔔 NOTIFICATIONS: Push to the OTHER party ─────────────────
+        const NS = getNotificationService();
+
+        if (canceledBy === 'PASSENGER' && trip.driverId) {
+            // Passenger cancelled → notify driver
+            NS.send({
+                accountUuid: trip.driverId,
+                type:        'RIDE_CANCELLED',
+                title:       'Trip cancelled',
+                body:        'The passenger cancelled this trip.',
+                data: {
+                    screen:      'home',
+                    trip_id:     String(tripId),
+                    canceled_by: 'PASSENGER',
+                },
+            }).catch(e => console.warn('⚠️  [CANCEL] Push to driver failed:', e.message));
+        }
+
+        if (canceledBy === 'DRIVER') {
+            // Driver cancelled → notify passenger
+            NS.send({
+                accountUuid: trip.passengerId,
+                type:        'RIDE_CANCELLED',
+                title:       'Trip cancelled',
+                body:        'Your driver cancelled the trip. Please request a new ride.',
+                data: {
+                    screen:      'home',
+                    trip_id:     String(tripId),
+                    canceled_by: 'DRIVER',
+                },
+            }).catch(e => console.warn('⚠️  [CANCEL] Push to passenger failed:', e.message));
         }
 
         console.log('✅ Trip canceled successfully');
@@ -818,10 +840,10 @@ exports.cancelTrip = async (req, res, next) => {
             message: 'Trip canceled successfully',
             data: {
                 tripId,
-                status: 'CANCELED',
+                status:     'CANCELED',
                 canceledBy,
-                canceledAt: dbTrip.canceledAt
-            }
+                canceledAt: new Date(),
+            },
         });
 
     } catch (error) {

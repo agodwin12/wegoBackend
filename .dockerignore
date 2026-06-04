@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════════
+# WeGo Backend — .dockerignore
+# Keeps the build context lean and prevents secrets from leaking into
+# the image layer cache.
+# ═══════════════════════════════════════════════════════════════════════
+
+# Dependencies (installed fresh inside the image)
+node_modules/
+
+# Secrets — NEVER bake real credentials into an image
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Local uploads (use Cloudflare R2 in production)
+uploads/
+
+# Git & IDE
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Test / CI
+coverage/
+.nyc_output/
+*.test.js
+*.spec.js
+__tests__/
+
+# Docker files themselves (not needed inside the build context)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Docs
+README.md
+docs/

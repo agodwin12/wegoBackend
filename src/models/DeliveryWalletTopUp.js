@@ -9,23 +9,33 @@
 // this model is the gate through which all funds enter the system.
 //
 // Three funding channels:
-//   cash          → Driver visits a WeGo office. A cashier creates the record
-//                   and a manager/admin confirms it.
-//   mtn_mobile_money → Driver sends MoMo to the WeGo number, uploads screenshot.
-//                      An employee verifies and confirms.
-//   orange_money  → Same flow as MTN, different telco.
+//   cash             → Driver visits a WeGo office. Cashier creates the record,
+//                      manager/admin confirms it. Manual backoffice flow.
+//   mtn_mobile_money → CamPay collects automatically via USSD. No screenshot
+//                      needed — webhook credits the wallet on confirmation.
+//   orange_money     → Same CamPay flow as MTN, different operator.
 //
 // State machine:
+//
+//   MANUAL (cash):
 //   pending  ──► under_review  ──► confirmed ──► credited
 //                    └──────────────► rejected
 //
-//   pending      : request submitted, not yet reviewed
-//   under_review : an employee has opened and is verifying it
-//   confirmed    : employee verified the payment — ready to credit wallet
-//   credited     : wallet balance updated — terminal success state
-//   rejected     : payment not verified (wrong amount, fake proof, etc.)
+//   CAMPAY (mtn_mobile_money / orange_money):
+//   campay_pending ──► credited       (CamPay SUCCESSFUL webhook)
+//                  └─► campay_failed  (CamPay FAILED webhook or initiation error)
 //
-// The actual wallet credit happens in walletTopUp.service.js → creditWallet().
+//   pending        : cash request submitted, not yet reviewed
+//   under_review   : employee has claimed and is verifying it
+//   confirmed      : employee verified the payment — ready to credit wallet
+//   credited       : wallet balance updated — terminal success state
+//   rejected       : payment not verified (wrong amount, fake proof, etc.)
+//   campay_pending : CamPay collection initiated, awaiting webhook confirmation
+//   campay_failed  : CamPay payment failed or was cancelled by driver
+//
+// The actual wallet credit happens in walletTopUp.service.js:
+//   Manual  → creditWallet()
+//   CamPay  → creditWalletAutomatically()
 // This model is only the request record + audit trail.
 //
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -41,21 +51,30 @@ module.exports = (sequelize) => {
         // ─── Computed getters ─────────────────────────────────────────────────
 
         /**
-         * True if this request is still actionable by an employee.
+         * True if this cash request is still actionable by a backoffice employee.
+         * CamPay requests are not employee-actionable — the webhook handles them.
          */
         get isActionable() {
             return ['pending', 'under_review'].includes(this.status);
         }
 
         /**
-         * True if this request has reached a terminal state.
+         * True if this request has reached a terminal state (success or failure).
+         * Once terminal, no further transitions are allowed.
          */
         get isTerminal() {
-            return ['credited', 'rejected'].includes(this.status);
+            return ['credited', 'rejected', 'campay_failed'].includes(this.status);
         }
 
         /**
-         * Human-readable channel label for display in backoffice.
+         * True if this was a CamPay-initiated top-up (not manual cash).
+         */
+        get isCampayFlow() {
+            return ['mtn_mobile_money', 'orange_money'].includes(this.payment_channel);
+        }
+
+        /**
+         * Human-readable channel label for display in backoffice and app.
          */
         get channelLabel() {
             const labels = {
@@ -69,32 +88,44 @@ module.exports = (sequelize) => {
         // ─── State machine ────────────────────────────────────────────────────
 
         /**
-         * Validates and applies a status transition.
-         * Throws if the transition is not allowed.
+         * Validates and applies a status transition for the MANUAL (cash) flow.
+         * CamPay transitions (campay_pending → credited/campay_failed) are
+         * handled directly in walletTopUp.service.js via topUp.update() because
+         * they originate from the webhook, not from a controller action.
+         *
+         * Throws if the requested transition is not allowed from the current status.
          *
          * @param {'under_review'|'confirmed'|'credited'|'rejected'} newStatus
-         * @param {object} [extraFields] - Additional fields to update alongside status
+         * @param {object} [extraFields]  Additional fields to update alongside status
          */
         async transitionTo(newStatus, extraFields = {}) {
             const allowed = {
-                pending:      ['under_review', 'rejected'],
-                under_review: ['confirmed', 'rejected'],
-                confirmed:    ['credited'],
-                credited:     [],
-                rejected:     [],
+                // Manual cash flow
+                pending:        ['under_review', 'rejected'],
+                under_review:   ['confirmed', 'rejected'],
+                confirmed:      ['credited'],
+                // Terminal states — no further transitions
+                credited:       [],
+                rejected:       [],
+                // CamPay states — managed directly by webhook service, not here
+                campay_pending: [],
+                campay_failed:  [],
             };
 
             if (!(allowed[this.status] || []).includes(newStatus)) {
                 throw new Error(
-                    `Invalid top-up status transition: ${this.status} → ${newStatus}`
+                    `Invalid top-up status transition: ${this.status} → ${newStatus}. ` +
+                    (this.isCampayFlow
+                        ? 'CamPay top-ups are managed automatically by the payment webhook.'
+                        : `Allowed from '${this.status}': [${(allowed[this.status] || []).join(', ') || 'none'}]`)
                 );
             }
 
             const timestampMap = {
-                under_review: { reviewed_at: new Date() },
+                under_review: { reviewed_at:  new Date() },
                 confirmed:    { confirmed_at: new Date() },
-                credited:     { credited_at: new Date() },
-                rejected:     { rejected_at: new Date() },
+                credited:     { credited_at:  new Date() },
+                rejected:     { rejected_at:  new Date() },
             };
 
             await this.update({
@@ -122,7 +153,7 @@ module.exports = (sequelize) => {
                 as:         'wallet',
             });
 
-            // The employee who reviewed/confirmed/rejected
+            // The employee who reviewed/confirmed/rejected (manual flow only)
             if (models.Employee) {
                 DeliveryWalletTopUp.belongsTo(models.Employee, {
                     foreignKey: 'reviewed_by',
@@ -141,16 +172,17 @@ module.exports = (sequelize) => {
                 primaryKey:    true,
             },
 
-            // ── Human-readable reference code (shown on receipts) ─────────────
+            // ── Human-readable reference code ─────────────────────────────────
             // Format: TU-YYYYMMDD-XXXXXX   e.g. TU-20250407-A3F9K2
             // Generated in the service layer before creation.
+            // Shown on receipts and in the backoffice queue.
             topup_code: {
                 type:      DataTypes.STRING(25),
                 allowNull: false,
                 unique:    true,
             },
 
-            // ── Relationship keys (no FK constraints — matches your pattern) ───
+            // ── Relationship keys (no FK constraints — matches project pattern) ─
             driver_id: {
                 type:      DataTypes.STRING(36),   // matches Driver.id VARCHAR(36)
                 allowNull: false,
@@ -163,45 +195,52 @@ module.exports = (sequelize) => {
 
             // ── Funding channel ───────────────────────────────────────────────
             payment_channel: {
-                type:     DataTypes.ENUM('cash', 'mtn_mobile_money', 'orange_money'),
+                type:      DataTypes.ENUM('cash', 'mtn_mobile_money', 'orange_money'),
                 allowNull: false,
             },
 
             // ── Amount ────────────────────────────────────────────────────────
             amount: {
-                type:     DataTypes.DECIMAL(12, 2),
+                type:      DataTypes.DECIMAL(12, 2),
                 allowNull: false,
                 validate: {
-                    min: {
-                        args: [500],
-                        msg:  'Minimum top-up amount is 500 XAF',
-                    },
-                    max: {
-                        args: [500000],
-                        msg:  'Maximum single top-up is 500,000 XAF',
-                    },
+                    min: { args: [500],    msg: 'Minimum top-up amount is 500 XAF' },
+                    max: { args: [500000], msg: 'Maximum single top-up is 500,000 XAF' },
                 },
-                get() { return parseFloat(this.getDataValue('amount') || 0); },
+                get() {
+                    return parseFloat(this.getDataValue('amount') || 0);
+                },
             },
 
-            // ── Payment proof ─────────────────────────────────────────────────
-            // R2 URL for screenshot uploaded by driver (required for MTN/Orange).
-            // Null for cash — cashier is the proof.
+            // ── CamPay correlation ────────────────────────────────────────────
+            // Populated after campayService.initiateCollection() returns.
+            // Used by the webhook to find this record when CamPay fires.
+            // NULL for cash top-ups (manual flow — no CamPay involved).
+            campay_ref: {
+                type:      DataTypes.STRING(60),
+                allowNull: true,
+                comment:   'CamPay transaction reference. Populated after initiation. NULL for cash.',
+            },
+
+            // ── Payment proof (manual flow only) ──────────────────────────────
+            // R2 URL of screenshot uploaded by driver for cash verification.
+            // NULL for CamPay flows — no screenshot needed.
             proof_url: {
                 type:      DataTypes.STRING(500),
                 allowNull: true,
             },
 
-            // ── Telco transaction reference ───────────────────────────────────
-            // Optional: the reference number from the MoMo/OM SMS confirmation.
-            // Helps employee verify against telco records.
+            // ── Telco transaction reference (manual flow) ──────────────────────
+            // Optional reference from the MoMo/OM SMS confirmation.
+            // Only relevant for the old screenshot flow, not CamPay.
             payment_reference: {
                 type:      DataTypes.STRING(100),
                 allowNull: true,
             },
 
-            // ── Phone number used for the transfer ────────────────────────────
-            // Required for MTN/Orange so employee can cross-check.
+            // ── Sender phone (manual flow) ────────────────────────────────────
+            // Phone number used for the manual transfer. Helps employee verify.
+            // Not needed for CamPay — the phone is on the WegoPayment record.
             sender_phone: {
                 type:      DataTypes.STRING(32),
                 allowNull: true,
@@ -213,37 +252,42 @@ module.exports = (sequelize) => {
                 allowNull: true,
             },
 
-            // ── State machine ─────────────────────────────────────────────────
+            // ── Status ────────────────────────────────────────────────────────
             status: {
                 type:         DataTypes.ENUM(
-                    'pending',
-                    'under_review',
-                    'confirmed',
-                    'credited',
-                    'rejected'
+                    'pending',          // cash: submitted, awaiting review
+                    'under_review',     // cash: employee claimed it
+                    'confirmed',        // cash: employee verified — ready to credit
+                    'credited',         // TERMINAL SUCCESS — wallet balance updated
+                    'rejected',         // TERMINAL FAILURE — manual rejection
+                    'campay_pending',   // CamPay: collection initiated, awaiting webhook
+                    'campay_failed'     // TERMINAL FAILURE — CamPay declined or cancelled
                 ),
                 allowNull:    false,
                 defaultValue: 'pending',
             },
 
-            // ── Review metadata ───────────────────────────────────────────────
+            // ── Review metadata (manual flow) ─────────────────────────────────
             reviewed_by: {
-                type:      DataTypes.INTEGER.UNSIGNED,  // Employee.id
+                type:      DataTypes.INTEGER.UNSIGNED,   // Employee.id
                 allowNull: true,
+                comment:   'Employee who reviewed this request. NULL for CamPay top-ups.',
             },
 
             rejection_reason: {
                 type:      DataTypes.STRING(500),
                 allowNull: true,
+                comment:   'Reason shown to driver on rejection or campay_failed.',
             },
 
             admin_note: {
                 type:      DataTypes.STRING(500),
                 allowNull: true,
+                comment:   'Internal note from reviewing employee. Never shown to driver.',
             },
 
-            // ── Snapshot of balance before credit ─────────────────────────────
-            // Stored at the moment of crediting for audit/dispute purposes.
+            // ── Balance snapshot ──────────────────────────────────────────────
+            // Captured at the moment the wallet is credited for audit purposes.
             balance_before_credit: {
                 type:      DataTypes.DECIMAL(12, 2),
                 allowNull: true,
@@ -291,17 +335,20 @@ module.exports = (sequelize) => {
             underscored: true,
 
             indexes: [
-                // Primary lookup: driver views their own history
+                // Driver views their own history filtered by status
                 { fields: ['driver_id', 'status'] },
 
-                // Admin queue: pending items first, then under_review
+                // Admin queue: oldest actionable items first (FIFO)
                 { fields: ['status', 'created_at'] },
 
-                // Unique code lookup
+                // Unique code lookup (receipts, support)
                 { unique: true, fields: ['topup_code'] },
 
-                // Wallet audit: all top-ups credited to a wallet
+                // Wallet audit: all top-ups credited to a specific wallet
                 { fields: ['wallet_id'] },
+
+                // Webhook correlation: find topup by campay_ref
+                { fields: ['campay_ref'] },
             ],
         }
     );

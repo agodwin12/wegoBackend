@@ -8,22 +8,16 @@ const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO }       = require('../sockets/index');
 
 // ── Shared cache key with EarningsEngineService + tripMatchingService ─────────
-// All three services read the same Redis key so commission rules are never
-// fetched from the DB more than once per 5-minute TTL window.
-const RULES_CACHE_KEY        = 'earnings:rules:active';
-const RULES_CACHE_TTL_S      = 300;
+const RULES_CACHE_KEY          = 'earnings:rules:active';
+const RULES_CACHE_TTL_S        = 300;
 const FALLBACK_COMMISSION_RATE = parseFloat(process.env.DEFAULT_COMMISSION_RATE || '0.10');
 
 // ── Low-balance warning threshold ─────────────────────────────────────────────
-// If balance < this many XAF the goOnline response includes a low_balance flag
-// so Flutter can show a top-up banner without blocking the driver.
 const LOW_BALANCE_THRESHOLD = parseInt(process.env.LOW_BALANCE_THRESHOLD_XAF || '2000', 10);
 
 // ═══════════════════════════════════════════════════════════════════════
 // PRIVATE HELPER — Resolve commission rate from cached EarningRules
 // ═══════════════════════════════════════════════════════════════════════
-// Mirrors the same logic in tripMatchingService._getCommissionRate()
-// so the accept-time wallet check uses the exact same rate.
 
 async function _getCommissionRate(fareEstimate) {
     let rules = [];
@@ -31,12 +25,10 @@ async function _getCommissionRate(fareEstimate) {
     try {
         const cached = await redisClient.get(RULES_CACHE_KEY);
         if (cached) rules = JSON.parse(cached);
-    } catch (e) {
-        // cache miss — will load from DB below
-    }
+    } catch (e) { /* cache miss */ }
 
     if (rules.length === 0) {
-        const today  = new Date().toISOString().split('T')[0];
+        const today   = new Date().toISOString().split('T')[0];
         const dbRules = await EarningRule.findAll({
             where: {
                 isActive: true,
@@ -139,10 +131,7 @@ exports.setStatus = async (req, res, next) => {
         const { status, lat, lng, heading } = req.body;
 
         if (!status || !['online', 'offline'].includes(status)) {
-            return res.status(400).json({
-                error:   'Validation error',
-                message: 'status must be "online" or "offline"',
-            });
+            return res.status(400).json({ error: 'Validation error', message: 'status must be "online" or "offline"' });
         }
 
         const driverUuid = req.user.uuid;
@@ -150,20 +139,14 @@ exports.setStatus = async (req, res, next) => {
 
         if (status === 'online') {
             if (!lat || !lng) {
-                return res.status(400).json({
-                    error:   'Validation error',
-                    message: 'lat and lng are required to go online',
-                });
+                return res.status(400).json({ error: 'Validation error', message: 'lat and lng are required to go online' });
             }
 
             const parsedLat = parseFloat(lat);
             const parsedLng = parseFloat(lng);
 
             if (parsedLat < -90 || parsedLat > 90 || parsedLng < -180 || parsedLng > 180) {
-                return res.status(400).json({
-                    error:   'Validation error',
-                    message: 'Invalid coordinates',
-                });
+                return res.status(400).json({ error: 'Validation error', message: 'Invalid coordinates' });
             }
 
             const account = await Account.findByPk(driverUuid);
@@ -206,10 +189,6 @@ exports.setStatus = async (req, res, next) => {
                 })
             );
 
-            // ── Fetch wallet balance to include in response ────────────
-            // Driver is not blocked — they go online regardless of balance.
-            // We surface balance + a low_balance flag so Flutter can show
-            // a "top up your wallet" banner proactively.
             let walletData = null;
             try {
                 const wallet = await DriverWallet.findOne({
@@ -225,15 +204,14 @@ exports.setStatus = async (req, res, next) => {
                     };
                 }
             } catch (walletErr) {
-                // Non-fatal — don't fail goOnline because of a wallet read error
                 console.warn('⚠️  [DRIVER] setStatus: wallet fetch failed (non-fatal):', walletErr.message);
             }
 
             console.log('✅ [DRIVER] setStatus → online | Redis updated');
 
             return res.status(200).json({
-                success:   true,
-                message:   'You are now online',
+                success: true,
+                message: 'You are now online',
                 data: {
                     driver_id: driverUuid,
                     is_online: true,
@@ -245,10 +223,7 @@ exports.setStatus = async (req, res, next) => {
 
         } else {
             const { Driver } = require('../models');
-            await Driver.update(
-                { status: 'offline' },
-                { where: { userId: driverUuid } }
-            );
+            await Driver.update({ status: 'offline' }, { where: { userId: driverUuid } });
 
             await redisClient.zrem(REDIS_KEYS.DRIVERS_GEO,      driverUuid.toString());
             await redisClient.srem(REDIS_KEYS.ONLINE_DRIVERS,    driverUuid.toString());
@@ -259,13 +234,9 @@ exports.setStatus = async (req, res, next) => {
             console.log('✅ [DRIVER] setStatus → offline | Redis cleaned');
 
             return res.status(200).json({
-                success:   true,
-                message:   'You are now offline',
-                data: {
-                    driver_id: driverUuid,
-                    is_online: false,
-                    timestamp: new Date().toISOString(),
-                },
+                success: true,
+                message: 'You are now offline',
+                data: { driver_id: driverUuid, is_online: false, timestamp: new Date().toISOString() },
             });
         }
 
@@ -381,9 +352,6 @@ exports.goOnline = async (req, res, next) => {
             })
         );
 
-        // ── Fetch wallet balance to surface in response ────────────────
-        // No blocking — driver goes online freely.
-        // Flutter uses low_balance flag to show a top-up banner.
         let walletData = null;
         try {
             const wallet = await DriverWallet.findOne({
@@ -524,14 +492,6 @@ exports.getStatus = async (req, res, next) => {
 // WALLET CONTROLLER
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * GET /api/driver/wallet
- *
- * Returns the driver's current wallet balance plus period breakdowns.
- * Delegates to EarningsEngineService.getWalletSummary() for the heavy
- * lifting — the same data that powers the earnings dashboard, but
- * accessible from a simpler endpoint for the wallet widget.
- */
 exports.getWalletBalance = async (req, res, next) => {
     try {
         console.log('\n💰 [DRIVER] getWalletBalance — Driver:', req.user.uuid);
@@ -539,20 +499,18 @@ exports.getWalletBalance = async (req, res, next) => {
         const summary = await earningsEngine.getWalletSummary(req.user.uuid);
 
         if (!summary) {
-            // Wallet not created yet — driver has never completed a trip
-            // and hasn't topped up. Return a zero state so Flutter doesn't crash.
             return res.status(200).json({
                 message: 'Wallet retrieved',
                 data: {
-                    balance:         0,
-                    currency:        'XAF',
-                    status:          'ACTIVE',
-                    low_balance:     true,
+                    balance:               0,
+                    currency:              'XAF',
+                    status:                'ACTIVE',
+                    low_balance:           true,
                     low_balance_threshold: LOW_BALANCE_THRESHOLD,
-                    totalEarned:     0,
-                    totalCommission: 0,
-                    totalBonuses:    0,
-                    totalPayouts:    0,
+                    totalEarned:           0,
+                    totalCommission:       0,
+                    totalBonuses:          0,
+                    totalPayouts:          0,
                     today:  { net: 0, trips: 0 },
                     week:   { net: 0, trips: 0 },
                     month:  { net: 0 },
@@ -591,14 +549,12 @@ exports.getCurrentTrip = async (req, res, next) => {
                 driverId: req.user.uuid,
                 status:   { [Op.in]: ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'] },
             },
-            include: [
-                {
-                    model:      Account,
-                    as:         'passenger',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                    required:   false,
-                }
-            ],
+            include: [{
+                model:      Account,
+                as:         'passenger',
+                attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
+                required:   false,
+            }],
             order: [['createdAt', 'DESC']],
         });
 
@@ -685,14 +641,6 @@ exports.acceptTrip = async (req, res, next) => {
         }
 
         // ── STEP 4b: Wallet balance gate ───────────────────────────────
-        //
-        // Time-of-use check: the driver passed the balance gate at dispatch
-        // time (in tripMatchingService), but wallet balance can change between
-        // offer and accept (admin penalty, another commission deduction, etc.).
-        // We re-check here before the trip is locked to this driver.
-        //
-        // This is the same Uber/Yango pattern — the accept is rejected silently
-        // with a specific error code so Flutter can prompt the driver to top up.
         try {
             const fareEstimate       = Math.round(trip.fareEstimate || 0);
             const commissionRate     = await _getCommissionRate(fareEstimate);
@@ -730,8 +678,6 @@ exports.acceptTrip = async (req, res, next) => {
             console.log(`✅ [ACCEPT-TRIP] Wallet gate passed — balance sufficient`);
 
         } catch (walletErr) {
-            // If wallet check itself errors, log it but don't silently pass —
-            // we fail safe and block the accept to avoid a commission debt.
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             console.error('❌ [ACCEPT-TRIP] Wallet check error:', walletErr.message);
             return res.status(500).json({
@@ -769,36 +715,29 @@ exports.acceptTrip = async (req, res, next) => {
         await redisHelpers.setJson(tripKey, updatedTrip, 7200);
         console.log('✅ [ACCEPT-TRIP] Redis trip updated → MATCHED');
 
-        // ── STEP 7: Save trip to DB ────────────────────────────────────
+        // ── STEP 7: Update trip in DB ──────────────────────────────────
+        // Trip was already persisted at SEARCHING status by tripController.createTrip.
+        // We UPDATE the existing row — never create a duplicate.
         let dbTrip;
         try {
-            dbTrip = await Trip.create({
-                id:                trip.id,
-                passengerId:       trip.passengerId,
-                driverId,
-                status:            'MATCHED',
-                pickupLat:         trip.pickupLat,
-                pickupLng:         trip.pickupLng,
-                pickupAddress:     trip.pickupAddress,
-                dropoffLat:        trip.dropoffLat,
-                dropoffLng:        trip.dropoffLng,
-                dropoffAddress:    trip.dropoffAddress,
-                distanceM:         trip.distanceM,
-                durationS:         trip.durationS,
-                fareEstimate:      trip.fareEstimate,
-                paymentMethod:     trip.paymentMethod || 'CASH',
-                routePolyline:     trip.routePolyline,
-                driverLocationLat: driverLocation.lat,
-                driverLocationLng: driverLocation.lng,
-                matchedAt:         new Date(),
-            });
-            console.log('✅ [ACCEPT-TRIP] Trip saved to DB:', dbTrip.id);
+            await Trip.update(
+                {
+                    driverId,
+                    status:            'MATCHED',
+                    driverLocationLat: driverLocation.lat,
+                    driverLocationLng: driverLocation.lng,
+                    matchedAt:         new Date(),
+                },
+                { where: { id: tripId } }
+            );
+            dbTrip = await Trip.findByPk(tripId);
+            console.log('✅ [ACCEPT-TRIP] Trip updated in DB → MATCHED:', dbTrip.id);
         } catch (dbError) {
-            console.error('❌ [ACCEPT-TRIP] DB save error:', dbError.message);
+            console.error('❌ [ACCEPT-TRIP] DB update error:', dbError.message);
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             return res.status(500).json({
                 error:   true,
-                message: 'Failed to save trip',
+                message: 'Failed to update trip',
                 code:    'DATABASE_ERROR',
                 details: dbError.message,
             });
@@ -831,7 +770,7 @@ exports.acceptTrip = async (req, res, next) => {
         // ── STEP 10: Clean driver offer queues ────────────────────────
         const offerKeys = await redisClient.keys('driver:pending_offers:*');
         for (const key of offerKeys) {
-            const offers   = await redisHelpers.getJson(key) || [];
+            const offers = await redisHelpers.getJson(key) || [];
             if (Array.isArray(offers)) {
                 const filtered = offers.filter(o => o.tripId !== tripId);
                 if (filtered.length !== offers.length) {
@@ -943,8 +882,8 @@ exports.acceptTrip = async (req, res, next) => {
             timestamp: new Date().toISOString(),
         });
 
-        const tripOffersKey  = REDIS_KEYS.TRIP_OFFERS ? REDIS_KEYS.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`;
-        const tripOffersData = await redisHelpers.getJson(tripOffersKey);
+        const tripOffersKey   = REDIS_KEYS.TRIP_OFFERS ? REDIS_KEYS.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`;
+        const tripOffersData  = await redisHelpers.getJson(tripOffersKey);
         const notifiedDrivers = tripOffersData?.drivers || tripOffersData?.notifiedDrivers || [];
 
         for (const notifiedDriverId of notifiedDrivers) {
@@ -1144,7 +1083,6 @@ exports.completeTrip = async (req, res, next) => {
             return { trip, earningsResult };
         });
 
-        // ── Clean up Redis (non-fatal) ─────────────────────────────────
         try {
             await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
             await redisClient.del(`passenger:active_trip:${result.trip.passengerId}`);
@@ -1156,7 +1094,6 @@ exports.completeTrip = async (req, res, next) => {
             console.warn('⚠️  [DRIVER] Redis cleanup error (non-fatal):', redisErr.message);
         }
 
-        // ── Reset driver to available ──────────────────────────────────
         try {
             const rawMeta = await redisClient.get(REDIS_KEYS.DRIVER_META(req.user.uuid));
             if (rawMeta) {
@@ -1170,7 +1107,6 @@ exports.completeTrip = async (req, res, next) => {
             console.warn('⚠️  [DRIVER] Driver availability reset error (non-fatal):', redisErr.message);
         }
 
-        // ── Notify passenger ───────────────────────────────────────────
         try {
             const io = getIO();
             io.to(`passenger:${result.trip.passengerId}`).emit('trip:completed', {
@@ -1460,23 +1396,23 @@ exports.getAllTrips = async (req, res, next) => {
         });
 
         const trips = rows.map(t => ({
-            id:           t.id,
-            status:       t.status,
-            pickup:       { lat: t.pickupLat,  lng: t.pickupLng,  address: t.pickupAddress  },
-            dropoff:      { lat: t.dropoffLat, lng: t.dropoffLng, address: t.dropoffAddress },
-            distanceM:    t.distanceM,
-            durationS:    t.durationS,
-            fareEstimate: t.fareEstimate,
-            fareFinal:    t.fareFinal,
+            id:            t.id,
+            status:        t.status,
+            pickup:        { lat: t.pickupLat,  lng: t.pickupLng,  address: t.pickupAddress  },
+            dropoff:       { lat: t.dropoffLat, lng: t.dropoffLng, address: t.dropoffAddress },
+            distanceM:     t.distanceM,
+            durationS:     t.durationS,
+            fareEstimate:  t.fareEstimate,
+            fareFinal:     t.fareFinal,
             paymentMethod: t.paymentMethod,
-            matchedAt:    t.matchedAt     || null,
-            startedAt:    t.tripStartedAt || null,
-            completedAt:  t.tripCompletedAt || null,
-            canceledAt:   t.canceledAt    || null,
-            canceledBy:   t.canceledBy    || null,
-            cancelReason: t.cancelReason  || null,
-            createdAt:    t.createdAt,
-            updatedAt:    t.updatedAt,
+            matchedAt:     t.matchedAt       || null,
+            startedAt:     t.tripStartedAt   || null,
+            completedAt:   t.tripCompletedAt || null,
+            canceledAt:    t.canceledAt      || null,
+            canceledBy:    t.canceledBy      || null,
+            cancelReason:  t.cancelReason    || null,
+            createdAt:     t.createdAt,
+            updatedAt:     t.updatedAt,
             passenger: t.passenger ? {
                 uuid:      t.passenger.uuid,
                 firstName: t.passenger.first_name,
@@ -1532,11 +1468,7 @@ exports.getProfile = async (req, res, next) => {
     try {
         const driver = await Account.findByPk(req.user.uuid, {
             attributes: { exclude: ['password_hash', 'password_algo'] },
-            include: [{
-                model:    DriverProfile,
-                as:       'driverProfile',
-                required: false,
-            }],
+            include: [{ model: DriverProfile, as: 'driverProfile', required: false }],
         });
         if (!driver) return res.status(404).json({ error: 'Driver not found' });
         res.status(200).json({ message: 'Driver profile retrieved', data: { driver } });

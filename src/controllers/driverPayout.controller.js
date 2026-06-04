@@ -3,17 +3,6 @@
 // ═══════════════════════════════════════════════════════════════════════
 // DRIVER PAYOUT CONTROLLER (Mobile)
 // ═══════════════════════════════════════════════════════════════════════
-//
-// Authenticated via authenticateUser (mobile JWT — not employee auth).
-// Drivers can only see and manage their OWN payout requests.
-//
-// Endpoints:
-//   POST   /api/request/payout/driver         → submit payout request
-//   GET    /api/request/payout/driver         → list own payout history
-//   GET    /api/request/payout/driver/:id     → single request detail
-//   DELETE /api/request/payout/driver/:id     → cancel a PENDING request
-//
-// ═══════════════════════════════════════════════════════════════════════
 
 'use strict';
 
@@ -25,8 +14,11 @@ const {
     DriverWallet,
 } = require('../models');
 
+// ── Notification service (lazy — avoids circular dep at startup) ──────────────
+const getNotificationService = () => require('../services/NotificationService');
+
 // ═══════════════════════════════════════════════════════════════════════
-// ── HELPERS ────────────────────────────────────────────────────────────
+// HELPERS
 // ═══════════════════════════════════════════════════════════════════════
 
 function _generatePayoutRef() {
@@ -55,8 +47,7 @@ function _formatRequest(r) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ── POST /api/request/payout/driver
-// ── Submit a new payout request
+// POST /api/request/payout/driver — Submit a new payout request
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.requestPayout = async (req, res, next) => {
@@ -67,7 +58,6 @@ exports.requestPayout = async (req, res, next) => {
 
         const { amount, paymentMethod, note } = req.body;
 
-        // ── Validate amount ───────────────────────────────────────────
         const parsedAmount = parseInt(amount, 10);
         if (isNaN(parsedAmount) || parsedAmount <= 0) {
             return res.status(400).json({
@@ -76,7 +66,6 @@ exports.requestPayout = async (req, res, next) => {
             });
         }
 
-        // ── Validate payment method ───────────────────────────────────
         const validMethods = ['CASH', 'MOMO', 'OM'];
         if (!validMethods.includes(paymentMethod)) {
             return res.status(400).json({
@@ -85,42 +74,26 @@ exports.requestPayout = async (req, res, next) => {
             });
         }
 
-        // ── Fetch driver account ──────────────────────────────────────
         const driver = await Account.findOne({
             where: { uuid: req.user.uuid, user_type: 'DRIVER' },
         });
-
         if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver account not found.',
-            });
+            return res.status(404).json({ success: false, message: 'Driver account not found.' });
         }
 
-        // ── Fetch wallet ──────────────────────────────────────────────
-        const wallet = await DriverWallet.findOne({
-            where: { driverId: driver.uuid },
-        });
-
+        const wallet           = await DriverWallet.findOne({ where: { driverId: driver.uuid } });
         const availableBalance = wallet ? (wallet.balance || 0) : 0;
 
         console.log(`   💰 Requested: ${parsedAmount} XAF | Available: ${availableBalance} XAF`);
 
-        // ── Block if amount exceeds balance ───────────────────────────
         if (parsedAmount > availableBalance) {
             return res.status(400).json({
                 success: false,
                 message: `Insufficient balance. You requested ${parsedAmount} XAF but your available balance is ${availableBalance} XAF.`,
-                data: {
-                    requested:  parsedAmount,
-                    available:  availableBalance,
-                },
+                data:    { requested: parsedAmount, available: availableBalance },
             });
         }
 
-        // ── Auto-fill payment phone from profile ──────────────────────
-        // For MOMO and OM we use the driver's registered phone number.
-        // For CASH no phone is needed.
         const paymentPhone = ['MOMO', 'OM'].includes(paymentMethod)
             ? (driver.phone_e164 || null)
             : null;
@@ -132,11 +105,8 @@ exports.requestPayout = async (req, res, next) => {
             });
         }
 
-        // ── Create payout request ─────────────────────────────────────
         const referenceNumber = _generatePayoutRef();
-
-        // SLA = 48 hours from now — backoffice must process within this window
-        const slaDeadline = new Date(Date.now() + 48 * 60 * 60 * 1000);
+        const slaDeadline     = new Date(Date.now() + 48 * 60 * 60 * 1000);
 
         const request = await PayoutRequest.create({
             referenceNumber,
@@ -147,19 +117,32 @@ exports.requestPayout = async (req, res, next) => {
             initiatedBy:   'DRIVER',
             driverNote:    note || null,
             status:        'PENDING',
-            slaDeadline,                  // ✅ required field — 48h processing deadline
+            slaDeadline,
         });
 
         console.log(`✅ [DRIVER PAYOUT] Request created: ${referenceNumber} | ${parsedAmount} XAF via ${paymentMethod}`);
-        console.log(`   ⏱  SLA deadline: ${slaDeadline.toISOString()}`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        // ── 🔔 NOTIFICATION: Withdrawal requested ────────────────────────────
+        getNotificationService().send({
+            accountUuid: driver.uuid,
+            type:        'WALLET_WITHDRAWAL_REQUESTED',
+            title:       'Withdrawal requested',
+            body:        `Your withdrawal of ${parsedAmount.toLocaleString()} XAF via ${paymentMethod} has been submitted. We'll process it within 48 hours.`,
+            data: {
+                screen:    'wallet',
+                amount:    String(parsedAmount),
+                ref:       referenceNumber,
+                method:    paymentMethod,
+            },
+        }).catch(e => console.warn('⚠️  [DRIVER PAYOUT] Withdrawal requested push failed:', e.message));
 
         return res.status(201).json({
             success: true,
             message: 'Payout request submitted successfully. It will be processed by our team.',
             data: {
                 request:          _formatRequest(request),
-                availableBalance: availableBalance - parsedAmount, // optimistic updated balance
+                availableBalance: availableBalance - parsedAmount,
             },
         });
 
@@ -170,25 +153,17 @@ exports.requestPayout = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// ── GET /api/request/payout/driver
-// ── List driver's own payout history
+// GET /api/request/payout/driver — List driver's own payout history
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.listMyPayouts = async (req, res, next) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📋 [DRIVER PAYOUT] listMyPayouts');
-        console.log(`   👤 Driver: ${req.user.uuid}`);
-
         const page   = Math.max(parseInt(req.query.page  || '1',  10), 1);
         const limit  = Math.min(parseInt(req.query.limit || '20', 10), 50);
         const offset = (page - 1) * limit;
         const where  = { driverId: req.user.uuid };
 
-        // Optional status filter
-        if (req.query.status) {
-            where.status = req.query.status.toUpperCase();
-        }
+        if (req.query.status) where.status = req.query.status.toUpperCase();
 
         const { count, rows } = await PayoutRequest.findAndCountAll({
             where,
@@ -197,12 +172,8 @@ exports.listMyPayouts = async (req, res, next) => {
             offset,
         });
 
-        // Also return current wallet balance
         const wallet           = await DriverWallet.findOne({ where: { driverId: req.user.uuid } });
         const availableBalance = wallet ? (wallet.balance || 0) : 0;
-
-        console.log(`✅ [DRIVER PAYOUT] ${count} requests found`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(200).json({
             success: true,
@@ -225,36 +196,22 @@ exports.listMyPayouts = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// ── GET /api/request/payout/driver/:id
-// ── Single payout request detail
+// GET /api/request/payout/driver/:id — Single payout request detail
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.getMyPayout = async (req, res, next) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🔍 [DRIVER PAYOUT] getMyPayout:', req.params.id);
-        console.log(`   👤 Driver: ${req.user.uuid}`);
-
         const request = await PayoutRequest.findOne({
-            where: {
-                id:       req.params.id,
-                driverId: req.user.uuid,   // ✅ enforce ownership — driver cannot see others
-            },
+            where: { id: req.params.id, driverId: req.user.uuid },
         });
 
         if (!request) {
-            return res.status(404).json({
-                success: false,
-                message: 'Payout request not found.',
-            });
+            return res.status(404).json({ success: false, message: 'Payout request not found.' });
         }
-
-        console.log(`✅ [DRIVER PAYOUT] Found: ${request.referenceNumber}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(200).json({
             success: true,
-            data: { request: _formatRequest(request) },
+            data:    { request: _formatRequest(request) },
         });
 
     } catch (error) {
@@ -264,31 +221,19 @@ exports.getMyPayout = async (req, res, next) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// ── DELETE /api/request/payout/driver/:id
-// ── Cancel a PENDING payout request
+// DELETE /api/request/payout/driver/:id — Cancel a PENDING payout request
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.cancelMyPayout = async (req, res, next) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🚫 [DRIVER PAYOUT] cancelMyPayout:', req.params.id);
-        console.log(`   👤 Driver: ${req.user.uuid}`);
-
         const request = await PayoutRequest.findOne({
-            where: {
-                id:       req.params.id,
-                driverId: req.user.uuid,   // ✅ enforce ownership
-            },
+            where: { id: req.params.id, driverId: req.user.uuid },
         });
 
         if (!request) {
-            return res.status(404).json({
-                success: false,
-                message: 'Payout request not found.',
-            });
+            return res.status(404).json({ success: false, message: 'Payout request not found.' });
         }
 
-        // Only PENDING requests can be cancelled by the driver
         if (request.status !== 'PENDING') {
             return res.status(400).json({
                 success: false,
@@ -298,17 +243,14 @@ exports.cancelMyPayout = async (req, res, next) => {
 
         request.status      = 'CANCELLED';
         request.cancelledAt = new Date();
-        // cancelledBy is left null — cancelled by driver themselves, not an employee
-
         await request.save();
 
         console.log(`✅ [DRIVER PAYOUT] ${request.referenceNumber} → CANCELLED by driver`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(200).json({
             success: true,
             message: 'Payout request cancelled.',
-            data: { request: _formatRequest(request) },
+            data:    { request: _formatRequest(request) },
         });
 
     } catch (error) {

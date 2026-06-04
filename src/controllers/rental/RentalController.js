@@ -1016,7 +1016,7 @@ module.exports = {
     // Pricing
     calculatePrice,
 
-    // Rental Booking (User)
+    // Rental Booking (User
     createRental,
     getRentalById,
     listUserRentals,

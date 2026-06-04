@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "193495129605",
+    "project_id": "wego-4fd54",
+    "storage_bucket": "wego-4fd54.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:193495129605:android:3b4b109d1405ab8b65866c",
+        "android_client_info": {
+          "package_name": "com.example.wego_new_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCy3-tNiUzl-x4r9ram8f9Z7IhkeTP9rXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -10,14 +10,14 @@ const {
     redisHelpers,
 } = require('../config/redis');
 
+// ── Notification service (lazy — avoids circular dep at startup) ──────────────
+const getNotificationService = () => require('../services/NotificationService');
+
 // ═══════════════════════════════════════════════════════════════════════
 // INTERNAL HELPER
-// Writes driver location to BOTH the geo index AND the JSON store.
-// This is what findNearbyDrivers() needs — GEOADD into DRIVERS_GEO.
 // ═══════════════════════════════════════════════════════════════════════
 
 async function _updateDriverLocationInRedis(driverId, lat, lng, heading = 0, speed = 0, accuracy = 10) {
-    // ✅ FIX: GEOADD into the geo index so GEORADIUS finds this driver
     await redisClient.geoadd(
         REDIS_KEYS.DRIVERS_GEO,
         parseFloat(lng),
@@ -25,7 +25,6 @@ async function _updateDriverLocationInRedis(driverId, lat, lng, heading = 0, spe
         driverId.toString()
     );
 
-    // Also keep the JSON location store for driver info lookups
     await redisHelpers.setJson(`driver:location:${driverId}`, {
         driverId,
         lat:         parseFloat(lat),
@@ -62,7 +61,6 @@ async function handleDriverOnline(socket, data) {
             return;
         }
 
-        // Update DB
         await DriverLocation.upsert({
             driver_id:    socket.userId,
             lat,
@@ -75,13 +73,9 @@ async function handleDriverOnline(socket, data) {
             last_updated: new Date(),
         });
 
-        // ✅ FIX: setDriverOnline adds to ONLINE + AVAILABLE sets
         await setDriverOnline(socket.userId);
-
-        // ✅ FIX: _updateDriverLocationInRedis does GEOADD into geo index
         await _updateDriverLocationInRedis(socket.userId, lat, lng, heading, speed, accuracy);
 
-        // Also write metadata key so getStatus() works
         await redisClient.setex(
             REDIS_KEYS.DRIVER_META(socket.userId),
             3600,
@@ -113,7 +107,7 @@ async function handleDriverOnline(socket, data) {
 }
 
 /**
- * Handle driver going offline (explicit — button press)
+ * Handle driver going offline
  */
 async function handleDriverOffline(socket, data) {
     try {
@@ -143,9 +137,7 @@ async function handleDriverOffline(socket, data) {
             { where: { driver_id: socket.userId } }
         );
 
-        // ✅ Explicit offline — wipe geo index (driver chose to go offline)
         await setDriverOffline(socket.userId);
-
         socket.leave(`driver:${socket.userId}`);
 
         console.log('✅ [SOCKET-DRIVER] Driver is now offline');
@@ -166,20 +158,18 @@ async function handleDriverOffline(socket, data) {
 }
 
 /**
- * Handle driver location update (called every few seconds during a trip)
+ * Handle driver location update
  */
 async function handleDriverLocationUpdate(socket, data, io) {
     try {
         const { lat, lng, heading = 0, speed = 0, accuracy = 10 } = data || {};
 
         if (!lat || !lng || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-            return; // Silent fail for location updates
+            return;
         }
 
-        // ✅ FIX: Always GEOADD so driver stays in geo index
         await _updateDriverLocationInRedis(socket.userId, lat, lng, heading, speed, accuracy);
 
-        // DB update (fire-and-forget)
         DriverLocation.update(
             { lat, lng, heading, speed, accuracy, last_updated: new Date() },
             { where: { driver_id: socket.userId } }
@@ -187,7 +177,6 @@ async function handleDriverLocationUpdate(socket, data, io) {
             console.error('⚠️ [SOCKET-DRIVER] Location update DB error:', err.message);
         });
 
-        // Forward location to passenger if driver has active trip
         const activeTrip = await Trip.findOne({
             where: {
                 driverId: socket.userId,
@@ -240,20 +229,20 @@ async function handleTripAccept(socket, data, io) {
         console.log('✅ [SOCKET-DRIVER] Trip accepted successfully');
 
         socket.emit('trip:accept:success', {
-            tripId:  result.trip.id,
+            tripId:  result.trip?.id,
             message: 'Trip accepted successfully',
             trip: {
-                id:             result.trip.id,
-                status:         result.trip.status,
-                pickupLat:      result.trip.pickupLat,
-                pickupLng:      result.trip.pickupLng,
-                pickupAddress:  result.trip.pickupAddress,
-                dropoffLat:     result.trip.dropoffLat,
-                dropoffLng:     result.trip.dropoffLng,
-                dropoffAddress: result.trip.dropoffAddress,
-                fareEstimate:   result.trip.fareEstimate,
-                distanceM:      result.trip.distanceM,
-                durationS:      result.trip.durationS,
+                id:             result.trip?.id,
+                status:         result.trip?.status,
+                pickupLat:      result.trip?.pickupLat,
+                pickupLng:      result.trip?.pickupLng,
+                pickupAddress:  result.trip?.pickupAddress,
+                dropoffLat:     result.trip?.dropoffLat,
+                dropoffLng:     result.trip?.dropoffLng,
+                dropoffAddress: result.trip?.dropoffAddress,
+                fareEstimate:   result.trip?.fareEstimate,
+                distanceM:      result.trip?.distanceM,
+                durationS:      result.trip?.durationS,
             },
             driver: result.driver,
         });
@@ -354,6 +343,18 @@ async function handleDriverArrived(socket, data, io) {
 
         socket.emit('trip:status:success', { tripId: trip.id, status: 'DRIVER_ARRIVED' });
 
+        // ── 🔔 NOTIFICATION: Driver arrived → passenger ───────────────────
+        getNotificationService().send({
+            accountUuid: trip.passengerId,
+            type:        'RIDE_DRIVER_ARRIVED',
+            title:       '📍 Your driver has arrived!',
+            body:        'Your driver is waiting at the pickup location. Please head out now.',
+            data: {
+                screen:  'trip_tracking',
+                trip_id: String(trip.id),
+            },
+        }).catch(e => console.warn(`⚠️  [DRIVER-HANDLERS] Arrived push failed:`, e.message));
+
     } catch (error) {
         console.error('❌ [SOCKET-DRIVER] Driver arrived error:', error);
         socket.emit('error', { message: 'Failed to update status' });
@@ -447,7 +448,7 @@ async function handleTripComplete(socket, data, io) {
 }
 
 /**
- * Handle trip cancellation
+ * Handle trip cancellation by driver
  */
 async function handleTripCancel(socket, data, io) {
     const { tripId, reason } = data || {};
@@ -474,7 +475,7 @@ async function handleTripCancel(socket, data, io) {
             { where: { driver_id: socket.userId } }
         );
 
-        console.log('✅ [SOCKET-DRIVER] Trip canceled');
+        console.log('✅ [SOCKET-DRIVER] Trip canceled by driver');
 
         io.to(`passenger:${trip.passengerId}`).emit('trip:canceled', {
             tripId:     trip.id,
@@ -484,6 +485,19 @@ async function handleTripCancel(socket, data, io) {
         });
 
         socket.emit('trip:cancel:success', { tripId: trip.id, message: 'Trip canceled' });
+
+        // ── 🔔 NOTIFICATION: Trip cancelled by driver → passenger ──────────
+        getNotificationService().send({
+            accountUuid: trip.passengerId,
+            type:        'RIDE_CANCELLED',
+            title:       'Trip cancelled',
+            body:        'Your driver cancelled the trip. Please request a new ride.',
+            data: {
+                screen:      'home',
+                trip_id:     String(trip.id),
+                canceled_by: 'DRIVER',
+            },
+        }).catch(e => console.warn(`⚠️  [DRIVER-HANDLERS] Cancel push to passenger failed:`, e.message));
 
     } catch (error) {
         console.error('❌ [SOCKET-DRIVER] Trip cancel error:', error);

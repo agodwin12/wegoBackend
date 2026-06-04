@@ -1,3 +1,4 @@
+// src/controllers/delivery.controller.js
 'use strict';
 
 const { Op }         = require('sequelize');
@@ -23,10 +24,15 @@ const { EXPRESS_SURCHARGE }     = require('../middleware/delivery.middleware');
 const { getIO }                 = require('../sockets/exports');
 const { sendSms }               = require('../services/comm/sms.service');
 
+// ── Notification service (lazy — avoids circular dep at startup) ──────────────
+const getNotificationService = () => require('../services/NotificationService');
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DELIVERY_SEARCH_RADIUS_KM = parseFloat(process.env.DELIVERY_SEARCH_RADIUS_KM || 5);
 const DELIVERY_OFFER_TTL_MS     = parseInt(process.env.DELIVERY_OFFER_TTL_MS || 25000, 10);
+
+const DIGITAL_PAYMENT_METHODS = ['mtn_mobile_money', 'orange_money'];
 
 const CATEGORY_META = {
     document:    { emoji: '📄', label: 'Document' },
@@ -44,7 +50,6 @@ const ACTIVE_STATUSES = [
     'picked_up', 'en_route_dropoff', 'arrived_dropoff',
 ];
 
-// In-memory timeout map — deliveryId → setTimeout handle
 const activeTimeouts = new Map();
 
 const debugPrint = (...args) => {
@@ -55,12 +60,6 @@ const debugPrint = (...args) => {
 // PRIVATE HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Safe io accessor.
- * req.app.get('io') only works if app.set('io', instance) was called at boot.
- * Falls back to the module-level socket registry (sockets/exports.js) which
- * is always populated when the server starts.
- */
 function _getIO(req) {
     try {
         const fromApp = req?.app?.get('io');
@@ -88,7 +87,6 @@ async function getGoogleMapsDistance(originLat, originLng, destLat, destLng) {
         };
     } catch (error) {
         console.error('❌ [DELIVERY] Google Maps error:', error.message);
-        // Haversine fallback with 1.3x road factor
         const R    = 6371;
         const dLat = (destLat - originLat) * Math.PI / 180;
         const dLng = (destLng - originLng) * Math.PI / 180;
@@ -156,7 +154,6 @@ function trackingMode(deliveryType) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 0. GET PACKAGE CATEGORIES
-// GET /api/deliveries/categories
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getCategories = (req, res) => {
@@ -170,7 +167,6 @@ exports.getCategories = (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. GET FARE ESTIMATE
-// GET /api/deliveries/estimate
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getEstimate = async (req, res) => {
@@ -238,7 +234,6 @@ exports.getEstimate = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2. BOOK DELIVERY
-// POST /api/deliveries/book
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.bookDelivery = async (req, res) => {
@@ -255,7 +250,6 @@ exports.bookDelivery = async (req, res) => {
             package_photo_url, is_fragile, payment_method,
         } = req.body;
 
-        // Validation
         const required = {
             pickup_address, pickup_latitude, pickup_longitude,
             dropoff_address, dropoff_latitude, dropoff_longitude,
@@ -283,7 +277,6 @@ exports.bookDelivery = async (req, res) => {
             return res.status(400).json({ success: false, message: 'package_photo_url must be a valid URL' });
         }
 
-        // No duplicate active delivery
         const existing = await Delivery.findOne({
             where: { sender_id: senderUuid, status: { [Op.in]: ACTIVE_STATUSES } },
         });
@@ -295,7 +288,6 @@ exports.bookDelivery = async (req, res) => {
             });
         }
 
-        // Distance + pricing
         const { distanceKm } = await getGoogleMapsDistance(
             parseFloat(pickup_latitude), parseFloat(pickup_longitude),
             parseFloat(dropoff_latitude), parseFloat(dropoff_longitude),
@@ -323,10 +315,9 @@ exports.bookDelivery = async (req, res) => {
             expressSurchargeXAF = Math.round(priceBreakdown.totalPrice * (expressMultiplier - 1.0));
             finalTotalPrice    += expressSurchargeXAF;
             finalCommission    += expressSurchargeXAF;
-            debugPrint(`⚡ [DELIVERY] Express surcharge: +${expressSurchargeXAF} XAF`);
         }
 
-        const deliveryCode                          = await Delivery.generateDeliveryCode();
+        const deliveryCode                           = await Delivery.generateDeliveryCode();
         const { plain: pinPlain, hashed: pinHashed } = await Delivery.generateDeliveryPin();
 
         const delivery = await Delivery.create({
@@ -363,18 +354,15 @@ exports.bookDelivery = async (req, res) => {
             commission_amount:             finalCommission,
             driver_payout:                 priceBreakdown.driverPayout,
             payment_method,
-            payment_status:  payment_method === 'cash' ? 'cash_pending' : 'pending',
-            delivery_pin:    pinHashed,
-            pin_attempts:    0,
-            status:          'searching',
-            search_attempts: 0,
+            payment_status:                payment_method === 'cash' ? 'cash_pending' : 'pending',
+            delivery_pin:                  pinHashed,
+            pin_attempts:                  0,
+            status:                        'searching',
+            search_attempts:               0,
         });
-
-        debugPrint(`📦 [DELIVERY] ${deliveryCode} (${deliveryType}) — ${package_category}/${package_size} — ${finalTotalPrice} XAF`);
 
         await sendPinSms(recipient_phone, pinPlain, deliveryCode);
 
-        // Redis cache
         await redisHelpers.setJson(`delivery:active:${delivery.id}`, {
             id:              delivery.id,
             deliveryCode,
@@ -396,15 +384,21 @@ exports.bookDelivery = async (req, res) => {
 
         await redisClient.set(`sender:active_delivery:${senderUuid}`, delivery.id, 'EX', 7200);
 
-        // Launch driver search — fire-and-forget
-        const io = _getIO(req);
-        _searchForDriver(delivery.id, io).catch(err => {
-            console.error(`❌ [DELIVERY] Driver search failed for ${deliveryCode}:`, err.message);
-        });
+        const isDigitalPayment = DIGITAL_PAYMENT_METHODS.includes(payment_method);
+
+        if (!isDigitalPayment) {
+            const io = _getIO(req);
+            _searchForDriver(delivery.id, io).catch(err => {
+                console.error(`❌ [DELIVERY] Driver search failed for ${deliveryCode}:`, err.message);
+            });
+        }
 
         return res.status(201).json({
-            success: true,
-            message: 'Delivery booked. Searching for a driver...',
+            success:         true,
+            message:         isDigitalPayment
+                ? 'Delivery booked. Please complete your mobile money payment to find a driver.'
+                : 'Delivery booked. Searching for a driver...',
+            requiresPayment: isDigitalPayment,
             delivery: {
                 id:           delivery.id,
                 deliveryCode,
@@ -439,11 +433,10 @@ exports.bookDelivery = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// INTERNAL — Driver search + timeout handlers
+// INTERNAL — _searchForDriver
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _searchForDriver(deliveryId, io) {
-    // Safe io accessor — falls back to module-level getIO() if argument is invalid
     const _io = () => {
         if (io && io.sockets) return io;
         try { return getIO(); } catch (_) { return null; }
@@ -453,62 +446,44 @@ async function _searchForDriver(deliveryId, io) {
         debugPrint(`\n🔍 [DELIVERY] Searching drivers for delivery #${deliveryId}`);
 
         const deliveryData = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
-        if (!deliveryData) {
-            debugPrint(`⚠️  [DELIVERY] No Redis data for delivery #${deliveryId}`);
-            return;
-        }
+        if (!deliveryData) return;
 
-        // Step 1 — geo search (returns Account UUIDs)
         const nearbyDrivers = await locationService.findNearbyDrivers(
             deliveryData.pickupLng,
             deliveryData.pickupLat,
             DELIVERY_SEARCH_RADIUS_KM,
         );
 
-        debugPrint(`📍 [DELIVERY] Geo search returned ${nearbyDrivers?.length || 0} drivers nearby`);
-
         if (!nearbyDrivers || nearbyDrivers.length === 0) {
             await _handleNoDriversFound(deliveryId, deliveryData, _io());
             return;
         }
 
-        // Step 2 — resolve Account UUIDs → Driver records
-        // locationService stores drivers by Account.uuid (NOT Driver.id)
-        const accountUuids = nearbyDrivers.map(d => d.driverId);
-
+        const accountUuids  = nearbyDrivers.map(d => d.driverId);
         const driverRecords = await Driver.findAll({
             where: {
-                userId:       accountUuids,  // Driver.userId = Account.uuid
+                userId:       accountUuids,
                 current_mode: 'delivery',
                 status:       'online',
             },
             attributes: ['id', 'userId', 'status', 'current_mode'],
         });
 
-        debugPrint(`✅ [DELIVERY] ${driverRecords.length}/${nearbyDrivers.length} in delivery mode`);
-
         if (driverRecords.length === 0) {
             await _handleNoDriversFound(deliveryId, deliveryData, _io());
             return;
         }
 
-        // Map: accountUuid → Driver record
         const driverByAccountUuid = new Map(driverRecords.map(d => [d.userId, d]));
-
-        // Keep only nearby drivers that have a matching Driver record
-        const filteredDrivers = nearbyDrivers
+        const filteredDrivers     = nearbyDrivers
             .filter(nd => driverByAccountUuid.has(nd.driverId))
             .map(nd => ({ ...nd, driver: driverByAccountUuid.get(nd.driverId) }));
 
-        debugPrint(`📋 [DELIVERY] ${filteredDrivers.length} drivers will receive offer`);
-
-        // Step 3 — load delivery for offer payload
         const delivery = await Delivery.findByPk(deliveryId, {
             include: [{ association: 'sender', attributes: ['uuid', 'first_name', 'last_name'] }],
         });
         if (!delivery) return;
 
-        // Step 4 — build offer payload
         const deliveryOffer = {
             deliveryId:         delivery.id,
             deliveryCode:       delivery.delivery_code,
@@ -547,26 +522,34 @@ async function _searchForDriver(deliveryId, io) {
             expiresIn: Math.floor(DELIVERY_OFFER_TTL_MS / 1000),
         };
 
-        // Step 5 — emit to each driver
-        // Socket rooms are keyed by Account.uuid — emit to nd.driverId (Account UUID)
-        const ioInstance = _io();
-        if (!ioInstance) {
-            console.error('❌ [DELIVERY] Socket.IO instance unavailable — cannot emit offers');
-            return;
-        }
-
+        const ioInstance           = _io();
         const notifiedAccountUuids = [];
+
         for (const nd of filteredDrivers) {
             const emitted = await emitToDriver(ioInstance, nd.driverId, 'delivery:new_request', {
                 ...deliveryOffer,
                 distanceToPickup:   Math.round(nd.distance * 1000),
                 distanceToPickupKm: parseFloat(nd.distance.toFixed(2)),
             });
+
             if (emitted) {
                 notifiedAccountUuids.push(nd.driverId);
-                debugPrint(`📤 [DELIVERY] Offer → driver ${nd.driverId} (${nd.distance.toFixed(2)} km)`);
-            } else {
-                debugPrint(`⚠️  [DELIVERY] Driver ${nd.driverId} in geo-index but socket not connected`);
+                debugPrint(`📤 [DELIVERY] Offer → driver ${nd.driverId}`);
+
+                // ── 🔔 NOTIFICATION: Delivery offer to agent ──────────────
+                getNotificationService().send({
+                    accountUuid: nd.driverId,
+                    type:        'DELIVERY_OFFER',
+                    title:       '📦 New delivery offer!',
+                    body:        `${delivery.pickup_address} → ${delivery.dropoff_address} · ${Math.round(delivery.driver_payout).toLocaleString()} XAF`,
+                    data: {
+                        screen:      'delivery_offer',
+                        delivery_id: String(delivery.id),
+                        payout:      String(delivery.driver_payout),
+                        pickup:      delivery.pickup_address,
+                        dropoff:     delivery.dropoff_address,
+                    },
+                }).catch(() => {});
             }
         }
 
@@ -575,7 +558,6 @@ async function _searchForDriver(deliveryId, io) {
             return;
         }
 
-        // Step 6 — cache who received the offer
         await redisHelpers.setJson(`delivery:offers:${deliveryId}`, {
             drivers:     notifiedAccountUuids,
             broadcastAt: Date.now(),
@@ -584,30 +566,25 @@ async function _searchForDriver(deliveryId, io) {
 
         await delivery.increment('search_attempts');
 
-        // Step 7 — set expiry timeout
         const timeoutId = setTimeout(async () => {
             await _handleDeliveryTimeout(deliveryId, _io());
             activeTimeouts.delete(deliveryId);
         }, DELIVERY_OFFER_TTL_MS);
         activeTimeouts.set(deliveryId, timeoutId);
 
-        debugPrint(`✅ [DELIVERY] Broadcast complete — ${notifiedAccountUuids.length}/${filteredDrivers.length} drivers notified`);
-
     } catch (error) {
         console.error('❌ [DELIVERY] _searchForDriver error:', error.message);
-        console.error(error.stack);
     }
 }
+
+exports.searchForDriver = _searchForDriver;
 
 async function _handleDeliveryTimeout(deliveryId, io) {
     try {
         const deliveryData = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
         if (!deliveryData || deliveryData.status !== 'searching') return;
 
-        await Delivery.update(
-            { status: 'expired' },
-            { where: { id: deliveryId, status: 'searching' } },
-        );
+        await Delivery.update({ status: 'expired' }, { where: { id: deliveryId, status: 'searching' } });
         await redisClient.del(`delivery:active:${deliveryId}`);
         await redisClient.del(`delivery:offers:${deliveryId}`);
         await redisClient.del(`sender:active_delivery:${deliveryData.senderId}`);
@@ -643,7 +620,6 @@ async function _handleNoDriversFound(deliveryId, deliveryData, io) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3. ACCEPT DELIVERY (Driver)
-// POST /api/deliveries/:id/accept
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.acceptDelivery = async (req, res) => {
@@ -653,36 +629,23 @@ exports.acceptDelivery = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
-        const io          = _getIO(req);  // ✅ safe accessor
+        const io          = _getIO(req);
 
         const driver = req.deliveryDriver || await getDriverByAccountUuid(accountUuid);
-        if (!driver) {
-            return res.status(404).json({ success: false, message: 'Driver record not found' });
-        }
-        if (driver.current_mode !== 'delivery') {
-            return res.status(400).json({ success: false, message: 'Switch to delivery mode first' });
-        }
-        if (driver.status !== 'online') {
-            return res.status(400).json({ success: false, message: 'You must be online to accept deliveries' });
-        }
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
+        if (driver.current_mode !== 'delivery') return res.status(400).json({ success: false, message: 'Switch to delivery mode first' });
+        if (driver.status !== 'online') return res.status(400).json({ success: false, message: 'You must be online to accept deliveries' });
 
         const lockAcquired = await redisClient.set(lockKey, lockValue, 'EX', 10, 'NX');
-        if (!lockAcquired) {
-            return res.status(409).json({ success: false, message: 'Delivery already being accepted' });
-        }
+        if (!lockAcquired) return res.status(409).json({ success: false, message: 'Delivery already being accepted' });
 
         try {
             const delivery = await Delivery.findByPk(deliveryId, {
                 include: [{ association: 'sender', attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'] }],
             });
-            if (!delivery) {
-                return res.status(404).json({ success: false, message: 'Delivery not found' });
-            }
-            if (delivery.status !== 'searching') {
-                return res.status(409).json({ success: false, message: 'Delivery no longer available' });
-            }
+            if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found' });
+            if (delivery.status !== 'searching') return res.status(409).json({ success: false, message: 'Delivery no longer available' });
 
-            // Reserve commission before status transition
             try {
                 await deliveryCommissionService.reserveCommission(deliveryId, driver.id);
             } catch (commErr) {
@@ -701,7 +664,6 @@ exports.acceptDelivery = async (req, res) => {
 
             await delivery.transitionTo('accepted', { driver_id: driver.id });
 
-            // Update Redis
             const deliveryData = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
             if (deliveryData) {
                 deliveryData.status   = 'accepted';
@@ -712,22 +674,27 @@ exports.acceptDelivery = async (req, res) => {
             await redisClient.set(`driver:active_delivery:${driver.id}`, deliveryId, 'EX', 7200);
             await locationService.updateDriverStatus(driver.id, 'busy', null);
 
-            // Expire other drivers who received the offer
             const offersData = await redisHelpers.getJson(`delivery:offers:${deliveryId}`);
             for (const otherId of (offersData?.drivers || []).filter(id => id !== driver.userId)) {
                 await emitToDriver(io, otherId, 'delivery:request_expired', { deliveryId });
+
+                // ── 🔔 NOTIFICATION: Offer expired to other agents ────────
+                getNotificationService().send({
+                    accountUuid: otherId,
+                    type:        'DELIVERY_OFFER_EXPIRED',
+                    title:       'Delivery offer expired',
+                    body:        'Another driver accepted this delivery.',
+                    data: { screen: 'home', delivery_id: String(deliveryId) },
+                }).catch(() => {});
             }
             await redisClient.del(`delivery:offers:${deliveryId}`);
 
-            // Join delivery socket room
-            // Socket is keyed by Account.uuid — use driver.userId not driver.id
             const driverSocketId = await redisClient.get(REDIS_KEYS.USER_SOCKET(driver.userId));
             if (driverSocketId) {
                 const driverSocket = io.sockets.sockets.get(driverSocketId);
                 if (driverSocket) deliverySocketService.joinDeliveryRoom(driverSocket, deliveryId);
             }
 
-            // Notify sender
             await emitToSender(io, delivery.sender_id, 'delivery:driver_assigned', {
                 deliveryId,
                 deliveryCode: delivery.delivery_code,
@@ -743,7 +710,19 @@ exports.acceptDelivery = async (req, res) => {
                 },
             });
 
-            debugPrint(`✅ [DELIVERY] ${delivery.delivery_code} (${delivery.delivery_type}) accepted`);
+            // ── 🔔 NOTIFICATION: Agent assigned → sender ──────────────────
+            const driverName = `${req.user.first_name || ''} ${req.user.last_name || ''}`.trim() || 'Your agent';
+            getNotificationService().send({
+                accountUuid: delivery.sender_id,
+                type:        'DELIVERY_AGENT_ASSIGNED',
+                title:       '🚴 Agent assigned!',
+                body:        `${driverName} is heading to pick up your package.`,
+                data: {
+                    screen:        'delivery_tracking',
+                    delivery_id:   String(deliveryId),
+                    delivery_code: delivery.delivery_code,
+                },
+            }).catch(e => console.warn('⚠️  [DELIVERY] Agent assigned push failed:', e.message));
 
             return res.json({
                 success:  true,
@@ -796,7 +775,6 @@ exports.acceptDelivery = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 4. UPDATE DELIVERY STATUS (Driver)
-// POST /api/deliveries/:id/status
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.updateStatus = async (req, res) => {
@@ -804,7 +782,7 @@ exports.updateStatus = async (req, res) => {
         const accountUuid                  = req.user.uuid;
         const deliveryId                   = parseInt(req.params.id);
         const { status, pickup_photo_url } = req.body;
-        const io                           = _getIO(req);  // ✅
+        const io                           = _getIO(req);
 
         const validStatuses = ['en_route_pickup', 'arrived_pickup', 'picked_up', 'en_route_dropoff', 'arrived_dropoff'];
         if (!validStatuses.includes(status)) {
@@ -851,7 +829,21 @@ exports.updateStatus = async (req, res) => {
             driverLocation,
         });
 
-        debugPrint(`📦 [DELIVERY] ${delivery.delivery_code} → ${status}`);
+        // ── 🔔 NOTIFICATION: Package picked up → sender ───────────────────
+        if (status === 'picked_up') {
+            getNotificationService().send({
+                accountUuid: delivery.sender_id,
+                type:        'DELIVERY_PICKED_UP',
+                title:       '📦 Package picked up!',
+                body:        `Your package is on the way to ${delivery.dropoff_address}.`,
+                data: {
+                    screen:        'delivery_tracking',
+                    delivery_id:   String(deliveryId),
+                    delivery_code: delivery.delivery_code,
+                },
+            }).catch(e => console.warn('⚠️  [DELIVERY] Picked up push failed:', e.message));
+        }
+
         return res.json({
             success: true,
             status,
@@ -866,7 +858,6 @@ exports.updateStatus = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 5. VERIFY PIN AND COMPLETE DELIVERY (Driver)
-// POST /api/deliveries/:id/verify-pin
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.verifyPin = async (req, res) => {
@@ -891,13 +882,7 @@ exports.verifyPin = async (req, res) => {
             });
         }
 
-        // ── Debug: log PIN storage length so we can catch truncation ──────────
-        debugPrint(`🔑 [PIN DEBUG] stored pin length: ${delivery.delivery_pin?.length}, value: ${delivery.delivery_pin}`);
-        debugPrint(`🔑 [PIN DEBUG] entered pin: ${pin}`);
-
         const result = await Delivery.verifyPin(delivery, pin);
-        debugPrint(`🔑 [PIN DEBUG] verifyPin result: ${JSON.stringify(result)}`);
-
         if (!result.success) {
             return res.status(400).json({
                 success: false,
@@ -912,11 +897,9 @@ exports.verifyPin = async (req, res) => {
         }
 
         deliveryCommissionService.confirmCommission(deliveryId, driver.id)
-            .then(() => debugPrint(`💸 [DELIVERY] Commission confirmed for ${delivery.delivery_code}`))
             .catch(err => console.error(`❌ [DELIVERY] Commission confirm FAILED:`, err.message));
 
         deliveryEarningsService.postDeliveryEarnings(delivery.id)
-            .then(() => debugPrint(`💰 [DELIVERY] Earnings posted for ${delivery.delivery_code}`))
             .catch(err => console.error(`❌ [DELIVERY] Earnings posting FAILED:`, err.message));
 
         await locationService.updateDriverStatus(driver.id, 'online', null);
@@ -939,7 +922,6 @@ exports.verifyPin = async (req, res) => {
             message:       'Your package has been delivered!',
         });
 
-        debugPrint(`✅ [DELIVERY] ${delivery.delivery_code} DELIVERED`);
         return res.json({
             success:      true,
             message:      'Delivery completed successfully',
@@ -953,16 +935,16 @@ exports.verifyPin = async (req, res) => {
         return res.status(500).json({ success: false, message: 'Failed to verify PIN' });
     }
 };
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 6. CONFIRM CASH PAYMENT (Driver)
-// POST /api/deliveries/:id/confirm-cash
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.confirmCash = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
-        const io          = _getIO(req);  // ✅
+        const io          = _getIO(req);
 
         const driver = await getDriverByAccountUuid(accountUuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
@@ -976,9 +958,7 @@ exports.confirmCash = async (req, res) => {
                 payment_status: 'cash_pending',
             },
         });
-        if (!delivery) {
-            return res.status(404).json({ success: false, message: 'Delivery not found or cash already confirmed' });
-        }
+        if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found or cash already confirmed' });
 
         await delivery.update({ payment_status: 'cash_confirmed', paid_at: new Date() });
 
@@ -999,14 +979,13 @@ exports.confirmCash = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 7. CANCEL DELIVERY
-// POST /api/deliveries/:id/cancel
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.cancelDelivery = async (req, res) => {
     try {
         const { reason } = req.body;
         const deliveryId = parseInt(req.params.id);
-        const io         = _getIO(req);  // ✅
+        const io         = _getIO(req);
 
         const isDriver = ['DRIVER', 'DELIVERY_AGENT'].includes(req.user.user_type);
         let delivery, driver;
@@ -1030,8 +1009,8 @@ exports.cancelDelivery = async (req, res) => {
 
         const cancelledBy = isDriver ? 'driver' : 'sender';
         await delivery.transitionTo('cancelled', {
-            cancelled_by:         cancelledBy,
-            cancellation_reason:  reason || null,
+            cancelled_by:        cancelledBy,
+            cancellation_reason: reason || null,
         });
 
         if (delivery.driver_id) {
@@ -1046,7 +1025,6 @@ exports.cancelDelivery = async (req, res) => {
             await locationService.updateDriverStatus(delivery.driver_id, 'online', null);
             await redisClient.del(`driver:active_delivery:${delivery.driver_id}`);
 
-            // Socket keyed by Account.uuid — need driver.userId
             const cancelledDriver = await Driver.findByPk(delivery.driver_id, { attributes: ['userId'] });
             if (cancelledDriver) {
                 const driverSocketId = await redisClient.get(REDIS_KEYS.USER_SOCKET(cancelledDriver.userId));
@@ -1073,6 +1051,39 @@ exports.cancelDelivery = async (req, res) => {
                 cancelledBy:  'driver',
                 message:      'The driver cancelled your delivery. Please rebook.',
             });
+
+            // ── 🔔 NOTIFICATION: Driver cancelled → sender ────────────────
+            getNotificationService().send({
+                accountUuid: delivery.sender_id,
+                type:        'DELIVERY_CANCELLED',
+                title:       'Delivery cancelled',
+                body:        'The driver cancelled your delivery. Please rebook.',
+                data: {
+                    screen:        'home',
+                    delivery_id:   String(deliveryId),
+                    delivery_code: delivery.delivery_code,
+                    cancelled_by:  'driver',
+                },
+            }).catch(e => console.warn('⚠️  [DELIVERY] Cancel push to sender failed:', e.message));
+        }
+
+        if (cancelledBy === 'sender' && delivery.driver_id) {
+            // ── 🔔 NOTIFICATION: Sender cancelled → agent ─────────────────
+            const cancelledDriver = await Driver.findByPk(delivery.driver_id, { attributes: ['userId'] });
+            if (cancelledDriver) {
+                getNotificationService().send({
+                    accountUuid: cancelledDriver.userId,
+                    type:        'DELIVERY_CANCELLED',
+                    title:       'Delivery cancelled',
+                    body:        'The sender cancelled this delivery.',
+                    data: {
+                        screen:        'home',
+                        delivery_id:   String(deliveryId),
+                        delivery_code: delivery.delivery_code,
+                        cancelled_by:  'sender',
+                    },
+                }).catch(e => console.warn('⚠️  [DELIVERY] Cancel push to driver failed:', e.message));
+            }
         }
 
         return res.json({ success: true, message: 'Delivery cancelled' });
@@ -1085,13 +1096,12 @@ exports.cancelDelivery = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 8. RATE DELIVERY (Sender)
-// POST /api/deliveries/:id/rate
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.rateDelivery = async (req, res) => {
     try {
-        const senderUuid         = req.user.uuid;
-        const deliveryId         = parseInt(req.params.id);
+        const senderUuid          = req.user.uuid;
+        const deliveryId          = parseInt(req.params.id);
         const { rating, comment } = req.body;
 
         if (!rating || rating < 1 || rating > 5) {
@@ -1110,17 +1120,13 @@ exports.rateDelivery = async (req, res) => {
             rated_at:       new Date(),
         });
 
-        // Recalculate driver average rating
         const driverDeliveries = await Delivery.findAll({
             where:      { driver_id: delivery.driver_id, rating: { [Op.not]: null } },
             attributes: ['rating'],
         });
         if (driverDeliveries.length > 0) {
             const avg = driverDeliveries.reduce((s, d) => s + parseFloat(d.rating), 0) / driverDeliveries.length;
-            await Driver.update(
-                { rating: parseFloat(avg.toFixed(2)) },
-                { where: { id: delivery.driver_id } },
-            );
+            await Driver.update({ rating: parseFloat(avg.toFixed(2)) }, { where: { id: delivery.driver_id } });
         }
 
         return res.json({ success: true, message: 'Rating submitted. Thank you!' });
@@ -1133,7 +1139,6 @@ exports.rateDelivery = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 9. GET DELIVERY DETAILS
-// GET /api/deliveries/:id
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getDelivery = async (req, res) => {
@@ -1156,9 +1161,7 @@ exports.getDelivery = async (req, res) => {
             const driver = await getDriverByAccountUuid(req.user.uuid);
             isAssignedDriver = driver && delivery.driver_id === driver.id;
         }
-        if (!isSender && !isAssignedDriver) {
-            return res.status(403).json({ success: false, message: 'Access denied' });
-        }
+        if (!isSender && !isAssignedDriver) return res.status(403).json({ success: false, message: 'Access denied' });
 
         const response         = delivery.toJSON();
         delete response.delivery_pin;
@@ -1177,7 +1180,6 @@ exports.getDelivery = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 10. GET MY DELIVERIES (Sender)
-// GET /api/deliveries/my
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getMyDeliveries = async (req, res) => {
@@ -1223,7 +1225,6 @@ exports.getMyDeliveries = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 11. GET DRIVER DELIVERIES
-// GET /api/deliveries/driver/history
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getDriverDeliveries = async (req, res) => {
@@ -1231,555 +1232,259 @@ exports.getDriverDeliveries = async (req, res) => {
         const { page = 1, limit = 10, status } = req.query;
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver record not found',
-            });
-        }
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
 
-        const where = { driver_id: driver.id };
+        const where    = { driver_id: driver.id };
         if (status) where.status = status;
 
-        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const pageNum  = Math.max(parseInt(page,  10) || 1,  1);
         const limitNum = Math.max(parseInt(limit, 10) || 10, 1);
 
         const { count, rows } = await Delivery.findAndCountAll({
             where,
             include: [
-                {
-                    association: 'sender',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                },
-                {
-                    association: 'pricingZone',
-                    attributes: ['id', 'zone_name'],
-                },
-                {
-                    association: 'surgeRule',
-                    attributes: ['id', 'name', 'multiplier'],
-                },
+                { association: 'sender',      attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'] },
+                { association: 'pricingZone', attributes: ['id', 'zone_name'] },
+                { association: 'surgeRule',   attributes: ['id', 'name', 'multiplier'] },
             ],
-            order: [['created_at', 'DESC']],
-            limit: limitNum,
+            order:  [['created_at', 'DESC']],
+            limit:  limitNum,
             offset: (pageNum - 1) * limitNum,
         });
 
         const deliveries = rows.map(d => ({
-            id: d.id,
+            id:           d.id,
             deliveryCode: d.delivery_code,
             deliveryType: d.delivery_type,
             trackingMode: trackingMode(d.delivery_type),
-            status: d.status,
-
-            pickup: {
-                address: d.pickup_address,
-                lat: parseFloat(d.pickup_latitude),
-                lng: parseFloat(d.pickup_longitude),
-                landmark: d.pickup_landmark,
-            },
-
-            dropoff: {
-                address: d.dropoff_address,
-                lat: parseFloat(d.dropoff_latitude),
-                lng: parseFloat(d.dropoff_longitude),
-                landmark: d.dropoff_landmark,
-            },
-
+            status:       d.status,
+            pickup:  { address: d.pickup_address,  lat: parseFloat(d.pickup_latitude),  lng: parseFloat(d.pickup_longitude),  landmark: d.pickup_landmark  },
+            dropoff: { address: d.dropoff_address, lat: parseFloat(d.dropoff_latitude), lng: parseFloat(d.dropoff_longitude), landmark: d.dropoff_landmark },
             package: {
-                size: d.package_size,
-                category: d.package_category,
+                size:          d.package_size,
+                category:      d.package_category,
                 categoryLabel: CATEGORY_META[d.package_category]?.label || 'Other',
                 categoryEmoji: CATEGORY_META[d.package_category]?.emoji || '📦',
-                description: d.package_description,
-                photoUrl: d.package_photo_url,
-                isFragile: d.is_fragile,
+                description:   d.package_description,
+                photoUrl:      d.package_photo_url,
+                isFragile:     d.is_fragile,
             },
-
-            recipient: {
-                name: d.recipient_name,
-                phone: d.recipient_phone,
-                note: d.recipient_note,
-            },
-
+            recipient: { name: d.recipient_name, phone: d.recipient_phone, note: d.recipient_note },
             sender: d.sender ? {
-                uuid: d.sender.uuid,
-                name: `${d.sender.first_name || ''} ${d.sender.last_name || ''}`.trim(),
-                phone: d.sender.phone_e164,
+                uuid:   d.sender.uuid,
+                name:   `${d.sender.first_name || ''} ${d.sender.last_name || ''}`.trim(),
+                phone:  d.sender.phone_e164,
                 avatar: d.sender.avatar_url,
             } : null,
-
             pricing: {
-                currency: 'XAF',
-                distanceKm: parseFloat(d.distance_km || 0),
-                baseFee: parseFloat(d.base_fee_applied || 0),
-                perKmRate: parseFloat(d.per_km_rate_applied || 0),
-                sizeMultiplier: parseFloat(d.size_multiplier_applied || 0),
-                surgeMultiplier: parseFloat(d.surge_multiplier_applied || 1),
-                subtotal: parseFloat(d.subtotal || 0),
-                totalPrice: parseFloat(d.total_price || 0),
+                currency:             'XAF',
+                distanceKm:           parseFloat(d.distance_km             || 0),
+                baseFee:              parseFloat(d.base_fee_applied         || 0),
+                perKmRate:            parseFloat(d.per_km_rate_applied      || 0),
+                sizeMultiplier:       parseFloat(d.size_multiplier_applied  || 0),
+                surgeMultiplier:      parseFloat(d.surge_multiplier_applied || 1),
+                subtotal:             parseFloat(d.subtotal                 || 0),
+                totalPrice:           parseFloat(d.total_price              || 0),
                 commissionPercentage: parseFloat(d.commission_percentage_applied || 0),
-                commissionAmount: parseFloat(d.commission_amount || 0),
-                driverPayout: parseFloat(d.driver_payout || 0),
+                commissionAmount:     parseFloat(d.commission_amount        || 0),
+                driverPayout:         parseFloat(d.driver_payout            || 0),
             },
-
-            payment: {
-                method: d.payment_method,
-                status: d.payment_status,
-                paidAt: d.paid_at,
-            },
-
+            payment:    { method: d.payment_method, status: d.payment_status, paidAt: d.paid_at },
             timestamps: {
-                createdAt: d.created_at,
-                updatedAt: d.updated_at,
-                acceptedAt: d.accepted_at,
-                pickedUpAt: d.picked_up_at,
-                deliveredAt: d.delivered_at,
-                cancelledAt: d.cancelled_at,
+                createdAt:   d.created_at,   updatedAt:   d.updated_at,
+                acceptedAt:  d.accepted_at,  pickedUpAt:  d.picked_up_at,
+                deliveredAt: d.delivered_at, cancelledAt: d.cancelled_at,
             },
-
-            pricingZone: d.pricingZone ? {
-                id: d.pricingZone.id,
-                name: d.pricingZone.zone_name,
-            } : null,
-
-            surgeRule: d.surgeRule ? {
-                id: d.surgeRule.id,
-                name: d.surgeRule.name,
-                multiplier: d.surgeRule.multiplier,
-            } : null,
+            pricingZone: d.pricingZone ? { id: d.pricingZone.id, name: d.pricingZone.zone_name } : null,
+            surgeRule:   d.surgeRule   ? { id: d.surgeRule.id,   name: d.surgeRule.name, multiplier: d.surgeRule.multiplier } : null,
         }));
 
         return res.json({
             success: true,
             deliveries,
-            pagination: {
-                total: count,
-                page: pageNum,
-                limit: limitNum,
-                totalPages: Math.ceil(count / limitNum),
-            },
+            pagination: { total: count, page: pageNum, limit: limitNum, totalPages: Math.ceil(count / limitNum) },
         });
 
     } catch (error) {
         console.error('❌ [DELIVERY] getDriverDeliveries error:', error.message);
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to get driver deliveries',
-        });
+        return res.status(500).json({ success: false, message: 'Failed to get driver deliveries' });
     }
 };
 
-
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // AGENT HISTORY HELPERS
-// Used by Flutter DeliveryHistoryScreen
 // ═══════════════════════════════════════════════════════════════════════════════
+
 function mapDeliveryForAgent(d) {
     const senderName = d.sender
         ? `${d.sender.first_name || ''} ${d.sender.last_name || ''}`.trim()
         : null;
 
-    const acceptedAt = d.accepted_at || null;
+    const acceptedAt  = d.accepted_at  || null;
     const deliveredAt = d.delivered_at || null;
-
     let durationMinutes = null;
     if (acceptedAt && deliveredAt) {
         durationMinutes = Math.round(
-            (new Date(deliveredAt).getTime() - new Date(acceptedAt).getTime()) / 60000
+            (new Date(deliveredAt).getTime() - new Date(acceptedAt).getTime()) / 60000,
         );
     }
 
     return {
-        id: d.id,
-        deliveryCode: d.delivery_code || '',
-        deliveryType: d.delivery_type || 'regular',
-        status: d.status || '',
-
-        packageSize: d.package_size || '',
+        id:              d.id,
+        deliveryCode:    d.delivery_code    || '',
+        deliveryType:    d.delivery_type    || 'regular',
+        status:          d.status           || '',
+        packageSize:     d.package_size     || '',
         packageCategory: d.package_category || '',
-        categoryLabel: CATEGORY_META[d.package_category]?.label || 'Other',
-        categoryEmoji: CATEGORY_META[d.package_category]?.emoji || '📦',
-
-        pickup: {
-            address: d.pickup_address || '',
-            lat: Number(d.pickup_latitude || 0),
-            lng: Number(d.pickup_longitude || 0),
-            landmark: d.pickup_landmark || null,
-        },
-
-        dropoff: {
-            address: d.dropoff_address || '',
-            lat: Number(d.dropoff_latitude || 0),
-            lng: Number(d.dropoff_longitude || 0),
-            landmark: d.dropoff_landmark || null,
-        },
-
-        distanceKm: Number(d.distance_km || 0),
-        totalPrice: Number(d.total_price || 0),
-        driverPayout: Number(d.driver_payout || 0),
+        categoryLabel:   CATEGORY_META[d.package_category]?.label || 'Other',
+        categoryEmoji:   CATEGORY_META[d.package_category]?.emoji || '📦',
+        pickup:  { address: d.pickup_address  || '', lat: Number(d.pickup_latitude  || 0), lng: Number(d.pickup_longitude || 0), landmark: d.pickup_landmark  || null },
+        dropoff: { address: d.dropoff_address || '', lat: Number(d.dropoff_latitude || 0), lng: Number(d.dropoff_longitude || 0), landmark: d.dropoff_landmark || null },
+        distanceKm:       Number(d.distance_km      || 0),
+        totalPrice:       Number(d.total_price       || 0),
+        driverPayout:     Number(d.driver_payout     || 0),
         commissionAmount: Number(d.commission_amount || 0),
-
-        paymentMethod: d.payment_method || 'unknown',
-        paymentStatus: d.payment_status || 'unknown',
-
-        isSurging: Number(d.surge_multiplier_applied || 1) > 1,
-
-        sender: d.sender ? {
-            uuid: d.sender.uuid,
-            name: senderName,
-            phone: d.sender.phone_e164 || null,
-            avatar: d.sender.avatar_url || null,
-        } : null,
-
+        paymentMethod:    d.payment_method || 'unknown',
+        paymentStatus:    d.payment_status || 'unknown',
+        isSurging:        Number(d.surge_multiplier_applied || 1) > 1,
+        sender: d.sender ? { uuid: d.sender.uuid, name: senderName, phone: d.sender.phone_e164 || null, avatar: d.sender.avatar_url || null } : null,
         senderName,
-
-        recipientName: d.recipient_name || '',
-        recipientPhone: d.recipient_phone || '',
-        recipientNote: d.recipient_note || '',
-
+        recipientName:      d.recipient_name   || '',
+        recipientPhone:     d.recipient_phone  || '',
+        recipientNote:      d.recipient_note   || '',
         durationMinutes,
-
-        createdAt: d.created_at || null,
-        acceptedAt: d.accepted_at || null,
-        arrivedPickupAt: d.arrived_pickup_at || null,
-        pickedUpAt: d.picked_up_at || null,
-        arrivedDropoffAt: d.arrived_dropoff_at || null,
-        deliveredAt: d.delivered_at || null,
-        cancelledAt: d.cancelled_at || null,
-
-        cancelledBy: d.cancelled_by || null,
+        createdAt:          d.created_at       || null,
+        acceptedAt:         d.accepted_at      || null,
+        arrivedPickupAt:    d.arrived_pickup_at  || null,
+        pickedUpAt:         d.picked_up_at     || null,
+        arrivedDropoffAt:   d.arrived_dropoff_at || null,
+        deliveredAt:        d.delivered_at     || null,
+        cancelledAt:        d.cancelled_at     || null,
+        cancelledBy:        d.cancelled_by     || null,
         cancellationReason: d.cancellation_reason || null,
     };
 }
 
 exports.getAgentDeliveryHistory = async (req, res) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📦 [AGENT-HISTORY] Request received');
-        console.log('   URL        :', req.originalUrl);
-        console.log('   user uuid  :', req.user?.uuid);
-        console.log('   user type  :', req.user?.user_type);
-        console.log('   activeMode :', req.auth?.active_mode || '(not set)');
-        console.log('   query      :', req.query);
-
-        const {
-            page = 1,
-            limit = 15,
-            status,
-            delivery_type,
-            payment_method,
-        } = req.query;
-
-        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const { page = 1, limit = 15, status, delivery_type, payment_method } = req.query;
+        const pageNum  = Math.max(parseInt(page,  10) || 1,  1);
         const limitNum = Math.max(parseInt(limit, 10) || 15, 1);
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
 
-        console.log('👤 [AGENT-HISTORY] Driver lookup result:');
-        console.log('   found      :', !!driver);
-
-        if (!driver) {
-            console.log('❌ [AGENT-HISTORY] No Driver row found for account uuid:', req.user.uuid);
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-            return res.status(404).json({
-                success: false,
-                message: 'Driver record not found',
-            });
-        }
-
-        console.log('   driver.id  :', driver.id);
-        console.log('   driver.uuid:', driver.userId);
-        console.log('   status     :', driver.status);
-        console.log('   mode       :', driver.current_mode);
-
-        const where = {
-            driver_id: driver.id,
-        };
-
-        if (status) where.status = status;
-        if (delivery_type) where.delivery_type = delivery_type;
+        const where = { driver_id: driver.id };
+        if (status)         where.status         = status;
+        if (delivery_type)  where.delivery_type  = delivery_type;
         if (payment_method) where.payment_method = payment_method;
-
-        console.log('🔎 [AGENT-HISTORY] Query params normalized:');
-        console.log('   page       :', pageNum);
-        console.log('   limit      :', limitNum);
-        console.log('   where      :', JSON.stringify(where));
 
         const { count, rows } = await Delivery.findAndCountAll({
             where,
-            include: [
-                {
-                    association: 'sender',
-                    attributes: [
-                        'uuid',
-                        'first_name',
-                        'last_name',
-                        'phone_e164',
-                        'avatar_url',
-                    ],
-                },
-            ],
-            order: [['created_at', 'DESC']],
-            limit: limitNum,
-            offset: (pageNum - 1) * limitNum,
+            include: [{ association: 'sender', attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'] }],
+            order:   [['created_at', 'DESC']],
+            limit:   limitNum,
+            offset:  (pageNum - 1) * limitNum,
         });
-
-        console.log('✅ [AGENT-HISTORY] DB result:');
-        console.log('   total count:', count);
-        console.log('   rows fetched:', rows.length);
-
-        rows.forEach((d, index) => {
-            console.log(`\n🧾 [AGENT-HISTORY] Raw row #${index + 1}`);
-            console.log('   id              :', d.id);
-            console.log('   code            :', d.delivery_code);
-            console.log('   status          :', d.status);
-            console.log('   delivery_type   :', d.delivery_type);
-            console.log('   distance_km     :', d.distance_km);
-            console.log('   total_price     :', d.total_price);
-            console.log('   driver_payout   :', d.driver_payout);
-            console.log('   commission      :', d.commission_amount);
-            console.log('   payment_method  :', d.payment_method);
-            console.log('   payment_status  :', d.payment_status);
-            console.log('   pickup_address  :', d.pickup_address);
-            console.log('   dropoff_address :', d.dropoff_address);
-            console.log('   created_at      :', d.created_at);
-            console.log('   delivered_at    :', d.delivered_at);
-        });
-
-        const deliveries = rows.map(mapDeliveryForAgent);
-
-        deliveries.forEach((d, index) => {
-            console.log(`\n📤 [AGENT-HISTORY] Mapped response #${index + 1}`);
-            console.log('   id              :', d.id);
-            console.log('   deliveryCode    :', d.deliveryCode);
-            console.log('   distanceKm      :', d.distanceKm);
-            console.log('   totalPrice      :', d.totalPrice);
-            console.log('   driverPayout    :', d.driverPayout);
-            console.log('   commissionAmount:', d.commissionAmount);
-            console.log('   paymentMethod   :', d.paymentMethod);
-            console.log('   paymentStatus   :', d.paymentStatus);
-            console.log('   pickup.address  :', d.pickup.address);
-            console.log('   dropoff.address :', d.dropoff.address);
-        });
-
-        console.log('📦 [AGENT-HISTORY] Response ready');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.json({
-            success: true,
-            deliveries,
-            pagination: {
-                total: count,
-                page: pageNum,
-                limit: limitNum,
-                totalPages: Math.ceil(count / limitNum),
-            },
+            success:    true,
+            deliveries: rows.map(mapDeliveryForAgent),
+            pagination: { total: count, page: pageNum, limit: limitNum, totalPages: Math.ceil(count / limitNum) },
         });
 
     } catch (error) {
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('❌ [AGENT-HISTORY] Error:', error.message);
-        console.error(error.stack);
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to get delivery history',
-        });
+        return res.status(500).json({ success: false, message: 'Failed to get delivery history' });
     }
 };
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET AGENT DELIVERY DETAIL
-// GET /api/deliveries/agent/history/:id
-// ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getAgentDeliveryDetail = async (req, res) => {
     try {
         const deliveryId = parseInt(req.params.id, 10);
-
-        const driver = await getDriverByAccountUuid(req.user.uuid);
-
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver record not found',
-            });
-        }
+        const driver     = await getDriverByAccountUuid(req.user.uuid);
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
 
         const delivery = await Delivery.findOne({
-            where: {
-                id: deliveryId,
-                driver_id: driver.id,
-            },
-            include: [
-                {
-                    association: 'sender',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                },
-            ],
+            where:   { id: deliveryId, driver_id: driver.id },
+            include: [{ association: 'sender', attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'] }],
         });
-
-        if (!delivery) {
-            return res.status(404).json({
-                success: false,
-                message: 'Delivery not found',
-            });
-        }
+        if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found' });
 
         const walletTransactions = await DeliveryWalletTransaction.findAll({
-            where: {
-                delivery_id: delivery.id,
-            },
+            where: { delivery_id: delivery.id },
             order: [['created_at', 'DESC']],
         });
 
         return res.json({
-            success: true,
-            delivery: {
-                ...mapDeliveryForAgent(delivery),
-                walletTransactions,
-            },
+            success:  true,
+            delivery: { ...mapDeliveryForAgent(delivery), walletTransactions },
         });
 
     } catch (error) {
         console.error('❌ [DELIVERY] getAgentDeliveryDetail error:', error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to get delivery detail',
-        });
+        return res.status(500).json({ success: false, message: 'Failed to get delivery detail' });
     }
 };
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET AGENT DELIVERY EARNINGS
-// GET /api/deliveries/agent/history/earnings
-// ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getAgentDeliveryEarnings = async (req, res) => {
     try {
         const driver = await getDriverByAccountUuid(req.user.uuid);
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
 
-        if (!driver) {
-            return res.status(404).json({
-                success: false,
-                message: 'Driver record not found',
-            });
-        }
-
-        const now = new Date();
-
-        const startOfToday = new Date(now);
-        startOfToday.setHours(0, 0, 0, 0);
-
-        const startOfWeek = new Date(now);
-        const day = startOfWeek.getDay() || 7;
-        startOfWeek.setDate(startOfWeek.getDate() - day + 1);
-        startOfWeek.setHours(0, 0, 0, 0);
-
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const now           = new Date();
+        const startOfToday  = new Date(now); startOfToday.setHours(0, 0, 0, 0);
+        const startOfWeek   = new Date(now);
+        const day           = startOfWeek.getDay() || 7;
+        startOfWeek.setDate(startOfWeek.getDate() - day + 1); startOfWeek.setHours(0, 0, 0, 0);
+        const startOfMonth  = new Date(now.getFullYear(), now.getMonth(), 1);
 
         async function periodStats(startDate = null) {
-            const where = {
-                driver_id: driver.id,
-                status: 'delivered',
-            };
-
-            if (startDate) {
-                where.delivered_at = {
-                    [Op.gte]: startDate,
-                };
-            }
-
+            const where = { driver_id: driver.id, status: 'delivered' };
+            if (startDate) where.delivered_at = { [Op.gte]: startDate };
             const deliveries = await Delivery.findAll({ where });
-
-            let totalEarnings = 0;
-            let cashCollected = 0;
-            let cashOwedToWego = 0;
-            let walletCredited = 0;
-            let expressCount = 0;
-            let regularCount = 0;
-
+            let totalEarnings = 0, cashCollected = 0, cashOwedToWego = 0, walletCredited = 0, expressCount = 0, regularCount = 0;
             for (const d of deliveries) {
-                const payout = parseFloat(d.driver_payout || 0);
-                const total = parseFloat(d.total_price || 0);
-                const commission = parseFloat(d.commission_amount || 0);
-
+                const payout = parseFloat(d.driver_payout || 0), total = parseFloat(d.total_price || 0), commission = parseFloat(d.commission_amount || 0);
                 totalEarnings += payout;
-
-                if (d.payment_method === 'cash') {
-                    cashCollected += total;
-                    cashOwedToWego += commission;
-                } else {
-                    walletCredited += payout;
-                }
-
-                if (d.delivery_type === 'express') {
-                    expressCount++;
-                } else {
-                    regularCount++;
-                }
+                if (d.payment_method === 'cash') { cashCollected += total; cashOwedToWego += commission; }
+                else walletCredited += payout;
+                if (d.delivery_type === 'express') expressCount++; else regularCount++;
             }
-
-            return {
-                deliveries: deliveries.length,
-                totalEarnings,
-                cashCollected,
-                cashOwedToWego,
-                walletCredited,
-                expressCount,
-                regularCount,
-            };
+            return { deliveries: deliveries.length, totalEarnings, cashCollected, cashOwedToWego, walletCredited, expressCount, regularCount };
         }
 
         return res.json({
             success: true,
             earnings: {
-                today: await periodStats(startOfToday),
-                week: await periodStats(startOfWeek),
-                month: await periodStats(startOfMonth),
+                today:   await periodStats(startOfToday),
+                week:    await periodStats(startOfWeek),
+                month:   await periodStats(startOfMonth),
                 allTime: await periodStats(null),
             },
         });
 
     } catch (error) {
         console.error('❌ [DELIVERY] getAgentDeliveryEarnings error:', error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to get earnings',
-        });
+        return res.status(500).json({ success: false, message: 'Failed to get earnings' });
     }
 };
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // 12. TOGGLE DRIVER MODE
-// POST /api/deliveries/driver/mode
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.toggleDriverMode = async (req, res) => {
     try {
         const { mode } = req.body;
-        if (!['ride', 'delivery'].includes(mode)) {
-            return res.status(400).json({ success: false, message: 'mode must be "ride" or "delivery"' });
-        }
+        if (!['ride', 'delivery'].includes(mode)) return res.status(400).json({ success: false, message: 'mode must be "ride" or "delivery"' });
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
-        if (driver.status === 'busy') {
-            return res.status(400).json({ success: false, message: 'Cannot switch mode during an active trip or delivery' });
-        }
-        if (req.user.user_type === 'DELIVERY_AGENT' && mode === 'ride') {
-            return res.status(403).json({ success: false, message: 'Delivery agents cannot switch to ride mode' });
-        }
+        if (driver.status === 'busy') return res.status(400).json({ success: false, message: 'Cannot switch mode during an active trip or delivery' });
+        if (req.user.user_type === 'DELIVERY_AGENT' && mode === 'ride') return res.status(403).json({ success: false, message: 'Delivery agents cannot switch to ride mode' });
 
         await Driver.update({ current_mode: mode }, { where: { id: driver.id } });
-        debugPrint(`🔄 [DRIVER] ${req.user.uuid} switched to ${mode} mode`);
-
         return res.json({ success: true, message: `Switched to ${mode} mode`, currentMode: mode });
 
     } catch (error) {
@@ -1790,7 +1495,6 @@ exports.toggleDriverMode = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 13. GET WALLET BALANCE
-// GET /api/deliveries/driver/wallet
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getWallet = async (req, res) => {
@@ -1804,19 +1508,11 @@ exports.getWallet = async (req, res) => {
             return res.json({
                 success: true,
                 wallet: {
-                    exists:                false,
-                    balance:               0,
-                    availableBalance:      0,
-                    reservedBalance:       0,
-                    totalEarned:           0,
-                    totalToppedUp:         0,
-                    totalCashCollected:    0,
-                    outstandingCommission: 0,
-                    totalWithdrawn:        0,
-                    pendingWithdrawal:     0,
-                    status:                'active',
-                    canAcceptJobs:         false,
-                    message:               'Top up your wallet to start accepting deliveries',
+                    exists: false, balance: 0, availableBalance: 0, reservedBalance: 0,
+                    totalEarned: 0, totalToppedUp: 0, totalCashCollected: 0,
+                    outstandingCommission: 0, totalWithdrawn: 0, pendingWithdrawal: 0,
+                    status: 'active', canAcceptJobs: false,
+                    message: 'Top up your wallet to start accepting deliveries',
                 },
             });
         }
@@ -1851,19 +1547,13 @@ exports.getWallet = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 14. REQUEST CASHOUT
-// POST /api/deliveries/driver/cashout
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.requestCashout = async (req, res) => {
     try {
         const { amount, payment_method, phone_number, notes } = req.body;
-
-        if (!amount || !payment_method || !phone_number) {
-            return res.status(400).json({ success: false, message: 'amount, payment_method, and phone_number are required' });
-        }
-        if (!['mtn_mobile_money', 'orange_money'].includes(payment_method)) {
-            return res.status(400).json({ success: false, message: 'payment_method must be mtn_mobile_money or orange_money' });
-        }
+        if (!amount || !payment_method || !phone_number) return res.status(400).json({ success: false, message: 'amount, payment_method, and phone_number are required' });
+        if (!['mtn_mobile_money', 'orange_money'].includes(payment_method)) return res.status(400).json({ success: false, message: 'payment_method must be mtn_mobile_money or orange_money' });
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
@@ -1875,15 +1565,7 @@ exports.requestCashout = async (req, res) => {
         return res.status(201).json({
             success: true,
             message: 'Cashout request submitted. Admin will process it shortly.',
-            request: {
-                id:            request.id,
-                payoutCode:    request.payout_code,
-                amount:        request.amount,
-                paymentMethod: request.payment_method,
-                phoneNumber:   request.phone_number,
-                status:        request.status,
-                createdAt:     request.created_at,
-            },
+            request: { id: request.id, payoutCode: request.payout_code, amount: request.amount, paymentMethod: request.payment_method, phoneNumber: request.phone_number, status: request.status, createdAt: request.created_at },
         });
 
     } catch (error) {
@@ -1894,17 +1576,14 @@ exports.requestCashout = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 15. CANCEL CASHOUT REQUEST
-// POST /api/deliveries/driver/cashout/:requestId/cancel
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.cancelCashout = async (req, res) => {
     try {
         const driver = await getDriverByAccountUuid(req.user.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
-
         await deliveryEarningsService.cancelCashout(driver.id, parseInt(req.params.requestId));
         return res.json({ success: true, message: 'Cashout request cancelled' });
-
     } catch (error) {
         console.error('❌ [DELIVERY] cancelCashout error:', error.message);
         return res.status(400).json({ success: false, message: error.message });
@@ -1913,7 +1592,6 @@ exports.cancelCashout = async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 16. GET WALLET TRANSACTIONS
-// GET /api/deliveries/driver/wallet/transactions
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.getWalletTransactions = async (req, res) => {
@@ -1925,11 +1603,7 @@ exports.getWalletTransactions = async (req, res) => {
 
         const wallet = await DeliveryWallet.findOne({ where: { driver_id: driver.id } });
         if (!wallet) {
-            return res.json({
-                success:      true,
-                transactions: [],
-                pagination:   { total: 0, page: 1, limit: parseInt(limit), totalPages: 0 },
-            });
+            return res.json({ success: true, transactions: [], pagination: { total: 0, page: 1, limit: parseInt(limit), totalPages: 0 } });
         }
 
         const { count, rows } = await DeliveryWalletTransaction.findAndCountAll({
@@ -1942,12 +1616,7 @@ exports.getWalletTransactions = async (req, res) => {
         return res.json({
             success:      true,
             transactions: rows,
-            pagination: {
-                total:      count,
-                page:       parseInt(page),
-                limit:      parseInt(limit),
-                totalPages: Math.ceil(count / parseInt(limit)),
-            },
+            pagination:   { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / parseInt(limit)) },
         });
 
     } catch (error) {

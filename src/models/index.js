@@ -20,6 +20,7 @@ const SupportTicket    = require('./SupportTicket');
 // ─── Factory-pattern models (called before any associations) ──────────────────
 const Employee     = require('./Employee')(sequelize);
 const RefreshToken = require('./RefreshToken')(sequelize);
+const WegoPayment  = require('./WegoPayment')(sequelize);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — TRIP / RIDE
@@ -52,11 +53,18 @@ const IdempotencyKey = require('./IdempotencyKey');
 // MODEL IMPORTS — SERVICES MARKETPLACE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const ServiceCategory = require('./ServiceCategory');
-const ServiceListing  = require('./ServiceListing');
-const ServiceRequest  = require('./ServiceRequest');
-const ServiceRating   = require('./ServiceRating');
-const ServiceDispute  = require('./ServiceDispute');
+const ServiceCategory    = require('./ServiceCategory');
+const ServiceListing     = require('./ServiceListing');
+const ServiceRequest     = require('./ServiceRequest');
+const ServiceRating      = require('./ServiceRating');
+const ServiceDispute     = require('./ServiceDispute');
+const BroadcastMessage = require('./BroadcastMessage');
+const Notification     = require('./Notification');
+const DeviceToken      = require('./DeviceToken');
+
+// ── New ad plan models (factory pattern — same as Delivery models) ─────────
+const ServiceListingPlan = require('./ServiceListingPlan')(sequelize);
+const ServiceAdPayment   = require('./ServiceAdPayment')(sequelize);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — EARNINGS ENGINE
@@ -93,17 +101,17 @@ const DeliveryWalletTopUp       = require('./DeliveryWalletTopUp')(sequelize);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VALIDATION — catch undefined models BEFORE associations run
-// If any model is undefined here, it means its require() failed silently due
-// to a circular dependency. The log below will identify the exact culprit.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const _allModels = {
     Account, PassengerProfile, DriverProfile, VerificationCode, DriverDocument,
     PendingSignup, PartnerProfile, Coupon, SupportTicket, Employee, RefreshToken,
+    WegoPayment,
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
     PriceRule, IdempotencyKey,
     ServiceCategory, ServiceListing, ServiceRequest, ServiceRating, ServiceDispute,
+    ServiceListingPlan, ServiceAdPayment,
     TripReceipt, DriverWallet, DriverWalletTransaction, EarningRule, BonusProgram, BonusAward,
     DailyBalanceSheet, PayoutRequest, DebtPayment,
     DeliveryPricing, DeliverySurgeRule, Delivery, DeliveryTracking, DeliveryDispute,
@@ -250,8 +258,7 @@ if (Driver) {
     Driver.belongsTo(Account, { foreignKey: 'userId', targetKey: 'uuid', as: 'account' });
     Account.hasMany(Driver,   { foreignKey: 'userId', sourceKey: 'uuid', as: 'driverRecords' });
 
-    // ← AJOUTER CES DEUX LIGNES
-    Account.hasOne(Driver, { foreignKey: 'userId', sourceKey: 'uuid', as: 'driver_record' });
+    Account.hasOne(Driver,        { foreignKey: 'userId', sourceKey: 'uuid', as: 'driver_record' });
     Driver.hasOne(DeliveryWallet, { foreignKey: 'driver_id', as: 'delivery_wallet' });
 }
 
@@ -272,7 +279,7 @@ VehicleRental.belongsTo(Account, { foreignKey: 'approvedByAdminId',   as: 'appro
 Account.hasMany(VehicleRental,   { foreignKey: 'approvedByAdminId',   sourceKey: 'uuid',        as: 'approvedRentals' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ASSOCIATIONS — PAYMENT
+// ASSOCIATIONS — PAYMENT (legacy trip-only)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 Payment.belongsTo(Account, { foreignKey: 'passengerId', as: 'passenger', targetKey: 'uuid' });
@@ -286,6 +293,14 @@ Employee.hasMany(Vehicle,   { foreignKey: 'postedByEmployeeId',   as: 'postedVeh
 
 Vehicle.belongsTo(Employee, { foreignKey: 'verifiedByEmployeeId', as: 'verifiedByEmployee' });
 Employee.hasMany(Vehicle,   { foreignKey: 'verifiedByEmployeeId', as: 'verifiedVehicles' });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASSOCIATIONS — WEGO PAYMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+WegoPayment.associate({
+    Account,
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — SERVICES MARKETPLACE
@@ -311,6 +326,77 @@ Employee.hasMany(ServiceListing,   { foreignKey: 'approved_by', as: 'approvedSer
 
 ServiceListing.belongsTo(Employee, { foreignKey: 'rejected_by', as: 'rejecter' });
 Employee.hasMany(ServiceListing,   { foreignKey: 'rejected_by', as: 'rejectedServiceListings' });
+
+// ── ServiceListingPlan ────────────────────────────────────────────────────────
+
+ServiceListingPlan.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator', constraints: false });
+Employee.hasMany(ServiceListingPlan,   { foreignKey: 'created_by', as: 'createdServicePlans' });
+
+ServiceListingPlan.belongsTo(Employee, { foreignKey: 'updated_by', as: 'updater', constraints: false });
+Employee.hasMany(ServiceListingPlan,   { foreignKey: 'updated_by', as: 'updatedServicePlans' });
+
+ServiceListingPlan.hasMany(ServiceAdPayment, { foreignKey: 'plan_id', as: 'adPayments' });
+ServiceAdPayment.belongsTo(ServiceListingPlan, { foreignKey: 'plan_id', as: 'plan' });
+
+// ── ServiceAdPayment ──────────────────────────────────────────────────────────
+
+ServiceAdPayment.belongsTo(ServiceListing, {
+    foreignKey: 'listing_id',
+    as:         'listing',
+    constraints: false,
+});
+ServiceListing.hasMany(ServiceAdPayment, {
+    foreignKey: 'listing_id',
+    as:         'adPayments',
+});
+
+// Active plan convenience (scoped hasOne — latest active)
+ServiceListing.hasOne(ServiceAdPayment, {
+    foreignKey: 'listing_id',
+    as:         'activePlan',
+    scope:      { status: 'active' },
+});
+
+ServiceListing.belongsTo(ServiceListingPlan, {
+    foreignKey:  'current_plan_id',
+    as:          'currentPlan',
+    constraints: false,
+});
+ServiceListingPlan.hasMany(ServiceListing, {
+    foreignKey: 'current_plan_id',
+    as:         'activeListings',
+});
+
+ServiceAdPayment.belongsTo(Account, {
+    foreignKey:  'paid_by',
+    targetKey:   'uuid',
+    as:          'payer',
+    constraints: false,
+});
+Account.hasMany(ServiceAdPayment, {
+    foreignKey: 'paid_by',
+    sourceKey:  'uuid',
+    as:         'adPayments',
+});
+
+ServiceAdPayment.belongsTo(WegoPayment, {
+    foreignKey:  'wego_payment_id',
+    targetKey:   'id',
+    as:          'wegoPayment',
+    constraints: false,
+});
+
+ServiceAdPayment.belongsTo(Employee, {
+    foreignKey:  'hero_reviewed_by',
+    as:          'heroReviewer',
+    constraints: false,
+});
+Employee.hasMany(ServiceAdPayment, {
+    foreignKey: 'hero_reviewed_by',
+    as:         'reviewedHeroPlacements',
+});
+
+// ── Service request / rating / dispute (unchanged) ────────────────────────────
 
 ServiceListing.hasMany(ServiceRequest,   { foreignKey: 'listing_id', as: 'requests' });
 ServiceRequest.belongsTo(ServiceListing, { foreignKey: 'listing_id', as: 'listing' });
@@ -465,10 +551,7 @@ Employee.hasMany(DebtPayment,   { foreignKey: 'rejectedBy', as: 'rejectedDebtPay
 //
 // ⚠️  RULE: Never define a delivery association directly in this file.
 //     Each model's associate() is the single source of truth.
-//     Defining the same association twice with the same alias causes the
-//     "Account.hasOne called with something that's not a subclass of
-//     Sequelize.Model" startup crash.
-//
+
 const deliveryModels = {
     Account,
     Driver,
@@ -490,7 +573,7 @@ DeliverySurgeRule.associate(deliveryModels);
 Delivery.associate(deliveryModels);
 DeliveryTracking.associate(deliveryModels);
 DeliveryDispute.associate(deliveryModels);
-DeliveryWallet.associate(deliveryModels);            // ← does hasMany(topUps) internally — do NOT repeat here
+DeliveryWallet.associate(deliveryModels);
 DeliveryWalletTransaction.associate(deliveryModels);
 DeliveryPayoutRequest.associate(deliveryModels);
 DeliveryWalletTopUp.associate(deliveryModels);
@@ -542,6 +625,8 @@ module.exports = {
     ServiceRequest,
     ServiceRating,
     ServiceDispute,
+    ServiceListingPlan,
+    ServiceAdPayment,
 
     // ── Driver ───────────────────────────────────────────────────────────────
     Driver,
@@ -571,4 +656,7 @@ module.exports = {
     DeliveryWalletTopUp,
     DeliveryPayoutRequest,
     DeliveryCategory,
+
+    // ── CamPay payments ──────────────────────────────────────────────────────
+    WegoPayment,
 };

@@ -1,23 +1,227 @@
 // src/services/auth.services.js
-const { v4: uuidv4 } = require("uuid");
-const bcrypt = require("bcrypt");
-const { sequelize, PendingSignup } = require("../models");
-const { issueOtp } = require("./otp.service");
-const { sendWelcomeEmail } = require("./comm/email.service");
-const { deleteFromR2 } = require("../utils/r2Upload");
+'use strict';
 
-const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || "12", 10);
+const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcrypt');
 
-/**
- * ==========================================================
- * 🧍 REGISTER PASSENGER - STORE IN PENDING_SIGNUPS
- * ==========================================================
- */
+const {
+    PendingSignup,
+    VerificationCode,
+    Account,
+    DriverProfile,
+} = require('../models');
+
+const { issueOtp } = require('./otp.service');
+const { deleteFromR2 } = require('../utils/r2Upload');
+
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
+const SIGNUP_EXPIRY_MINUTES = parseInt(process.env.SIGNUP_EXPIRY_MINUTES || '30', 10);
+
+// ═══════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+function makeError(message, status = 400, code = 'BAD_REQUEST') {
+    const err = new Error(message);
+    err.status = status;
+    err.code = code;
+    return err;
+}
+
+async function cleanupUploadedFiles(uploadedFiles = []) {
+    if (!uploadedFiles.length) return;
+
+    console.log('🗑️ [CLEANUP] Deleting uploaded files from R2...');
+
+    for (const fileUrl of uploadedFiles) {
+        try {
+            await deleteFromR2(fileUrl);
+            console.log(`   ✅ Deleted: ${fileUrl}`);
+        } catch (deleteErr) {
+            console.warn(`   ⚠️ Failed to delete ${fileUrl}: ${deleteErr.message}`);
+        }
+    }
+}
+
+async function cleanupPendingSignup(uuid) {
+    if (!uuid) return;
+
+    console.log('🗑️ [CLEANUP] Removing pending signup and OTP records...');
+    console.log('   UUID:', uuid);
+
+    try {
+        await VerificationCode.destroy({
+            where: {
+                account_uuid: uuid,
+            },
+        });
+
+        await PendingSignup.destroy({
+            where: {
+                uuid,
+            },
+        });
+
+        console.log('✅ [CLEANUP] Pending signup and OTP records removed');
+    } catch (err) {
+        console.warn('⚠️ [CLEANUP] Failed to cleanup pending signup:', err.message);
+    }
+}
+
+function assertOtpWasSent(result, channel) {
+    if (!result || result.delivery !== 'SENT') {
+        throw makeError(
+            `Failed to send OTP via ${channel}. Please try again.`,
+            503,
+            channel === 'EMAIL' ? 'EMAIL_SEND_FAILED' : 'SMS_SEND_FAILED'
+        );
+    }
+}
+
+async function sendBothSignupOtps({ uuid, email, phone_e164 }) {
+    console.log('📨 [OTP] Sending verification codes via BOTH EMAIL and SMS...');
+    console.log('   Email:', email);
+    console.log('   Phone:', phone_e164);
+
+    if (!email) {
+        throw makeError(
+            'Email is required because registration sends an email OTP.',
+            400,
+            'MISSING_EMAIL'
+        );
+    }
+
+    if (!phone_e164) {
+        throw makeError(
+            'Phone number is required because registration sends an SMS OTP.',
+            400,
+            'MISSING_PHONE'
+        );
+    }
+
+    const otpDelivery = {};
+
+    // EMAIL OTP
+    console.log(`📧 [OTP] Issuing EMAIL OTP to ${email}...`);
+
+    const emailOtp = await issueOtp(
+        {
+            accountUuid: uuid,
+            purpose: 'EMAIL_VERIFY',
+            channel: 'EMAIL',
+            target: email,
+        },
+        null
+    );
+
+    assertOtpWasSent(emailOtp, 'EMAIL');
+
+    otpDelivery.email = {
+        delivery: emailOtp.delivery,
+        channel: emailOtp.channel,
+        target: emailOtp.target,
+    };
+
+    console.log(`✅ [OTP EMAIL] Sent → ${emailOtp.target}`);
+
+    // SMS OTP
+    console.log(`📱 [OTP] Issuing SMS OTP to ${phone_e164}...`);
+
+    const smsOtp = await issueOtp(
+        {
+            accountUuid: uuid,
+            purpose: 'PHONE_VERIFY',
+            channel: 'SMS',
+            target: phone_e164,
+        },
+        null
+    );
+
+    assertOtpWasSent(smsOtp, 'SMS');
+
+    otpDelivery.phone = {
+        delivery: smsOtp.delivery,
+        channel: smsOtp.channel,
+        target: smsOtp.target,
+    };
+
+    console.log(`✅ [OTP SMS] Sent → ${smsOtp.target}`);
+    console.log('✅ [OTP] Both EMAIL and SMS OTPs sent successfully');
+
+    return otpDelivery;
+}
+
+async function ensureNoDuplicateAccount({ email, phone_e164 }) {
+    if (email) {
+        console.log(`🔍 [DUPLICATE CHECK] Checking email: ${email}`);
+
+        const existingEmail = await Account.findOne({
+            where: {
+                email,
+            },
+        });
+
+        if (existingEmail) {
+            throw makeError('Email already registered', 409, 'EMAIL_ALREADY_EXISTS');
+        }
+
+        console.log('✅ [DUPLICATE CHECK] Email is available');
+    }
+
+    if (phone_e164) {
+        console.log(`🔍 [DUPLICATE CHECK] Checking phone: ${phone_e164}`);
+
+        const existingPhone = await Account.findOne({
+            where: {
+                phone_e164,
+            },
+        });
+
+        if (existingPhone) {
+            throw makeError('Phone number already registered', 409, 'PHONE_ALREADY_EXISTS');
+        }
+
+        console.log('✅ [DUPLICATE CHECK] Phone is available');
+    }
+}
+
+async function ensureNoDuplicatePendingSignup({ email, phone_e164 }) {
+    if (email) {
+        const pendingEmail = await PendingSignup.findOne({
+            where: {
+                email,
+            },
+        });
+
+        if (pendingEmail) {
+            console.log('⚠️ [PENDING SIGNUP] Existing pending signup with same email found. Removing old pending signup.');
+            await cleanupPendingSignup(pendingEmail.uuid);
+        }
+    }
+
+    if (phone_e164) {
+        const pendingPhone = await PendingSignup.findOne({
+            where: {
+                phone_e164,
+            },
+        });
+
+        if (pendingPhone) {
+            console.log('⚠️ [PENDING SIGNUP] Existing pending signup with same phone found. Removing old pending signup.');
+            await cleanupPendingSignup(pendingPhone.uuid);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// REGISTER PASSENGER - STORE IN PENDING_SIGNUPS
+// ═══════════════════════════════════════════════════════════════
+
 async function signupPassenger(data) {
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("🚖 [SIGNUP PASSENGER] Starting registration process...");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("🧾 Payload:", JSON.stringify(data, null, 2));
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚖 [SIGNUP PASSENGER] Starting registration process...');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🧾 Payload:', JSON.stringify(data, null, 2));
 
     const {
         email,
@@ -28,177 +232,105 @@ async function signupPassenger(data) {
         last_name,
         birth_date,
         avatar_url,
+        address_text,
+        notes,
     } = data;
 
-    let uploadedFiles = [];
+    const uploadedFiles = [];
+    let uuid = null;
 
     try {
-        // ✅ Step 1: Validate input
-        if (!email && !phone_e164) {
-            console.log("❌ [VALIDATION] Either email or phone is required");
-            const err = new Error("Either email or phone number is required.");
-            err.status = 400;
-            err.code = 'MISSING_CONTACT_INFO';
-            throw err;
+        if (!email) {
+            throw makeError(
+                'Email is required because registration sends an email OTP.',
+                400,
+                'MISSING_EMAIL'
+            );
+        }
+
+        if (!phone_e164) {
+            throw makeError(
+                'Phone number is required because registration sends an SMS OTP.',
+                400,
+                'MISSING_PHONE'
+            );
         }
 
         if (!password) {
-            console.log("❌ [VALIDATION] Password is required");
-            const err = new Error("Password is required.");
-            err.status = 400;
-            err.code = 'MISSING_PASSWORD';
-            throw err;
+            throw makeError('Password is required.', 400, 'MISSING_PASSWORD');
         }
 
         if (!first_name || !last_name) {
-            console.log("❌ [VALIDATION] First and last name are required");
-            const err = new Error("First name and last name are required.");
-            err.status = 400;
-            err.code = 'MISSING_NAME';
-            throw err;
+            throw makeError('First name and last name are required.', 400, 'MISSING_NAME');
         }
 
         if (avatar_url) {
             uploadedFiles.push(avatar_url);
         }
 
-        // ✅ Step 2: Check duplicates in active accounts
-        const { Account } = require("../models");
+        await ensureNoDuplicateAccount({
+            email,
+            phone_e164,
+        });
 
-        if (email) {
-            console.log(`🔍 [DUPLICATE CHECK] Checking email: ${email}`);
-            const existingEmail = await Account.findOne({ where: { email } });
-            if (existingEmail) {
-                const err = new Error("Email already registered");
-                err.status = 409;
-                err.code = 'EMAIL_ALREADY_EXISTS';
-                throw err;
-            }
-            console.log("✅ [DUPLICATE CHECK] Email is available");
-        }
+        await ensureNoDuplicatePendingSignup({
+            email,
+            phone_e164,
+        });
 
-        if (phone_e164) {
-            console.log(`🔍 [DUPLICATE CHECK] Checking phone: ${phone_e164}`);
-            const existingPhone = await Account.findOne({ where: { phone_e164 } });
-            if (existingPhone) {
-                const err = new Error("Phone number already registered");
-                err.status = 409;
-                err.code = 'PHONE_ALREADY_EXISTS';
-                throw err;
-            }
-            console.log("✅ [DUPLICATE CHECK] Phone is available");
-        }
-
-        // ✅ Step 3: Hash password
-        console.log("🔐 [SECURITY] Hashing password...");
+        console.log('🔐 [SECURITY] Hashing password...');
         const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-        console.log("✅ [SECURITY] Password hashed successfully.");
+        console.log('✅ [SECURITY] Password hashed successfully.');
 
-        // ✅ Step 4: Generate UUID
-        const uuid = uuidv4();
+        uuid = uuidv4();
+        const expires_at = new Date(Date.now() + SIGNUP_EXPIRY_MINUTES * 60 * 1000);
+
         console.log(`🆔 [UUID] Generated UUID: ${uuid}`);
-
-        // ✅ Step 5: Calculate expiry (30 minutes)
-        const expires_at = new Date(Date.now() + 30 * 60 * 1000);
         console.log(`⏰ [EXPIRY] Signup will expire at: ${expires_at.toISOString()}`);
 
-        // ✅ Step 6: Store in pending_signups
-        console.log("💾 [PENDING SIGNUP] Creating pending signup record...");
+        console.log('💾 [PENDING SIGNUP] Creating pending signup record...');
 
         await PendingSignup.create({
             uuid,
-            user_type: "PASSENGER",
-            email: email || null,
-            phone_e164: phone_e164 || null,
+            user_type: 'PASSENGER',
+            email,
+            phone_e164,
             civility: civility || null,
             first_name,
             last_name,
             birth_date: birth_date || null,
             password_hash,
             avatar_url: avatar_url || null,
+            address_text: address_text || null,
+            notes: notes || null,
             otp_sent_at: new Date(),
             expires_at,
         });
 
         console.log(`✅ [PENDING SIGNUP] Record created with UUID: ${uuid}`);
 
-        // ✅ Step 7: Send OTP via ONE channel only
-        // ─────────────────────────────────────────────────────────
-        // IMPORTANT: We issue only ONE OTP to ONE channel.
-        // Priority: SMS (phone) first, EMAIL as fallback.
-        // This prevents the bug where two different OTP codes are
-        // generated and the user submits the wrong one.
-        // ─────────────────────────────────────────────────────────
-        console.log("📨 [OTP] Sending verification code via single channel...");
+        const otpDelivery = await sendBothSignupOtps({
+            uuid,
+            email,
+            phone_e164,
+        });
 
-        const otpDelivery = {};
-
-        if (phone_e164) {
-            // ── PREFERRED: SMS ────────────────────────────────────
-            console.log(`📱 [OTP] Issuing SMS OTP to ${phone_e164}...`);
-            try {
-                const phoneOtp = await issueOtp(
-                    {
-                        accountUuid: uuid,
-                        purpose: "PHONE_VERIFY",
-                        channel: "SMS",
-                        target: phone_e164,
-                    },
-                    null
-                );
-                otpDelivery.phone = {
-                    delivery: phoneOtp.delivery,
-                    target: phoneOtp.target,
-                };
-                console.log(`✅ [OTP SMS] Sent → ${phoneOtp.target} (delivery: ${phoneOtp.delivery})`);
-            } catch (err) {
-                console.error("❌ [OTP SMS FAILED]:", err.message);
-                await PendingSignup.destroy({ where: { uuid } });
-                throw err;
-            }
-
-        } else if (email) {
-            // ── FALLBACK: EMAIL (only when no phone provided) ─────
-            console.log(`📧 [OTP] Issuing EMAIL OTP to ${email}...`);
-            try {
-                const emailOtp = await issueOtp(
-                    {
-                        accountUuid: uuid,
-                        purpose: "EMAIL_VERIFY",
-                        channel: "EMAIL",
-                        target: email,
-                    },
-                    null
-                );
-                otpDelivery.email = {
-                    delivery: emailOtp.delivery,
-                    target: emailOtp.target,
-                };
-                console.log(`✅ [OTP EMAIL] Sent → ${emailOtp.target} (delivery: ${emailOtp.delivery})`);
-            } catch (err) {
-                console.error("❌ [OTP EMAIL FAILED]:", err.message);
-                await PendingSignup.destroy({ where: { uuid } });
-                throw err;
-            }
-        }
-
-        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        console.log("🎉 [SIGNUP PASSENGER] Pending signup created successfully!");
-        console.log("🆔 Signup UUID:", uuid);
-        console.log("👤 Name:", `${first_name} ${last_name}`);
-        console.log("📧 Email:", email || "N/A");
-        console.log("📱 Phone:", phone_e164 || "N/A");
-        console.log("🖼️  Avatar:", avatar_url || "No avatar");
-        console.log("📨 OTP Delivery:", otpDelivery);
-        console.log("   Channel used:", phone_e164 ? "SMS" : "EMAIL");
-        console.log("⏰ Expires at:", expires_at.toISOString());
-        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🎉 [SIGNUP PASSENGER] Pending signup created successfully!');
+        console.log('🆔 Signup UUID:', uuid);
+        console.log('👤 Name:', `${first_name} ${last_name}`);
+        console.log('📧 Email:', email);
+        console.log('📱 Phone:', phone_e164);
+        console.log('🖼️ Avatar:', avatar_url || 'No avatar');
+        console.log('📨 OTP Delivery:', otpDelivery);
+        console.log('⏰ Expires at:', expires_at.toISOString());
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return {
             uuid,
-            user_type: "PASSENGER",
-            email: email || null,
-            phone_e164: phone_e164 || null,
+            user_type: 'PASSENGER',
+            email,
+            phone_e164,
             first_name,
             last_name,
             avatar_url: avatar_url || null,
@@ -206,37 +338,29 @@ async function signupPassenger(data) {
         };
 
     } catch (err) {
-        console.error("💥 [PENDING SIGNUP FAILED]:", err.message);
-        console.error("💥 [ERROR DETAILS]:", err);
+        console.error('💥 [PASSENGER SIGNUP FAILED]:', err.message);
+        console.error('💥 [ERROR DETAILS]:', err);
 
-        if (uploadedFiles.length > 0) {
-            console.log('🗑️  [CLEANUP] Deleting uploaded files from R2...');
-            for (const fileUrl of uploadedFiles) {
-                try {
-                    await deleteFromR2(fileUrl);
-                    console.log(`   ✅ Deleted: ${fileUrl}`);
-                } catch (deleteErr) {
-                    console.warn(`   ⚠️  Failed to delete ${fileUrl}: ${deleteErr.message}`);
-                }
-            }
-        }
+        await cleanupPendingSignup(uuid);
+        await cleanupUploadedFiles(uploadedFiles);
 
         if (!err.code) {
-            err.code = 'SIGNUP_FAILED';
+            err.code = 'PASSENGER_SIGNUP_FAILED';
         }
+
         throw err;
     }
 }
 
-/**
- * ==========================================================
- * 🚗 REGISTER DRIVER - STORE IN PENDING_SIGNUPS
- * ==========================================================
- */
+// ═══════════════════════════════════════════════════════════════
+// REGISTER DRIVER - STORE IN PENDING_SIGNUPS
+// ═══════════════════════════════════════════════════════════════
+
 async function signupDriver(data) {
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🚗 [SIGNUP DRIVER] Creating pending driver signup...');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🧾 Payload:', JSON.stringify(data, null, 2));
 
     const {
         email,
@@ -248,7 +372,6 @@ async function signupDriver(data) {
         birth_date,
         avatar_url,
 
-        // Driver-specific fields
         cni_number,
         license_number,
         license_expiry,
@@ -257,7 +380,6 @@ async function signupDriver(data) {
         insurance_expiry,
         insurance_document_url,
 
-        // Vehicle info
         vehicle_type,
         vehicle_make_model,
         vehicle_color,
@@ -266,7 +388,8 @@ async function signupDriver(data) {
         vehicle_photo_url,
     } = data;
 
-    let uploadedFiles = [];
+    const uploadedFiles = [];
+    let uuid = null;
 
     try {
         if (avatar_url) uploadedFiles.push(avatar_url);
@@ -274,107 +397,76 @@ async function signupDriver(data) {
         if (insurance_document_url) uploadedFiles.push(insurance_document_url);
         if (vehicle_photo_url) uploadedFiles.push(vehicle_photo_url);
 
-        // ─────────────────────────────────────────────────────────────
-        // VALIDATION
-        // ─────────────────────────────────────────────────────────────
-        if (!email && !phone_e164) {
-            const err = new Error('Email or phone number is required');
-            err.status = 400;
-            err.code = 'MISSING_IDENTIFIER';
-            throw err;
+        if (!email) {
+            throw makeError(
+                'Email is required because registration sends an email OTP.',
+                400,
+                'MISSING_EMAIL'
+            );
+        }
+
+        if (!phone_e164) {
+            throw makeError(
+                'Phone number is required because registration sends an SMS OTP.',
+                400,
+                'MISSING_PHONE'
+            );
         }
 
         if (!password) {
-            const err = new Error('Password is required');
-            err.status = 400;
-            err.code = 'MISSING_PASSWORD';
-            throw err;
+            throw makeError('Password is required', 400, 'MISSING_PASSWORD');
         }
 
         if (!first_name || !last_name) {
-            const err = new Error('First name and last name are required');
-            err.status = 400;
-            err.code = 'MISSING_NAME';
-            throw err;
+            throw makeError('First name and last name are required', 400, 'MISSING_NAME');
         }
 
         if (!cni_number) {
-            const err = new Error('National ID card number is required');
-            err.status = 400;
-            err.code = 'MISSING_CNI';
-            throw err;
+            throw makeError('National ID card number is required', 400, 'MISSING_CNI');
         }
 
         if (!license_number) {
-            const err = new Error('Driver license number is required');
-            err.status = 400;
-            err.code = 'MISSING_LICENSE';
-            throw err;
+            throw makeError('Driver license number is required', 400, 'MISSING_LICENSE');
         }
 
         if (!license_document_url) {
-            const err = new Error('Driver license document is required');
-            err.status = 400;
-            err.code = 'MISSING_LICENSE_DOCUMENT';
-            throw err;
+            throw makeError('Driver license document is required', 400, 'MISSING_LICENSE_DOCUMENT');
         }
 
-        // ─────────────────────────────────────────────────────────────
-        // DUPLICATE CHECKS
-        // ─────────────────────────────────────────────────────────────
-        console.log('🔍 [SIGNUP DRIVER] Checking for existing account...');
-        const { Account, DriverProfile } = require("../models");
+        await ensureNoDuplicateAccount({
+            email,
+            phone_e164,
+        });
 
-        if (email) {
-            const existing = await Account.findOne({ where: { email } });
-            if (existing) {
-                const err = new Error('Email already registered');
-                err.status = 409;
-                err.code = 'EMAIL_EXISTS';
-                throw err;
-            }
-        }
-
-        if (phone_e164) {
-            const existing = await Account.findOne({ where: { phone_e164 } });
-            if (existing) {
-                const err = new Error('Phone number already registered');
-                err.status = 409;
-                err.code = 'PHONE_EXISTS';
-                throw err;
-            }
-        }
+        await ensureNoDuplicatePendingSignup({
+            email,
+            phone_e164,
+        });
 
         if (vehicle_plate) {
-            const existingPlate = await DriverProfile.findOne({ where: { vehicle_plate } });
+            const existingPlate = await DriverProfile.findOne({
+                where: {
+                    vehicle_plate,
+                },
+            });
+
             if (existingPlate) {
-                const err = new Error('Vehicle plate number already registered');
-                err.status = 409;
-                err.code = 'PLATE_EXISTS';
-                throw err;
+                throw makeError('Vehicle plate number already registered', 409, 'PLATE_EXISTS');
             }
         }
 
         console.log('✅ [SIGNUP DRIVER] No conflicts found');
 
-        // ─────────────────────────────────────────────────────────────
-        // HASH PASSWORD
-        // ─────────────────────────────────────────────────────────────
         console.log('🔒 [SIGNUP DRIVER] Hashing password...');
         const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
         console.log('✅ [SIGNUP DRIVER] Password hashed');
 
-        // ─────────────────────────────────────────────────────────────
-        // UUID & EXPIRY
-        // ─────────────────────────────────────────────────────────────
-        const uuid = uuidv4();
-        const expires_at = new Date(Date.now() + 30 * 60 * 1000);
+        uuid = uuidv4();
+        const expires_at = new Date(Date.now() + SIGNUP_EXPIRY_MINUTES * 60 * 1000);
+
         console.log(`🆔 [UUID] ${uuid}`);
         console.log(`⏰ [EXPIRY] ${expires_at.toISOString()}`);
 
-        // ─────────────────────────────────────────────────────────────
-        // DRIVER DATA JSON
-        // ─────────────────────────────────────────────────────────────
         const driver_data = {
             cni_number,
             license_number,
@@ -384,20 +476,17 @@ async function signupDriver(data) {
             vehicle_type: vehicle_type || 'Standard',
             vehicle_make_model: vehicle_make_model || null,
             vehicle_color: vehicle_color || null,
-            vehicle_year: vehicle_year ? parseInt(vehicle_year) : null,
+            vehicle_year: vehicle_year ? parseInt(vehicle_year, 10) : null,
             vehicle_plate: vehicle_plate || null,
         };
 
-        // ─────────────────────────────────────────────────────────────
-        // CREATE PENDING SIGNUP
-        // ─────────────────────────────────────────────────────────────
         console.log('💾 [PENDING SIGNUP] Creating pending driver signup...');
 
         await PendingSignup.create({
             uuid,
             user_type: 'DRIVER',
-            email: email || null,
-            phone_e164: phone_e164 || null,
+            email,
+            phone_e164,
             civility: civility || null,
             first_name,
             last_name,
@@ -414,81 +503,29 @@ async function signupDriver(data) {
 
         console.log(`✅ [PENDING SIGNUP] Driver record created with UUID: ${uuid}`);
 
-        // ─────────────────────────────────────────────────────────────
-        // SEND OTP via ONE channel only
-        // Priority: SMS first, EMAIL as fallback
-        // ─────────────────────────────────────────────────────────────
-        console.log('📨 [OTP] Sending verification code via single channel...');
-
-        const otpDelivery = {};
-
-        if (phone_e164) {
-            // ── PREFERRED: SMS ────────────────────────────────────
-            console.log(`📱 [OTP] Issuing SMS OTP to ${phone_e164}...`);
-            try {
-                const phoneOtp = await issueOtp(
-                    {
-                        accountUuid: uuid,
-                        purpose: 'PHONE_VERIFY',
-                        channel: 'SMS',
-                        target: phone_e164,
-                    },
-                    null
-                );
-                otpDelivery.phone = {
-                    delivery: phoneOtp.delivery,
-                    target: phoneOtp.target,
-                };
-                console.log(`✅ [OTP SMS] Sent → ${phoneOtp.target} (delivery: ${phoneOtp.delivery})`);
-            } catch (err) {
-                console.error('❌ [OTP SMS FAILED]:', err.message);
-                await PendingSignup.destroy({ where: { uuid } });
-                throw err;
-            }
-
-        } else if (email) {
-            // ── FALLBACK: EMAIL (only when no phone provided) ─────
-            console.log(`📧 [OTP] Issuing EMAIL OTP to ${email}...`);
-            try {
-                const emailOtp = await issueOtp(
-                    {
-                        accountUuid: uuid,
-                        purpose: 'EMAIL_VERIFY',
-                        channel: 'EMAIL',
-                        target: email,
-                    },
-                    null
-                );
-                otpDelivery.email = {
-                    delivery: emailOtp.delivery,
-                    target: emailOtp.target,
-                };
-                console.log(`✅ [OTP EMAIL] Sent → ${emailOtp.target} (delivery: ${emailOtp.delivery})`);
-            } catch (err) {
-                console.error('❌ [OTP EMAIL FAILED]:', err.message);
-                await PendingSignup.destroy({ where: { uuid } });
-                throw err;
-            }
-        }
+        const otpDelivery = await sendBothSignupOtps({
+            uuid,
+            email,
+            phone_e164,
+        });
 
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('✅ [SIGNUP DRIVER] Pending driver signup complete!');
         console.log('🆔 Signup UUID:', uuid);
         console.log('👤 Name:', `${first_name} ${last_name}`);
-        console.log('📧 Email:', email || 'N/A');
-        console.log('📱 Phone:', phone_e164 || 'N/A');
+        console.log('📧 Email:', email);
+        console.log('📱 Phone:', phone_e164);
         console.log('🚗 Vehicle:', vehicle_make_model || 'N/A');
         console.log('🔢 Plate:', vehicle_plate || 'N/A');
         console.log('📨 OTP Delivery:', otpDelivery);
-        console.log('   Channel used:', phone_e164 ? 'SMS' : 'EMAIL');
         console.log('⏰ Expires at:', expires_at.toISOString());
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return {
             uuid,
             user_type: 'DRIVER',
-            email: email || null,
-            phone_e164: phone_e164 || null,
+            email,
+            phone_e164,
             first_name,
             last_name,
             avatar_url: avatar_url || null,
@@ -496,27 +533,23 @@ async function signupDriver(data) {
         };
 
     } catch (err) {
-        console.error('💥 [PENDING SIGNUP FAILED]:', err.message);
+        console.error('💥 [DRIVER SIGNUP FAILED]:', err.message);
         console.error('💥 [ERROR DETAILS]:', err);
 
-        if (uploadedFiles.length > 0) {
-            console.log('🗑️  [CLEANUP] Deleting uploaded files from R2...');
-            for (const fileUrl of uploadedFiles) {
-                try {
-                    await deleteFromR2(fileUrl);
-                    console.log(`   ✅ Deleted: ${fileUrl}`);
-                } catch (deleteErr) {
-                    console.warn(`   ⚠️  Failed to delete ${fileUrl}: ${deleteErr.message}`);
-                }
-            }
-        }
+        await cleanupPendingSignup(uuid);
+        await cleanupUploadedFiles(uploadedFiles);
 
         if (!err.code) {
             err.code = 'DRIVER_SIGNUP_FAILED';
         }
+
         throw err;
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════
 
 module.exports = {
     signupPassenger,
