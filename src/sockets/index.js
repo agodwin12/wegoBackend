@@ -559,7 +559,7 @@ async function _replayMissedPassengerEvents(socket) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET IO INSTAN
+// GET IO INSTANd
 // ═══════════════════════════════════════════════════════════════════════
 
 function getIO() {
