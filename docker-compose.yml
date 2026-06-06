@@ -10,16 +10,14 @@ services:
     container_name: wego_backend
     restart: unless-stopped
     ports:
-      - "10000:10000"
+      - "10002:10000"
     env_file:
       - .env
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 10000
       DB_HOST: host.docker.internal
-      DB_PORT: ${DB_PORT:-5432}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      DB_PORT: 3306
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -49,7 +47,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "6380:6379"
     networks:
       - wego_net
     healthcheck:

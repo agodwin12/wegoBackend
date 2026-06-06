@@ -6,9 +6,7 @@ const Redis = require('ioredis');
 // REDIS CLIENT CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════
 
-const redis = new Redis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT) || 6379,
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
     password: process.env.REDIS_PASSWORD || undefined,
     db: parseInt(process.env.REDIS_DB) || 0,
     retryStrategy: (times) => {
@@ -171,7 +169,6 @@ async function findNearbyDrivers(lat, lng, radiusKm = 5) {
     try {
         console.log(`🔍 [REDIS] Searching for drivers within ${radiusKm}km of (${lat}, ${lng})`);
 
-        // Search within radius (GEORADIUS returns array of driver IDs)
         const nearbyDrivers = await redis.georadius(
             REDIS_KEYS.DRIVERS_GEO,
             lng,
@@ -179,18 +176,16 @@ async function findNearbyDrivers(lat, lng, radiusKm = 5) {
             radiusKm,
             'km',
             'WITHDIST',
-            'ASC' // Closest first
+            'ASC'
         );
 
         console.log(`✅ [REDIS] Found ${nearbyDrivers.length} nearby drivers`);
 
-        // Format results
         const results = nearbyDrivers.map(([driverId, distance]) => ({
             driverId,
             distance: parseFloat(distance),
         }));
 
-        // Filter out unavailable drivers
         const availableDrivers = [];
         for (const driver of results) {
             const isOnline = await redis.sismember(REDIS_KEYS.ONLINE_DRIVERS, driver.driverId);
@@ -217,10 +212,7 @@ async function setDriverOnline(driverId) {
     try {
         await redis.sadd(REDIS_KEYS.ONLINE_DRIVERS, driverId);
         await redis.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, driverId);
-
-        // Store online status with expiration
         await redis.setex(REDIS_KEYS.DRIVER_ONLINE(driverId), 3600, '1');
-
         console.log(`🟢 [REDIS] Driver marked online: ${driverId}`);
         return true;
     } catch (error) {
@@ -235,20 +227,12 @@ async function setDriverOnline(driverId) {
 async function setDriverOffline(driverId) {
     try {
         const multi = redis.multi();
-
-        // Remove from online and available sets
         multi.srem(REDIS_KEYS.ONLINE_DRIVERS, driverId);
         multi.srem(REDIS_KEYS.AVAILABLE_DRIVERS, driverId);
-
-        // Remove from geospatial index
         multi.zrem(REDIS_KEYS.DRIVERS_GEO, driverId);
-
-        // Delete keys
         multi.del(REDIS_KEYS.DRIVER_ONLINE(driverId));
         multi.del(REDIS_KEYS.DRIVER_LOCATION(driverId));
-
         await multi.exec();
-
         console.log(`🔴 [REDIS] Driver marked offline: ${driverId}`);
         return true;
     } catch (error) {
@@ -277,7 +261,6 @@ async function setDriverUnavailable(driverId) {
 async function setDriverAvailable(driverId) {
     try {
         const isOnline = await redis.sismember(REDIS_KEYS.ONLINE_DRIVERS, driverId);
-
         if (isOnline) {
             await redis.sadd(REDIS_KEYS.AVAILABLE_DRIVERS, driverId);
             console.log(`✅ [REDIS] Driver marked available: ${driverId}`);
@@ -338,7 +321,6 @@ async function storeTripInRedis(tripId, tripData, expirationSeconds = 3600) {
             expirationSeconds,
             JSON.stringify(tripData)
         );
-
         console.log(`💾 [REDIS] Trip stored: ${tripId}`);
         return true;
     } catch (error) {
@@ -429,17 +411,17 @@ async function removeUserSocket(userId) {
 // ═══════════════════════════════════════════════════════════════════════
 // EXPORTS
 // ═══════════════════════════════════════════════════════════════════════
+
 const redisHelpers = {
     setJson,
     getJson,
     deleteKey,
 };
 
-
 module.exports = {
     redis,
-    redisClient: redis,  // ← Add this alias
-    redisHelpers,        // ← Add this object
+    redisClient: redis,
+    redisHelpers,
     REDIS_KEYS,
 
     // Driver location functions
