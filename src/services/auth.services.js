@@ -101,28 +101,31 @@ async function sendBothSignupOtps({ uuid, email, phone_e164 }) {
 
     const otpDelivery = {};
 
-    // EMAIL OTP
+    // EMAIL OTP — BEST EFFORT. Email is an auxiliary channel; a down/misconfigured
+    // SMTP credential must NOT block signup. SMS (below) is the required channel,
+    // and the account is created once EITHER OTP is verified (verifyOtpAndCreateAccount
+    // marks both email_verified and phone_verified). So SMS alone completes signup.
     console.log(`📧 [OTP] Issuing EMAIL OTP to ${email}...`);
-
-    const emailOtp = await issueOtp(
-        {
-            accountUuid: uuid,
-            purpose: 'EMAIL_VERIFY',
-            channel: 'EMAIL',
-            target: email,
-        },
-        null
-    );
-
-    assertOtpWasSent(emailOtp, 'EMAIL');
-
-    otpDelivery.email = {
-        delivery: emailOtp.delivery,
-        channel: emailOtp.channel,
-        target: emailOtp.target,
-    };
-
-    console.log(`✅ [OTP EMAIL] Sent → ${emailOtp.target}`);
+    try {
+        const emailOtp = await issueOtp(
+            {
+                accountUuid: uuid,
+                purpose: 'EMAIL_VERIFY',
+                channel: 'EMAIL',
+                target: email,
+            },
+            null
+        );
+        otpDelivery.email = {
+            delivery: emailOtp?.delivery || 'FAILED',
+            channel:  'EMAIL',
+            target:   email,
+        };
+        console.log(`✅ [OTP EMAIL] ${otpDelivery.email.delivery} → ${email}`);
+    } catch (emailErr) {
+        console.warn(`⚠️  [OTP EMAIL] failed — continuing (SMS is the required channel): ${emailErr.message}`);
+        otpDelivery.email = { delivery: 'FAILED', channel: 'EMAIL', target: email };
+    }
 
     // SMS OTP
     console.log(`📱 [OTP] Issuing SMS OTP to ${phone_e164}...`);
