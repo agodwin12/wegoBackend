@@ -52,9 +52,10 @@ async function initEmail() {
         console.log(`[EMAIL DEBUG] ✅ SMTP connection verified successfully!`);
         console.log("=========================================================\n");
     } catch (err) {
-        console.error("[EMAIL ERROR] ❌ SMTP connection verification failed:");
-        console.error(err);
-        throw err;
+        // Non-fatal: email is an auxiliary service. A dead SMTP credential must
+        // NOT crash the whole API at boot — log it and continue. Individual
+        // sends will fail gracefully until the credentials are fixed.
+        console.error("[EMAIL WARN] ⚠️  SMTP verification failed — email disabled, server continues:", err.message);
     }
 }
 

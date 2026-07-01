@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const couponController = require('../../controllers/backoffice/couponController');
+const couponController = require('../../controllers/backoffice/couponcontroller');
 const { authenticateEmployee, requireEmployeeRole } = require('../../middleware/employeeAuth.middleware');
 
 // All routes require authentication and specific roles
