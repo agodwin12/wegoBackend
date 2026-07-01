@@ -64,6 +64,22 @@ async function issueOtp({ accountUuid, purpose, channel, target }, tx) {
 
     console.log(`⏳ [OTP] Expires at: ${expires_at.toISOString()}`);
 
+    // Invalidate any prior *active* OTP for the same target+purpose so only the
+    // newest code is ever valid. Prevents a stale/earlier SMS code from lingering
+    // as a second valid record and causing confusing INVALID_OTP results.
+    await VerificationCode.update(
+        { consumed_at: new Date() },
+        {
+            where: {
+                account_uuid: accountUuid,
+                channel:      normalizedChannel,
+                purpose,
+                consumed_at:  { [Op.is]: null },
+            },
+            transaction: tx,
+        }
+    );
+
     // 2. Persist to DB
     const vc = await VerificationCode.create(
         {
