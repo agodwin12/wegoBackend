@@ -5,7 +5,6 @@ const { redisClient, storeUserSocket, removeUserSocket, REDIS_KEYS, redisHelpers
 const {
     handleDriverOnline,
     handleDriverOffline,
-    handleDriverLocationUpdate,
     handleTripAccept,
     handleTripDecline,
     handleDriverEnRoute,
@@ -14,6 +13,8 @@ const {
     handleTripComplete,
     handleTripCancel,
 } = require('./driverHandlers');
+
+const locationHandlers = require('./locationHandlers');
 
 const { ChatMessage, Trip, Account } = require('../models');
 const { Op } = require('sequelize');
@@ -49,16 +50,45 @@ function _sanitize(data) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupSocketIO(server) {
+    // ── CORS allowlist (mirrors the HTTP CORS policy) ──────────────────
+    // SOCKET_CORS_ORIGIN (or CORS_ORIGIN) is a comma-separated allowlist.
+    // "*" or empty = allow all (development only). Native mobile clients
+    // send no Origin header, so they are always allowed.
+    const rawOrigins = process.env.SOCKET_CORS_ORIGIN || process.env.CORS_ORIGIN || '';
+    const allowList = rawOrigins.split(',').map((s) => s.trim()).filter(Boolean);
+    const allowAll = allowList.length === 0 || allowList.includes('*');
+
     io = new Server(server, {
         cors: {
-            origin:      process.env.CORS_ORIGIN || '*',
+            origin(origin, callback) {
+                if (!origin || allowAll || allowList.includes(origin)) {
+                    return callback(null, true);
+                }
+                return callback(new Error(`Socket CORS: origin ${origin} not allowed`));
+            },
             methods:     ['GET', 'POST'],
             credentials: true,
         },
-        pingTimeout:    60000,
-        pingInterval:   25000,
+        pingTimeout:    Number(process.env.SOCKET_PING_TIMEOUT) || 60000,
+        pingInterval:   Number(process.env.SOCKET_PING_INTERVAL) || 25000,
         connectTimeout: 45000,
     });
+
+    // ── Redis adapter (horizontal scaling) ─────────────────────────────
+    // Without this, two API instances can't deliver socket events to each
+    // other's clients. With it, every instance shares one pub/sub bus so a
+    // trip offer emitted on instance A reaches the driver connected to B.
+    try {
+        const { createAdapter } = require('@socket.io/redis-adapter');
+        const pubClient = redisClient.duplicate();
+        const subClient = redisClient.duplicate();
+        pubClient.on('error', (e) => console.error('❌ [SOCKET][REDIS pub]', e.message));
+        subClient.on('error', (e) => console.error('❌ [SOCKET][REDIS sub]', e.message));
+        io.adapter(createAdapter(pubClient, subClient));
+        console.log('🔌 [SOCKET] Redis adapter attached — multi-instance ready');
+    } catch (err) {
+        console.warn('⚠️  [SOCKET] Redis adapter not attached (single-instance only):', err.message);
+    }
 
     console.log('🔌 [SOCKET] Socket.IO server initialised');
 
@@ -180,21 +210,15 @@ function setupSocketIO(server) {
             socket.on('driver:online',  (data) => handleDriverOnline(socket, data));
             socket.on('driver:offline', (data) => handleDriverOffline(socket, data));
 
-            socket.on('driver:location',        (data) => handleDriverLocationUpdate(socket, data, io));
-            socket.on('driver:location_update', (data) => handleDriverLocationUpdate(socket, data, io));
+            locationHandlers(io, socket);
 
-            // Trip events — only meaningful for DRIVER, harmless for DELIVERY_AGENT
-            // (their trip queries will return nothing since they have no ride trips)
-            socket.on('trip:accept',   (data) => handleTripAccept(socket, data, io));
-            socket.on('trip:decline',  (data) => handleTripDecline(socket, data));
-
-            socket.on('driver:en_route', (data) => handleDriverEnRoute(socket, data, io));
-            socket.on('driver:arrived',  (data) => handleDriverArrived(socket, data, io));
-            socket.on('trip:arrived',    (data) => handleDriverArrived(socket, data, io));
-
-            socket.on('trip:start',    (data) => handleTripStart(socket, data, io));
-            socket.on('trip:complete', (data) => handleTripComplete(socket, data, io));
-            socket.on('trip:cancel',   (data) => handleTripCancel(socket, data, io));
+            // ── Driver ride lifecycle is HTTP-only ─────────────────────────────
+            // accept / decline / en-route / arrived / start / complete / cancel
+            // all go through the REST controllers (driver.controller), which are
+            // routed through the central trip state machine and emit the
+            // passenger-facing socket events themselves. The old socket command
+            // handlers were a redundant second path and have been removed; the
+            // driver app no longer emits them. Sockets here are PUSH-only.
         }
 
         // ───────────────────────────────────────────────────────────
@@ -500,18 +524,62 @@ async function _replayMissedDriverEvents(socket) {
             }
         }
 
-        // ── Active trip state sync ────────────────────────────────
-        const activeTrip = await redisHelpers.getJson(`driver:active_trip:${driverId}`);
-        if (activeTrip && activeTrip.tripId) {
-            const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTrip.tripId));
-            if (tripData && tripData.status !== 'COMPLETED' && tripData.status !== 'CANCELED') {
-                socket.emit('trip:state_sync', _sanitize({
-                    tripId:    activeTrip.tripId,
-                    status:    tripData.status,
-                    trip:      tripData,
-                    timestamp: new Date().toISOString(),
-                }));
-                console.log(`✅ [SOCKET] Re-synced active trip ${activeTrip.tripId} to driver ${driverId}`);
+        // ── Active trip state sync (DRIVER mode) ─────────────────
+        if (socket.activeMode !== 'DELIVERY_AGENT') {
+            const activeTrip = await redisHelpers.getJson(`driver:active_trip:${driverId}`);
+            if (activeTrip && activeTrip.tripId) {
+                const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTrip.tripId));
+                if (tripData && tripData.status !== 'COMPLETED' && tripData.status !== 'CANCELED') {
+                    socket.emit('trip:state_sync', _sanitize({
+                        tripId:    activeTrip.tripId,
+                        status:    tripData.status,
+                        trip:      tripData,
+                        timestamp: new Date().toISOString(),
+                    }));
+                    console.log(`✅ [SOCKET] Re-synced active trip ${activeTrip.tripId} to driver ${driverId}`);
+                }
+            }
+        }
+
+        // ── Pending delivery offer replay (DELIVERY_AGENT mode) ──
+        if (socket.activeMode === 'DELIVERY_AGENT') {
+            const pendingDeliveryId = await redisClient.get(`delivery:pending_offer:${driverId}`);
+            if (pendingDeliveryId) {
+                const offerPayload = await redisHelpers.getJson(`delivery:offer_payload:${pendingDeliveryId}`);
+                const offersData   = await redisHelpers.getJson(`delivery:offers:${pendingDeliveryId}`);
+                const stillInPool  = Array.isArray(offersData?.drivers) && offersData.drivers.includes(driverId);
+                if (offerPayload && stillInPool) {
+                    socket.emit('delivery:new_request', _sanitize(offerPayload));
+                    console.log(`✅ [SOCKET] Re-sent pending delivery offer ${pendingDeliveryId} to agent ${driverId}`);
+                }
+            }
+        }
+
+        // ── Active delivery state sync (DELIVERY_AGENT mode) ─────
+        if (socket.activeMode === 'DELIVERY_AGENT') {
+            const { Driver } = require('../models');
+            const driver = await Driver.findOne({
+                where:      { userId: driverId },
+                attributes: ['id'],
+            });
+            if (driver) {
+                const activeDeliveryId = await redisClient.get(`driver:active_delivery:${driver.id}`);
+                if (activeDeliveryId) {
+                    const deliveryData = await redisHelpers.getJson(`delivery:active:${activeDeliveryId}`);
+                    const terminalStatuses = ['delivered', 'cancelled', 'expired', 'disputed'];
+                    if (deliveryData && !terminalStatuses.includes(deliveryData.status)) {
+                        socket.emit('delivery:state_sync', _sanitize({
+                            deliveryId: parseInt(activeDeliveryId),
+                            status:     deliveryData.status,
+                            delivery:   deliveryData,
+                            timestamp:  new Date().toISOString(),
+                        }));
+                        // Re-join delivery room so the agent receives subsequent events
+                        const delivSvc = require('./delivery/deliverySocket.service');
+                        delivSvc.joinDeliveryRoom(socket, parseInt(activeDeliveryId));
+                        console.log(`✅ [SOCKET] Re-synced active delivery ${activeDeliveryId} to agent ${driverId}`);
+                    }
+                }
             }
         }
 
@@ -568,7 +636,7 @@ function getIO() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// EXP
+// EX
 // ══════════════════════════════════════════════════════════════════════
 
 module.exports       = setupSocketIO;

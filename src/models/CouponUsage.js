@@ -45,6 +45,10 @@ module.exports = (sequelize) => {
                 type: DataTypes.STRING(36),
                 allowNull: true
             },
+            delivery_id: {
+                type: DataTypes.INTEGER,
+                allowNull: true
+            },
             discount_applied: {
                 type: DataTypes.INTEGER,
                 allowNull: false,

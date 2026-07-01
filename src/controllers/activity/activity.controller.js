@@ -10,9 +10,10 @@ const {
     DriverProfile,
     VehicleRental,
     Vehicle,
-    ServiceRequest,
     ServiceListing,
     ServiceCategory,
+    ServiceAdPayment,
+    ServiceListingPlan,
 } = require('../../models/index');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -412,147 +413,45 @@ async function _fetchRentals(userId, limit, offset, status = null) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // PRIVATE: _fetchServices
+// Classifieds model — returns the user's own listings (provider view).
+// Buyers no longer have "service request" history; they browse and call.
 // ═══════════════════════════════════════════════════════════════════════
 
-async function _fetchServices(userId, limit, offset, status = null, role = null) {
-    let where;
-
-    if (role === 'customer') {
-        where = { customer_id: userId };
-        console.log(`   → role filter: customer only`);
-    } else if (role === 'provider') {
-        where = { provider_id: userId };
-        console.log(`   → role filter: provider only`);
-    } else {
-        where = {
-            [Op.or]: [
-                { customer_id: userId },
-                { provider_id: userId },
-            ],
-        };
-    }
+async function _fetchServices(userId, limit, offset, status = null) {
+    const where = { provider_id: userId };
 
     if (status) {
-        const valid = [
-            'pending', 'accepted', 'rejected', 'in_progress',
-            'payment_pending', 'payment_confirmation_pending',
-            'payment_confirmed', 'completed', 'cancelled', 'disputed',
-        ];
-        if (valid.includes(status)) {
-            where.status = status;
-            console.log(`   → service status filter: ${status}`);
-        } else {
-            console.warn(`   ⚠️ invalid service status "${status}" ignored`);
-        }
+        const valid = ['active', 'inactive', 'pending_review', 'hero_pending', 'rejected', 'draft'];
+        if (valid.includes(status)) where.status = status;
     }
 
-    console.log(`   📋 _fetchServices — limit: ${limit} | offset: ${offset}`);
-    console.log(`   📋 _fetchServices where:`, JSON.stringify(where));
-
     try {
-        const result = await ServiceRequest.findAndCountAll({
+        const result = await ServiceListing.findAndCountAll({
             where,
             limit,
             offset,
-            order: [['created_at', 'DESC']],
-            attributes: [
-                'id',
-                'request_id',
-                'description',
-                'status',
-                'needed_when',
-                'service_location',
-                'customer_budget',
-                'final_amount',
-                'payment_method',
-                'created_at',
-                'completed_at',
-                'cancelled_at',
-                'rejection_reason',
-                'cancellation_reason',
-                'customer_id',
-                'provider_id',
-            ],
+            order: [['boost_priority', 'DESC'], ['created_at', 'DESC']],
+            attributes: ['id', 'listing_id', 'title', 'status', 'boost_priority', 'plan_expires_at', 'created_at', 'average_rating', 'review_count'],
             include: [
                 {
-                    model: ServiceListing,
-                    as: 'listing',
-                    attributes: ['id', 'title', 'pricing_type', 'category_id'],
-                    required: false,
-                    include: [
-                        {
-                            model: ServiceCategory,
-                            as: 'category',
-                            attributes: ['id', 'name_fr', 'name_en'],
-                            required: false,
-                        },
-                    ],
-                },
-                {
-                    model: Account,
-                    as: 'customer',
-                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    model: ServiceCategory,
+                    as: 'category',
+                    attributes: ['id', 'name_fr', 'name_en'],
                     required: false,
                 },
                 {
-                    model: Account,
-                    as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    model: ServiceAdPayment,
+                    as: 'adPayment',
+                    attributes: ['id', 'plan_key_snapshot', 'status', 'plan_expires_at'],
                     required: false,
+                    include: [{ model: ServiceListingPlan, as: 'plan', attributes: ['label_fr', 'label_en'], required: false }],
                 },
             ],
         });
-
         console.log(`   ✅ _fetchServices — total: ${result.count} | loaded: ${result.rows.length}`);
         return result;
-    } catch (error) {
-        console.error(`   ❌ _fetchServices query failed: ${error.message}`);
-        console.error(error.stack);
-
-        console.log(`   ⚠️ _fetchServices — retrying WITHOUT listing include...`);
-        try {
-            const fallback = await ServiceRequest.findAndCountAll({
-                where,
-                limit,
-                offset,
-                order: [['created_at', 'DESC']],
-                attributes: [
-                    'id',
-                    'request_id',
-                    'description',
-                    'status',
-                    'needed_when',
-                    'service_location',
-                    'customer_budget',
-                    'final_amount',
-                    'payment_method',
-                    'created_at',
-                    'completed_at',
-                    'rejection_reason',
-                    'cancellation_reason',
-                    'customer_id',
-                    'provider_id',
-                ],
-                include: [
-                    {
-                        model: Account,
-                        as: 'customer',
-                        attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                        required: false,
-                    },
-                    {
-                        model: Account,
-                        as: 'provider',
-                        attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                        required: false,
-                    },
-                ],
-            });
-            console.log(`   ✅ _fetchServices fallback — total: ${fallback.count}`);
-            return fallback;
-        } catch (fallbackErr) {
-            console.error(`   ❌ _fetchServices fallback also failed: ${fallbackErr.message}`);
-            return { rows: [], count: 0 };
-        }
+    } catch (err) {
+        console.error(`   ❌ _fetchServices query failed: ${err.message}`);
+        return { rows: [], count: 0 };
     }
 }

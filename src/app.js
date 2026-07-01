@@ -7,7 +7,14 @@ const helmet  = require('helmet');
 const morgan  = require('morgan');
 const path    = require('path');
 
+const { corsOptions, globalLimiter, authLimiter } = require('./config/security');
+
 const app = express();
+
+// Behind the Caddy/nginx reverse proxy — trust the first proxy hop so
+// req.ip, secure-cookie detection and rate-limiting all key on the real
+// client IP instead of the proxy's.
+app.set('trust proxy', 1);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROUTE IMPORTS
@@ -32,8 +39,7 @@ const tripPublicRoutes            = require('./routes/trip.routes');
 const rentalRoutes                = require('./routes/rentalRoutes');
 const ratingRoutes                = require('./routes/rating.routes');
 const chatRoutes                  = require('./routes/chat.routes');
-const driverPayoutRoutes          = require('./routes/driverPayout.routes');
-const driverTopUpRoutes           = require('./routes/driverTopUp.routes');         // ride-hailing driver wallet
+const driverTopUpRoutes           = require('./routes/driverTopUp.routes');         // ride-hailing driver wallet (top-up only)
 const driverEarningsRoutes        = require('./routes/driverEarnings.routes');
 
 // ─── Delivery (public / driver-facing) ───────────────────────────────────────
@@ -48,9 +54,7 @@ const {
 // ─── Services Marketplace (public) ───────────────────────────────────────────
 const serviceCategoryRoutes       = require('./routes/serviceCategory.routes');
 const serviceListingRoutes        = require('./routes/serviceListing.routes');
-const serviceRequestRoutes        = require('./routes/serviceRequest.routes');
 const serviceRatingRoutes         = require('./routes/serviceRating.routes');
-const serviceDisputeRoutes        = require('./routes/serviceDispute.routes');
 const serviceAdPaymentRoutes      = require('./routes/serviceAdPayment.routes');
 
 // ─── CamPay Payments ──────────────────────────────────────────────────────────
@@ -95,24 +99,21 @@ const deliveryWalletsRoutes       = require('./routes/backoffice/deliveryWallets
 const serviceAdminRoutes          = require('./routes/backoffice/serviceAdmin.routes');
 const serviceListingAdminRoutes   = require('./routes/backoffice/serviceListingAdmin.routes');
 const serviceListingPlanRoutes    = require('./routes/backoffice/serviceListingPlan.routes');
-const serviceRequestAdminRoutes   = require('./routes/backoffice/serviceRequestAdmin.routes');
-const servicePaymentAdminRoutes   = require('./routes/backoffice/servicePaymentAdmin.routes');
 const serviceProviderAdminRoutes  = require('./routes/backoffice/serviceProviderAdmin.routes');
-const serviceDisputeAdminRoutes   = require('./routes/backoffice/serviceDisputeAdmin.routes');
 const serviceReportsAdminRoutes   = require('./routes/backoffice/serviceReportsAdmin.routes');
 
 // ─── Backoffice — Finance & Operations ───────────────────────────────────────
 const adminEarningsRoutes         = require('./routes/backoffice/adminEarnings.routes');
-const payoutRoutes                = require('./routes/backoffice/payout.routes');
 const couponRoutes                = require('./routes/backoffice/couponRoutes');
 const supportRoutes               = require('./routes/backoffice/supportRoutes');
 const uploadRoutes                = require('./routes/backoffice/uploadRoutes');
 const dashboardRoutes             = require('./routes/backoffice/dashboard.routes');
 
 // ─── Background Jobs ──────────────────────────────────────────────────────────
-const { startCleanupJob } = require('./jobs/cleanup.job');
-const balanceSheetCron    = require('./services/balanceSheetCron');
-const paymentExpiryJob    = require('./jobs/paymentExpiry.job');
+const { startCleanupJob }  = require('./jobs/cleanup.job');
+const paymentExpiryJob     = require('./jobs/paymentExpiry.job');
+const cron                 = require('node-cron');
+const { expireListings }   = require('./controllers/serviceAdPayment_controller');
 const deviceTokenRoutes = require('./routes/deviceToken_routes');
 const notificationRoutes = require('./routes/notification_routes');
 const broadcastRoutes = require('./routes/backoffice/broadcast_routes');
@@ -129,7 +130,8 @@ app.use('/api/webhooks', webhookRoutes);
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.use(helmet());
-app.use(cors());
+app.use(cors(corsOptions));
+app.use(globalLimiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
@@ -151,7 +153,6 @@ app.get('/health', (req, res) => {
             car_rental:             'active',
             backoffice:             'active',
             payments:               'active',
-            payout_system:          'active',
         },
     });
 });
@@ -165,7 +166,7 @@ app.use('/api/upload', uploadRoutesMobile);
 
 // ─── Auth & Identity ──────────────────────────────────────────────────────────
 app.use('/api/auth', switchModeRoutes);         // mode-switching endpoints live under /auth
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);  // stricter brute-force limit on login/otp/signup
 app.use('/api/users',          profileRoutes);
 app.use('/api/profile/driver', driverProfileRoutes);
 app.use('/api/preferences',    preferencesRoutes);
@@ -178,7 +179,6 @@ app.use('/api/payments', paymentRoutes);
 // ─── Ride Hailing ─────────────────────────────────────────────────────────────
 app.use('/api/driver',                driverPublicRoutes);
 app.use('/api/driver/wallet',         driverTopUpRoutes);           // ride-hailing driver wallet top-up
-app.use('/api/request/payout/driver', driverPayoutRoutes);
 app.use('/api/earnings/driver',       driverEarningsRoutes);
 
 // Trips — most specific sub-paths first, catch-all last
@@ -201,9 +201,7 @@ app.use('/api/deliveries',               deliveryRoutes);             // main de
 // ─── Services Marketplace ─────────────────────────────────────────────────────
 app.use('/api/services/categories', serviceCategoryRoutes);
 app.use('/api/services/listings',   serviceListingRoutes);
-app.use('/api/services/requests',   serviceRequestRoutes);
 app.use('/api/services/ratings',    serviceRatingRoutes);
-app.use('/api/services/disputes',   serviceDisputeRoutes);
 app.use('/api/services',            serviceAdPaymentRoutes);          // ad payment (broad path — after specific ones)
 app.use('/api/services/admin/plans', serviceListingPlanRoutes);
 
@@ -217,7 +215,7 @@ app.use('/api/users/stats',  statsRoutes);
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── Auth & Employee Management ───────────────────────────────────────────────
-app.use('/api/backoffice/auth',      backofficeAuthRoutes);
+app.use('/api/backoffice/auth',      authLimiter, backofficeAuthRoutes);
 app.use('/api/backoffice/employees', employeeRoutes);
 app.use('/api/employee/profile',     employeeProfileRoutes);
 
@@ -249,15 +247,11 @@ app.use('/api/backoffice/delivery',            deliveryWalletsRoutes);   // ← 
 // ─── Services Marketplace (backoffice) ───────────────────────────────────────
 app.use('/api/services/admin',           serviceAdminRoutes);
 app.use('/api/services/admin/listings',  serviceListingAdminRoutes);
-app.use('/api/services/admin/requests',  serviceRequestAdminRoutes);
-app.use('/api/services/admin/payments',  servicePaymentAdminRoutes);
 app.use('/api/services/admin/providers', serviceProviderAdminRoutes);
-app.use('/api/services/admin/disputes',  serviceDisputeAdminRoutes);
 app.use('/api/services/admin/reports',   serviceReportsAdminRoutes);
 
 // ─── Finance & Operations ─────────────────────────────────────────────────────
 app.use('/api/admin/earnings',   adminEarningsRoutes);
-app.use('/api/admin/payouts',    payoutRoutes);
 app.use('/api/backoffice/coupons',   couponRoutes);
 app.use('/api/backoffice/support',   supportRoutes);
 app.use('/api/backoffice/upload',    uploadRoutes);
@@ -304,8 +298,16 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 // BACKGROUND JOBS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-startCleanupJob();
-balanceSheetCron.start();
-paymentExpiryJob.start();
+// Single-runner guard: only the instance with RUN_JOBS !== 'false' executes
+// cron jobs. Set RUN_JOBS=false on every extra API replica so payouts,
+// cleanup and listing-expiry don't double-fire when scaled horizontally.
+if (process.env.RUN_JOBS !== 'false') {
+    console.log('🕒 [JOBS] RUN_JOBS enabled — starting background cron jobs');
+    startCleanupJob();
+    paymentExpiryJob.start();
+    cron.schedule('0 2 * * *', expireListings); // daily 02:00 — expire stale listing plans
+} else {
+    console.log('🚫 [JOBS] RUN_JOBS=false — background cron jobs disabled on this instance');
+}
 
 module.exports = app;

@@ -2,9 +2,10 @@
 // Service Listing Controller - Provider Listings Management
 // PRODUCTION READY - ALL FIELDS RETURNED
 
-const { ServiceListing, ServiceCategory, Account, Employee, ServiceRating } = require('../models');
+const { ServiceListing, ServiceCategory, Account, Employee, ServiceRating, ServiceListingPlan, ServiceAdPayment } = require('../models');
 const { uploadFileToR2, deleteFile } = require('../middleware/upload');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
+const NotificationService = require('../services/NotificationService');
 
 // ═══════════════════════════════════════════════════════════════════════
 // HELPER FUNCTION: PARSE JSON FIELDS
@@ -127,6 +128,35 @@ exports.createListing = async (req, res) => {
         const provider_id = req.user.uuid; // From auth middleware
 
         // ─────────────────────────────────────────────────────────────────
+        // POSTING GATE — active plan required
+        // ─────────────────────────────────────────────────────────────────
+
+        const activePlan = await ServiceAdPayment.findOne({
+            where: { paid_by: provider_id, status: 'active' },
+            include: [{ model: ServiceListingPlan, as: 'plan' }],
+            order: [['plan_expires_at', 'DESC']],
+        });
+
+        if (!activePlan) {
+            return res.status(403).json({
+                success: false,
+                message: 'An active listing plan is required to post a service. Please purchase a plan to continue.',
+            });
+        }
+
+        if (activePlan.plan?.listing_quota != null) {
+            const listingCount = await ServiceListing.count({
+                where: { provider_id, status: { [Op.ne]: 'deleted' } },
+            });
+            if (listingCount >= activePlan.plan.listing_quota) {
+                return res.status(403).json({
+                    success: false,
+                    message: `You have reached your listing quota (${activePlan.plan.listing_quota}) for your current plan. Please upgrade to post more listings.`,
+                });
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
         // BASIC VALIDATION (Joi validator handles most of this now)
         // ─────────────────────────────────────────────────────────────────
 
@@ -150,12 +180,13 @@ exports.createListing = async (req, res) => {
         // HANDLE PHOTO UPLOADS (max 5)
         // ─────────────────────────────────────────────────────────────────
 
+        const maxPhotos = activePlan.plan?.max_photos ?? 5;
         let photos = [];
         if (req.files && req.files.length > 0) {
-            if (req.files.length > 5) {
+            if (req.files.length > maxPhotos) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Too many photos. Maximum 5 photos allowed per listing.',
+                    message: `Too many photos. Your plan allows up to ${maxPhotos} photos per listing.`,
                 });
             }
 
@@ -199,7 +230,10 @@ exports.createListing = async (req, res) => {
             years_experience: years_experience || null,
             certifications: certifications || null,
             portfolio_links: portfolio_links || null,
-            status: 'pending', // All moderation start as pending
+            // Remember which paid plan tier this post was created under, so the
+            // moderator's approval can apply the right boost/expiry.
+            current_plan_id: activePlan.plan_id || null,
+            status: 'pending_review', // every post is moderated before going live
         });
 
         console.log('✅ [SERVICE_LISTING_CONTROLLER] Listing created:', listing.listing_id);
@@ -264,7 +298,25 @@ exports.getAllListings = async (req, res) => {
         // BUILD WHERE CLAUSE
         // ─────────────────────────────────────────────────────────────────
 
+        // Compound conditions go under Op.and so independent OR-groups (expiry,
+        // search) never overwrite each other.
+        const andConditions = [
+            {
+                [Op.or]: [
+                    { plan_expires_at: null },
+                    { plan_expires_at: { [Op.gte]: new Date() } },
+                ],
+            },
+        ];
+
         const where = { status: 'active' };
+
+        // FULLTEXT search — scales to millions of rows (vs a LIKE '%term%' scan).
+        if (search) {
+            andConditions.push(
+                literal('MATCH (title, description) AGAINST (:searchTerm IN NATURAL LANGUAGE MODE)')
+            );
+        }
 
         if (category_id) {
             where.category_id = category_id;
@@ -294,12 +346,7 @@ exports.getAllListings = async (req, res) => {
             where.average_rating = { [Op.gte]: min_rating };
         }
 
-        if (search) {
-            where[Op.or] = [
-                { title: { [Op.like]: `%${search}%` } },
-                { description: { [Op.like]: `%${search}%` } },
-            ];
-        }
+        where[Op.and] = andConditions;
 
         // ─────────────────────────────────────────────────────────────────
         // VALIDATE SORT
@@ -324,12 +371,22 @@ exports.getAllListings = async (req, res) => {
                 {
                     model: Account,
                     as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url', 'phone_e164'],
                 },
             ],
             limit,
             offset,
-            order: [[sortField, sortDirection]],
+            // Ranking: featured (hero) first, then paid boost tiers, then the
+            // requested sort. A paid post ALWAYS outranks a free one here because
+            // free plans carry boost_priority 0 and is_hero false.
+            order: [
+                ['is_hero', 'DESC'],
+                ['boost_priority', 'DESC'],
+                [sortField, sortDirection],
+            ],
+            // Bind the FULLTEXT search term (only referenced when search is set).
+            replacements: search ? { searchTerm: search } : undefined,
+            subQuery: false,
         });
 
         const totalPages = Math.ceil(count / limit);
@@ -371,8 +428,11 @@ exports.getAllListings = async (req, res) => {
                 total_reviews: listingData.total_reviews,
                 createdAt: listingData.createdAt,
                 updatedAt: listingData.updatedAt,
+                boost_priority: listingData.boost_priority,
+                plan_expires_at: listingData.plan_expires_at,
                 category: listingData.category,
                 provider: listingData.provider,
+                provider_phone: listingData.provider?.phone_e164 || null,
             };
         });
 
@@ -727,7 +787,7 @@ exports.updateListing = async (req, res) => {
             years_experience: years_experience !== undefined ? years_experience : listing.years_experience,
             certifications: certifications !== undefined ? certifications : listing.certifications,
             portfolio_links: portfolio_links !== undefined ? portfolio_links : listing.portfolio_links,
-            status: 'pending', // Reset to pending for re-approval
+            status: 'pending_review', // edited post goes back into the moderation queue
         });
 
         console.log('✅ [SERVICE_LISTING_CONTROLLER] Listing updated:', listing.listing_id);
@@ -798,6 +858,96 @@ exports.deleteListing = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Unable to delete listing. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// REQUEST / CONTACT A PROVIDER
+// POST /api/services/listings/:id/contact
+// A customer expresses interest. WeGo does NOT broker the job or the money —
+// it records the lead, bumps contact_count, and pushes the provider so they
+// can reach back out. Returns the provider's contact details to the customer.
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.requestService = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const customerUuid = req.user.uuid;
+        const { message } = req.body || {};
+
+        if (!id || isNaN(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid listing ID.',
+            });
+        }
+
+        const listing = await ServiceListing.findByPk(id, {
+            include: [{
+                model: Account,
+                as: 'provider',
+                attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+            }],
+        });
+
+        if (!listing || listing.status !== 'active') {
+            return res.status(404).json({
+                success: false,
+                message: 'This service is not available.',
+            });
+        }
+
+        // A provider contacting their own listing is a no-op.
+        if (listing.provider_id === customerUuid) {
+            return res.status(400).json({
+                success: false,
+                message: 'You cannot request your own service.',
+            });
+        }
+
+        // Atomic counter bump (safe under concurrency, scales fine).
+        await listing.increment('contact_count');
+
+        // Who's asking — for a friendly push body.
+        const customer = await Account.findOne({
+            where: { uuid: customerUuid },
+            attributes: ['first_name', 'last_name', 'phone_e164'],
+        });
+        const customerName = customer
+            ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'A customer'
+            : 'A customer';
+
+        // Push-notify the provider (never block the response).
+        NotificationService.send({
+            accountUuid: listing.provider_id,
+            type:        'SERVICE_NEW_REQUEST',
+            title:       'New service request 📩',
+            body:        `${customerName} is interested in "${listing.title}".`,
+            data:        {
+                screen:        'listing_requests',
+                listing_id:    String(listing.id),
+                customer_uuid: String(customerUuid),
+                customer_phone: customer?.phone_e164 || '',
+            },
+        }).catch(err => console.warn('⚠️ [NOTIF] service request push failed:', err.message));
+
+        return res.status(200).json({
+            success: true,
+            message: 'Request sent. The provider has been notified and may contact you.',
+            data: {
+                listing_id:     listing.id,
+                provider_name:  `${listing.provider?.first_name || ''} ${listing.provider?.last_name || ''}`.trim(),
+                provider_phone: listing.provider?.phone_e164 || null,
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [SERVICE_LISTING_CONTROLLER] Error in requestService:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to send your request. Please try again later.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined,
         });
     }

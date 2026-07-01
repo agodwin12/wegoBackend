@@ -313,7 +313,13 @@ async function listAvailableVehicles(req, res, next) {
 
         console.log("🔍 Fetching available vehicles. Filters:", { region, categoryId, minPrice, maxPrice, seats });
 
-        const whereClause = { availableForRent: true };
+        // Pagination — never return an unbounded list (scales to 50k+ vehicles).
+        const page  = Math.max(1, parseInt(req.query.page  || '1',  10));
+        const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || '20', 10)));
+        const offset = (page - 1) * limit;
+
+        // available + not blocked → served by idx_vehicles_browse(region, available_for_rent, is_blocked)
+        const whereClause = { availableForRent: true, isBlocked: false };
 
         if (region) {
             whereClause.region = region;
@@ -327,7 +333,7 @@ async function listAvailableVehicles(req, res, next) {
             whereClause.seats = { [Op.gte]: parseInt(seats) };
         }
 
-        const vehicles = await Vehicle.findAll({
+        const { count, rows } = await Vehicle.findAndCountAll({
             where: whereClause,
             attributes: [
                 'id', 'plate', 'makeModel', 'color', 'region', 'seats',
@@ -342,14 +348,20 @@ async function listAvailableVehicles(req, res, next) {
                     attributes: ['id', 'name', 'slug', 'description', 'icon']
                 }
             ],
-            order: [['createdAt', 'DESC']]
+            order: [['createdAt', 'DESC']],
+            limit,
+            offset,
         });
 
-        console.log("✅ Available vehicles found:", vehicles.length);
+        console.log(`✅ Available vehicles: page ${page} (${rows.length} of ${count})`);
         res.json({
             success: true,
-            count: vehicles.length,
-            vehicles
+            count: rows.length,
+            total: count,
+            page,
+            limit,
+            totalPages: Math.ceil(count / limit),
+            vehicles: rows,
         });
     } catch (err) {
         console.error("❌ Error in listAvailableVehicles:", err);
@@ -842,14 +854,19 @@ async function listAllRentals(req, res, next) {
         const whereClause = {};
 
         if (status) {
-            whereClause.status = status;
+            whereClause.status = status;            // served by idx_rentals_status
         }
 
         if (paymentStatus) {
-            whereClause.paymentStatus = paymentStatus;
+            whereClause.paymentStatus = paymentStatus; // idx_rentals_payment_status
         }
 
-        const rentals = await VehicleRental.findAll({
+        // Pagination — never return every rental at once (scales with the fleet).
+        const page  = Math.max(1, parseInt(req.query.page  || '1',  10));
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '25', 10)));
+        const offset = (page - 1) * limit;
+
+        const { count, rows } = await VehicleRental.findAndCountAll({
             where: whereClause,
             include: [
                 {
@@ -869,14 +886,21 @@ async function listAllRentals(req, res, next) {
                     attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164']
                 }
             ],
-            order: [['createdAt', 'DESC']]
+            order: [['createdAt', 'DESC']],
+            limit,
+            offset,
+            distinct: true, // correct count with includes
         });
 
-        console.log("✅ Total rental requests found:", rentals.length);
+        console.log(`✅ Rentals: page ${page} (${rows.length} of ${count})`);
         res.json({
             success: true,
-            count: rentals.length,
-            rentals
+            count: rows.length,
+            total: count,
+            page,
+            limit,
+            totalPages: Math.ceil(count / limit),
+            rentals: rows,
         });
     } catch (err) {
         console.error("❌ Error in listAllRentals:", err);

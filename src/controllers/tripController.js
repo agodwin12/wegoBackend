@@ -2,11 +2,16 @@
 
 const { v4: uuidv4 } = require('uuid');
 const { Op } = require('sequelize');
-const { Trip, TripEvent, Account, DriverProfile } = require('../models');
+const { Trip, TripEvent, Account, DriverProfile, Coupon, CouponUsage } = require('../models');
+const couponService = require('../services/couponService');
 const fareCalculatorService = require('../services/fareCalculatorService');
+
+// Ride commission rate — coupons are capped at the commission so WeGo (which
+// never touches the P2P fare) never has to pay the driver.
+const RIDE_COMMISSION_RATE = parseFloat(process.env.COMMISSION_RATE || '0.15');
 const tripMatchingService   = require('../services/tripMatchingService');
 const locationService       = require('../services/locationService');
-const campayService         = require('../services/campay/campayService');
+// CamPay is NOT used for rides — the fare is paid directly to the driver.
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets');
 
@@ -14,7 +19,6 @@ const { getIO } = require('../sockets');
 const getNotificationService = () => require('../services/NotificationService');
 
 // Payment methods that require CamPay confirmation before driver matching starts
-const DIGITAL_PAYMENT_METHODS = ['MOMO', 'OM'];
 
 // ═══════════════════════════════════════════════════════════════════════
 // CREATE TRIP (PASSENGER)
@@ -42,7 +46,10 @@ exports.createTrip = async (req, res, next) => {
             dropoffLng,
             dropoffAddress,
             payment_method,
+            promo_code,   // mobile field
+            coupon_code,  // accepted alias
         } = req.body;
+        const couponInput = promo_code || coupon_code;
 
         console.log('📦 [CREATE TRIP] Received body:', req.body);
 
@@ -125,6 +132,25 @@ exports.createTrip = async (req, res, next) => {
         console.log('🆔 [CREATE TRIP] Generated tripId:', tripId);
         console.log('💳 [CREATE TRIP] Payment method:', paymentMethod);
 
+        // ── Coupon (platform-funded via commission) ───────────────────────
+        // The discount is capped at the commission (fare × rate) so the driver
+        // is always kept whole and WeGo never has to pay the driver.
+        const grossFare = Math.round(estimate.fare_estimate);
+        let couponRow = null, couponDiscount = 0;
+        if (couponInput && String(couponInput).trim()) {
+            const commissionCap = Math.floor(grossFare * RIDE_COMMISSION_RATE);
+            const evalResult = await couponService.evaluate({
+                code: couponInput, userUuid: req.user.uuid,
+                grossAmount: grossFare, maxDiscount: commissionCap,
+            });
+            if (!evalResult.ok) {
+                return res.status(400).json({ error: true, message: evalResult.message, code: 'COUPON_INVALID', data: null });
+            }
+            couponRow      = evalResult.coupon;
+            couponDiscount = evalResult.discount;
+        }
+        const payableFare = Math.max(0, grossFare - couponDiscount);
+
         const tripData = {
             id:             tripId,
             passengerId:    req.user.uuid,
@@ -138,7 +164,10 @@ exports.createTrip = async (req, res, next) => {
             routePolyline:  estimate.polyline,
             distanceM:      estimate.distance_m,
             durationS:      estimate.duration_s,
-            fareEstimate:   estimate.fare_estimate,
+            fareEstimate:   grossFare,
+            payableFare,                       // what the passenger pays the driver
+            discountAmount: couponDiscount,
+            couponCode:     couponRow?.code || null,
             fareBreakdown:  estimate.breakdown || null,
             paymentMethod,
             createdAt:      new Date().toISOString(),
@@ -160,36 +189,48 @@ exports.createTrip = async (req, res, next) => {
             dropoffAddress: tripData.dropoffAddress,
             distanceM:      estimate.distance_m,
             durationS:      estimate.duration_s,
-            fareEstimate:   estimate.fare_estimate,
+            fareEstimate:   grossFare,
             routePolyline:  estimate.polyline,
             paymentMethod,
+            couponId:       couponRow?.id   || null,
+            couponCode:     couponRow?.code || null,
+            discountAmount: couponDiscount,
+            originalFare:   couponDiscount > 0 ? grossFare : null,
         });
         console.log('✅ [DB] Trip persisted with status=SEARCHING');
+
+        // Record the redemption (best-effort — never fail a trip over this).
+        if (couponRow && couponDiscount > 0) {
+            try {
+                await CouponUsage.create({
+                    coupon_id: couponRow.id, user_id: req.user.uuid,
+                    trip_id: tripId, discount_applied: couponDiscount,
+                });
+                await couponRow.incrementUsage();
+            } catch (e) {
+                console.warn('⚠️ [CREATE TRIP] coupon usage record failed:', e.message);
+            }
+        }
 
         console.log('🧠 [REDIS] Saving trip data to Redis...');
         await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, ttl);
         await redisHelpers.setJson(existingActiveTripKey, { tripId, status: 'SEARCHING' }, ttl);
 
-        const isDigitalPayment = DIGITAL_PAYMENT_METHODS.includes(paymentMethod);
-        let driversNotified    = 0;
-
-        if (!isDigitalPayment) {
-            console.log('📢 [CREATE TRIP] Cash payment — broadcasting to nearby drivers...');
-            const io        = getIO();
-            const broadcast = await tripMatchingService.broadcastTripToDrivers(tripId, io);
-            console.log('📡 [CREATE TRIP] Broadcast result:', broadcast);
-            driversNotified = broadcast.driversNotified || 0;
-        } else {
-            console.log(`💳 [CREATE TRIP] Digital payment (${paymentMethod}) — holding matching until payment confirmed`);
-        }
+        // The fare is paid directly to the driver (cash / MoMo / OM are all P2P
+        // and never touch WeGo). Matching ALWAYS starts immediately — there is
+        // no upfront payment to WeGo for a ride. The recorded paymentMethod is
+        // only how the passenger will settle with the driver at the end.
+        console.log(`📢 [CREATE TRIP] Broadcasting to nearby drivers (paymentMethod=${paymentMethod})...`);
+        const io        = getIO();
+        const broadcast = await tripMatchingService.broadcastTripToDrivers(tripId, io);
+        console.log('📡 [CREATE TRIP] Broadcast result:', broadcast);
+        const driversNotified = broadcast.driversNotified || 0;
 
         console.log('✅ [CREATE TRIP] Trip successfully created:', tripId);
 
         res.status(201).json({
-            message: isDigitalPayment
-                ? 'Trip created. Please complete your mobile money payment to find a driver.'
-                : 'Trip created successfully, searching for drivers...',
-            requiresPayment: isDigitalPayment,
+            message:         'Trip created successfully, searching for drivers...',
+            requiresPayment: false,
             data: {
                 trip:            tripData,
                 driversNotified,
@@ -198,118 +239,6 @@ exports.createTrip = async (req, res, next) => {
 
     } catch (error) {
         console.error('❌ [CREATE TRIP] Error:', error.stack || error.message);
-        next(error);
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════
-// INITIATE TRIP PAYMENT
-// ═══════════════════════════════════════════════════════════════════════
-
-exports.initiatePayment = async (req, res, next) => {
-    console.log('========================');
-    console.log('💳 [TRIP_CONTROLLER:initiatePayment] Request initiated');
-    try {
-        const { tripId }  = req.params;
-        const { phone }   = req.body;
-        const passengerId = req.user.uuid;
-
-        console.log(`🆔 Trip: ${tripId} | Passenger: ${passengerId} | Phone: ${phone}`);
-
-        if (!phone) {
-            return res.status(400).json({
-                success: false,
-                error:   'MISSING_PHONE',
-                message: 'phone is required — the mobile money number to charge.',
-            });
-        }
-
-        const trip = await Trip.findOne({
-            where:      { id: tripId, passengerId },
-            attributes: ['id', 'passengerId', 'status', 'paymentMethod', 'fareEstimate'],
-        });
-
-        if (!trip) {
-            return res.status(404).json({
-                success: false,
-                error:   'TRIP_NOT_FOUND',
-                message: 'Trip not found.',
-            });
-        }
-
-        if (!DIGITAL_PAYMENT_METHODS.includes(trip.paymentMethod)) {
-            return res.status(400).json({
-                success: false,
-                error:   'NOT_DIGITAL_PAYMENT',
-                message: 'This trip uses cash payment — no mobile money charge required.',
-            });
-        }
-
-        if (trip.status !== 'SEARCHING') {
-            return res.status(409).json({
-                success: false,
-                error:   'TRIP_NOT_SEARCHING',
-                message: `Trip is already ${trip.status} — payment may have already been processed.`,
-            });
-        }
-
-        const { WegoPayment } = require('../models');
-        const existingPayment = await WegoPayment.findOne({
-            where: {
-                vertical:    'trip',
-                vertical_id: tripId,
-                status:      { [Op.in]: ['PENDING', 'SUCCESSFUL'] },
-            },
-        });
-
-        if (existingPayment) {
-            return res.status(409).json({
-                success: false,
-                error:   'PAYMENT_ALREADY_INITIATED',
-                message: existingPayment.status === 'SUCCESSFUL'
-                    ? 'Payment already confirmed — your trip is being matched.'
-                    : 'Payment already initiated. Please approve the prompt on your phone.',
-                data: {
-                    paymentId: existingPayment.id,
-                    campayRef: existingPayment.campay_ref,
-                    status:    existingPayment.status,
-                },
-            });
-        }
-
-        const campayResult = await campayService.initiateCollection({
-            vertical:    'trip',
-            verticalId:  tripId,
-            phone,
-            initiatedBy: passengerId,
-        });
-
-        console.log(`✅ [PAY TRIP] Payment initiated — campayRef: ${campayResult.campayRef}`);
-
-        return res.status(200).json({
-            success: true,
-            data: {
-                pending:     true,
-                paymentId:   campayResult.paymentId,
-                campayRef:   campayResult.campayRef,
-                externalRef: campayResult.externalRef,
-                ussdCode:    campayResult.ussdCode  || null,
-                operator:    campayResult.operator  || null,
-                amount:      trip.fareEstimate,
-                currency:    'XAF',
-                message:     'A payment prompt has been sent to your phone. Approve it to find a driver.',
-            },
-        });
-
-    } catch (error) {
-        console.error('❌ [PAY TRIP] Error:', error.message);
-        if (error.message?.includes('[CAMPAY')) {
-            return res.status(502).json({
-                success: false,
-                error:   'CAMPAY_ERROR',
-                message: 'Could not initiate payment. Please check your number and try again.',
-            });
-        }
         next(error);
     }
 };

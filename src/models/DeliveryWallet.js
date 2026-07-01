@@ -28,11 +28,6 @@ module.exports = (sequelize) => {
                 as:         'transactions',
             });
 
-            DeliveryWallet.hasMany(models.DeliveryPayoutRequest, {
-                foreignKey: 'wallet_id',
-                as:         'payoutRequests',
-            });
-
             // ⚠️  THIS is the ONE place this association is defined.
             //     Never repeat DeliveryWallet.hasMany(DeliveryWalletTopUp) in
             //     models/index.js — duplicate associations with the same alias
@@ -85,6 +80,13 @@ module.exports = (sequelize) => {
             allowNull:    false,
             defaultValue: 0.00,
             get() { return parseFloat(this.getDataValue('total_cash_collected') || 0); },
+        },
+
+        total_bonuses: {
+            type:         DataTypes.DECIMAL(12, 2),
+            allowNull:    false,
+            defaultValue: 0.00,
+            get() { return parseFloat(this.getDataValue('total_bonuses') || 0); },
         },
 
         total_commission_owed: {

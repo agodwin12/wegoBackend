@@ -5,9 +5,12 @@ const {
     ServiceListing,
     ServiceCategory,
     Account,
-    Employee
+    Employee,
+    ServiceAdPayment,
+    ServiceListingPlan
 } = require('../../models');
 const { Op } = require('sequelize');
+const NotificationService = require('../../services/NotificationService');
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET ALL LISTINGS FOR MODERATION (Admin)
@@ -228,32 +231,54 @@ exports.approveListing = async (req, res) => {
             });
         }
 
-        if (listing.status !== 'pending') {
+        if (listing.status !== 'pending_review') {
             return res.status(400).json({
                 success: false,
-                message: `Cannot approve listing with status "${listing.status}".`,
+                message: `Cannot approve listing with status "${listing.status}". Only listings pending review can be approved.`,
             });
         }
 
-        // Approve listing
+        // Apply the provider's paid plan tier (boost + expiry), then go live.
+        const activePlan = await ServiceAdPayment.findOne({
+            where: { paid_by: listing.provider_id, status: 'active' },
+            include: [{ model: ServiceListingPlan, as: 'plan' }],
+            order: [['plan_expires_at', 'DESC']],
+        });
+        const now = new Date();
+        const fallbackExpiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
         await listing.update({
-            status: 'approved',
-            approved_by: employee_id,
-            approved_at: new Date(),
+            status:            'active',
+            approved_by:       employee_id,
+            approved_at:       now,
+            rejected_by:       null,
+            rejected_at:       null,
+            rejection_reason:  null,
+            current_plan_id:   activePlan?.plan_id ?? listing.current_plan_id ?? null,
+            boost_priority:    activePlan?.plan?.boost_priority ?? listing.boost_priority ?? 0,
+            plan_activated_at: now,
+            plan_expires_at:   activePlan?.plan_expires_at ?? fallbackExpiry,
         });
 
-        console.log(`✅ [LISTING_ADMIN] Listing approved:`, listing.listing_id, 'by employee:', employee_id);
+        console.log(`✅ [LISTING_ADMIN] Listing approved & live:`, listing.listing_id, 'by employee:', employee_id);
 
-        // TODO: Send notification to provider
+        NotificationService.send({
+            accountUuid: listing.provider_id,
+            type:        'SERVICE_LISTING_APPROVED',
+            title:       'Your post is live! 🎉',
+            body:        `"${listing.title}" has been approved and is now visible to customers.`,
+            data:        { screen: 'my_listings', listing_id: String(listing.id) },
+        }).catch(err => console.warn('⚠️ [NOTIF] approve push failed:', err.message));
 
         res.status(200).json({
             success: true,
-            message: 'Listing approved successfully. Provider will be notified.',
+            message: 'Listing approved and is now live. Provider has been notified.',
             data: {
                 id: listing.id,
                 listing_id: listing.listing_id,
                 status: listing.status,
                 approved_at: listing.approved_at,
+                plan_expires_at: listing.plan_expires_at,
             },
         });
 
@@ -301,10 +326,10 @@ exports.rejectListing = async (req, res) => {
             });
         }
 
-        if (listing.status !== 'pending') {
+        if (listing.status !== 'pending_review') {
             return res.status(400).json({
                 success: false,
-                message: `Cannot reject listing with status "${listing.status}".`,
+                message: `Cannot reject listing with status "${listing.status}". Only listings pending review can be rejected.`,
             });
         }
 
@@ -318,7 +343,13 @@ exports.rejectListing = async (req, res) => {
 
         console.log(`❌ [LISTING_ADMIN] Listing rejected:`, listing.listing_id, 'by employee:', employee_id);
 
-        // TODO: Send notification to provider with reason
+        NotificationService.send({
+            accountUuid: listing.provider_id,
+            type:        'SERVICE_LISTING_REJECTED',
+            title:       'Your post needs changes',
+            body:        `"${listing.title}" wasn't approved: ${reason.trim()}. You can edit and resubmit it.`,
+            data:        { screen: 'my_listings', listing_id: String(listing.id) },
+        }).catch(err => console.warn('⚠️ [NOTIF] reject push failed:', err.message));
 
         res.status(200).json({
             success: true,

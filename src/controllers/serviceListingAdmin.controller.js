@@ -1,7 +1,8 @@
 
 
-const { ServiceListing, ServiceCategory, Account, Employee } = require('../models');
+const { ServiceListing, ServiceCategory, Account, Employee, ServiceAdPayment, ServiceListingPlan } = require('../models');
 const { Op } = require('sequelize');
+const NotificationService = require('../services/NotificationService');
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET ALL LISTINGS (Admin - includes all statuses, with pagination)
@@ -128,7 +129,7 @@ exports.getPendingListings = async (req, res) => {
         const offset = (page - 1) * limit;
 
         const { count, rows: listings } = await ServiceListing.findAndCountAll({
-            where: { status: 'pending' },
+            where: { status: 'pending_review' },
             include: [
                 {
                     model: ServiceCategory,
@@ -272,37 +273,60 @@ exports.approveListing = async (req, res) => {
             });
         }
 
-        if (listing.status !== 'pending') {
+        if (listing.status !== 'pending_review') {
             return res.status(400).json({
                 success: false,
-                message: `Cannot approve listing with status "${listing.status}". Only pending listings can be approved.`,
+                message: `Cannot approve listing with status "${listing.status}". Only listings pending review can be approved.`,
             });
         }
 
-        // Approve listing
-        await listing.update({
-            status: 'approved',
-            approved_by: employee_id,
-            approved_at: new Date(),
-            rejected_by: null,
-            rejected_at: null,
-            rejection_reason: null,
+        // ── Apply the provider's active plan tier (boost + expiry) ──────────
+        // The plan they paid for decides search priority and how long the post
+        // stays live. Fall back to a 30-day, no-boost run if none is found.
+        const activePlan = await ServiceAdPayment.findOne({
+            where: { paid_by: listing.provider_id, status: 'active' },
+            include: [{ model: ServiceListingPlan, as: 'plan' }],
+            order: [['plan_expires_at', 'DESC']],
         });
 
-        console.log('✅ [SERVICE_LISTING_ADMIN_CONTROLLER] Listing approved:', listing.listing_id, 'by employee:', employee_id);
+        const now = new Date();
+        const fallbackExpiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-        // TODO: Send notification to provider
-        // - Push notification: "Your listing has been approved!"
-        // - Email notification
+        // Approve → go live immediately (the plan is already paid for).
+        await listing.update({
+            status:            'active',
+            approved_by:       employee_id,
+            approved_at:       now,
+            rejected_by:       null,
+            rejected_at:       null,
+            rejection_reason:  null,
+            current_plan_id:   activePlan?.plan_id ?? listing.current_plan_id ?? null,
+            boost_priority:    activePlan?.plan?.boost_priority ?? listing.boost_priority ?? 0,
+            plan_activated_at: now,
+            plan_expires_at:   activePlan?.plan_expires_at ?? fallbackExpiry,
+        });
+
+        console.log('✅ [SERVICE_LISTING_ADMIN_CONTROLLER] Listing approved & live:', listing.listing_id, 'by employee:', employee_id);
+
+        // Push-notify the provider that their post is live (never block the response).
+        NotificationService.send({
+            accountUuid: listing.provider_id,
+            type:        'SERVICE_LISTING_APPROVED',
+            title:       'Your post is live! 🎉',
+            body:        `"${listing.title}" has been approved and is now visible to customers.`,
+            data:        { screen: 'my_listings', listing_id: String(listing.id) },
+        }).catch(err => console.warn('⚠️ [NOTIF] approve push failed:', err.message));
 
         res.status(200).json({
             success: true,
-            message: 'Listing approved successfully. Provider will be notified.',
+            message: 'Listing approved and is now live. Provider has been notified.',
             data: {
-                id: listing.id,
-                listing_id: listing.listing_id,
-                status: listing.status,
-                approved_at: listing.approved_at,
+                id:              listing.id,
+                listing_id:      listing.listing_id,
+                status:          listing.status,
+                approved_at:     listing.approved_at,
+                plan_expires_at: listing.plan_expires_at,
+                boost_priority:  listing.boost_priority,
             },
         });
 
@@ -350,14 +374,14 @@ exports.rejectListing = async (req, res) => {
             });
         }
 
-        if (listing.status !== 'pending') {
+        if (listing.status !== 'pending_review') {
             return res.status(400).json({
                 success: false,
-                message: `Cannot reject listing with status "${listing.status}". Only pending listings can be rejected.`,
+                message: `Cannot reject listing with status "${listing.status}". Only listings pending review can be rejected.`,
             });
         }
 
-        // Reject listing
+        // Reject listing (provider can edit & resubmit)
         await listing.update({
             status: 'rejected',
             rejection_reason: rejection_reason.trim(),
@@ -369,9 +393,14 @@ exports.rejectListing = async (req, res) => {
 
         console.log('✅ [SERVICE_LISTING_ADMIN_CONTROLLER] Listing rejected:', listing.listing_id, 'by employee:', employee_id);
 
-        // TODO: Send notification to provider
-        // - Push notification: "Your listing needs revision"
-        // - Email notification with rejection reason
+        // Push-notify the provider with the reason (never block the response).
+        NotificationService.send({
+            accountUuid: listing.provider_id,
+            type:        'SERVICE_LISTING_REJECTED',
+            title:       'Your post needs changes',
+            body:        `"${listing.title}" wasn't approved: ${rejection_reason.trim()}. You can edit and resubmit it.`,
+            data:        { screen: 'my_listings', listing_id: String(listing.id) },
+        }).catch(err => console.warn('⚠️ [NOTIF] reject push failed:', err.message));
 
         res.status(200).json({
             success: true,
@@ -420,10 +449,11 @@ exports.activateListing = async (req, res) => {
             });
         }
 
-        if (listing.status !== 'approved') {
+        // Re-activate a post the provider/admin had hidden (or a legacy 'approved' row).
+        if (!['inactive', 'approved', 'expired'].includes(listing.status)) {
             return res.status(400).json({
                 success: false,
-                message: `Cannot activate listing with status "${listing.status}". Only approved listings can be activated.`,
+                message: `Cannot activate listing with status "${listing.status}". Only inactive/expired listings can be re-activated.`,
             });
         }
 
@@ -543,22 +573,6 @@ exports.deleteListingPermanently = async (req, res) => {
             });
         }
 
-        // Check if listing has active service requests
-        const { ServiceRequest } = require('../models');
-        const activeRequests = await ServiceRequest.count({
-            where: {
-                listing_id: id,
-                status: ['pending', 'accepted', 'in_progress', 'payment_pending'],
-            },
-        });
-
-        if (activeRequests > 0) {
-            return res.status(400).json({
-                success: false,
-                message: `Cannot permanently delete listing. It has ${activeRequests} active service request(s).`,
-            });
-        }
-
         // Hard delete
         await listing.destroy({ force: true });
 
@@ -587,8 +601,8 @@ exports.deleteListingPermanently = async (req, res) => {
 exports.getModerationStats = async (req, res) => {
     try {
         const totalListings = await ServiceListing.count();
-        const pendingListings = await ServiceListing.count({ where: { status: 'pending' } });
-        const approvedListings = await ServiceListing.count({ where: { status: 'approved' } });
+        const pendingListings = await ServiceListing.count({ where: { status: 'pending_review' } });
+        const approvedListings = await ServiceListing.count({ where: { status: ['approved', 'active'] } });
         const activeListings = await ServiceListing.count({ where: { status: 'active' } });
         const rejectedListings = await ServiceListing.count({ where: { status: 'rejected' } });
         const inactiveListings = await ServiceListing.count({ where: { status: 'inactive' } });
@@ -596,7 +610,7 @@ exports.getModerationStats = async (req, res) => {
         // Pending more than 24 hours
         const urgentPendingCount = await ServiceListing.count({
             where: {
-                status: 'pending',
+                status: 'pending_review',
                 created_at: {
                     [Op.lt]: new Date(Date.now() - 24 * 60 * 60 * 1000)
                 }

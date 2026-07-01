@@ -45,13 +45,16 @@ const NOTIFICATION_TYPES = [
     'DELIVERY_OFFER',
     'DELIVERY_OFFER_EXPIRED',
     'DELIVERY_PAYMENT_RECEIVED',
+    'DELIVERY_BONUS_EARNED',      // milestone/quest bonus credited to agent wallet
 
     // Services Marketplace (customer)
     'SERVICE_REQUEST_ACCEPTED',
     'SERVICE_REQUEST_REJECTED',
     'SERVICE_DISPUTE_RESOLVED',
     // Services Marketplace (provider)
-    'SERVICE_NEW_REQUEST',
+    'SERVICE_NEW_REQUEST',        // a customer requested/contacted the provider
+    'SERVICE_LISTING_APPROVED',   // moderator approved the post → now live
+    'SERVICE_LISTING_REJECTED',   // moderator rejected the post (needs revision)
 
     // Wallet / Payments
     'WALLET_TOPUP_SUCCESS',
@@ -227,9 +230,14 @@ Notification.init(
         // ─────────────────────────────────────────────────────────────
 
         expires_at: {
-            type:      DataTypes.DATE,
-            allowNull: false,
-            comment:   'Auto-set to created_at + 7 days.',
+            type:         DataTypes.DATE,
+            allowNull:    false,
+            // 7-day inbox TTL. Previously this had no default, so every
+            // NotificationService.send() failed the notNull check and no
+            // notification was ever persisted to the inbox — only the FCM push
+            // fired. This default restores the in-app inbox.
+            defaultValue: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            comment:      'Auto-set to created_at + 7 days.',
         },
     },
     {
@@ -237,6 +245,10 @@ Notification.init(
         modelName:  'Notification',
         tableName:  'notifications',
         timestamps: true,
+        // The notifications table has created_at but NO updated_at column, so
+        // Sequelize's updated_at insert must be disabled (it was silently
+        // breaking every inbox persist). read_at tracks the only mutation.
+        updatedAt:  false,
         underscored: true,
 
         indexes: [

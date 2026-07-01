@@ -57,6 +57,13 @@ module.exports = (sequelize) => {
                 foreignKey: 'surge_rule_id',
                 as:         'surgeRule',
             });
+            if (models.Coupon) {
+                Delivery.belongsTo(models.Coupon, {
+                    foreignKey:  'coupon_id',
+                    as:          'coupon',
+                    constraints: false,
+                });
+            }
             Delivery.hasMany(models.DeliveryTracking, {
                 foreignKey: 'delivery_id',
                 as:         'trackingPoints',
@@ -357,6 +364,12 @@ module.exports = (sequelize) => {
             rating:             { type: DataTypes.DECIMAL(3, 2), allowNull: true },
             rating_comment:     { type: DataTypes.STRING(500),   allowNull: true },
             rated_at:           { type: DataTypes.DATE,          allowNull: true },
+
+            // ── Coupons (platform-funded discount; driver payout protected) ──
+            coupon_id:            { type: DataTypes.STRING(36),   allowNull: true },
+            coupon_code:          { type: DataTypes.STRING(20),   allowNull: true },
+            discount_amount:      { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
+            original_total_price: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
         },
         {
             sequelize,

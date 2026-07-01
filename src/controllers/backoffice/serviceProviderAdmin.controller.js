@@ -4,7 +4,7 @@
 const {
     Account,
     ServiceListing,
-    ServiceRequest,
+    ServiceAdPayment,
     ServiceRating,
     ServiceCategory,
 } = require('../../models');
@@ -144,67 +144,24 @@ const getAllProviders = async (req, res) => {
                 where: { provider_id: providerId, status: 'pending' }
             });
 
-            // Count of completed services
-            const completedServices = await ServiceRequest.count({
-                where: {
-                    provider_id: providerId,
-                    status: { [Op.in]: ['completed', 'payment_confirmed'] }
-                }
+            // Plans purchased by this provider
+            const [activePlans, totalPlans] = await Promise.all([
+                ServiceAdPayment.count({ where: { paid_by: providerId, status: 'active' } }),
+                ServiceAdPayment.count({ where: { paid_by: providerId } }),
+            ]);
+            const [planRevenueRow] = await ServiceAdPayment.findAll({
+                attributes: [[sequelize.fn('SUM', sequelize.col('amount_snapshot')), 'total']],
+                where: { paid_by: providerId, status: { [Op.in]: ['active', 'expired'] } },
+                raw: true,
             });
-
-            // Total services (all statuses)
-            const totalServices = await ServiceRequest.count({
-                where: { provider_id: providerId }
-            });
-
-            // Active services (currently in progress)
-            const activeServices = await ServiceRequest.count({
-                where: {
-                    provider_id: providerId,
-                    status: { [Op.in]: ['accepted', 'in_progress', 'payment_pending', 'payment_confirmation_pending'] }
-                }
-            });
-
-            // Cancelled services
-            const cancelledServices = await ServiceRequest.count({
-                where: {
-                    provider_id: providerId,
-                    status: 'cancelled'
-                }
-            });
-
-            // Calculate completion rate
-            const completionRate = totalServices > 0
-                ? ((completedServices / totalServices) * 100).toFixed(2)
-                : 0;
-
-            // Total earnings (net amount after commission)
-            const earningsResult = await ServiceRequest.findOne({
-                attributes: [
-                    [sequelize.fn('SUM', sequelize.col('provider_net_amount')), 'total']
-                ],
-                where: {
-                    provider_id: providerId,
-                    status: { [Op.in]: ['completed', 'payment_confirmed'] },
-                    provider_net_amount: { [Op.gt]: 0 }
-                },
-                raw: true
-            });
-            const totalEarnings = earningsResult?.total || 0;
-
-            // Commission due to platform
-            const commissionResult = await ServiceRequest.findOne({
-                attributes: [
-                    [sequelize.fn('SUM', sequelize.col('commission_amount')), 'total']
-                ],
-                where: {
-                    provider_id: providerId,
-                    status: { [Op.in]: ['completed', 'payment_confirmed'] },
-                    commission_amount: { [Op.gt]: 0 }
-                },
-                raw: true
-            });
-            const totalCommission = commissionResult?.total || 0;
+            const totalEarnings    = 0; // classifieds — no earnings from WeGo
+            const totalCommission  = 0; // no commission model
+            const totalServices    = totalListings;
+            const completedServices = activeListings;
+            const activeServices   = activePlans;
+            const cancelledServices = 0;
+            const completionRate   = 0;
+            const averageResponseMinutes = 0;
 
             // Average rating across all ratings
             const ratingsResult = await ServiceRating.findOne({
@@ -223,26 +180,6 @@ const getAllProviders = async (req, res) => {
                 : 0;
             const totalReviews = ratingsResult?.count || 0;
 
-            // Response time (average time to accept request)
-            const acceptedRequests = await ServiceRequest.findAll({
-                where: {
-                    provider_id: providerId,
-                    status: { [Op.in]: ['accepted', 'in_progress', 'completed', 'payment_pending', 'payment_confirmation_pending', 'payment_confirmed'] },
-                    accepted_at: { [Op.not]: null }
-                },
-                attributes: ['created_at', 'accepted_at'],
-                raw: true,
-                limit: 50
-            });
-
-            let averageResponseMinutes = 0;
-            if (acceptedRequests.length > 0) {
-                const totalMinutes = acceptedRequests.reduce((sum, req) => {
-                    const responseTime = new Date(req.accepted_at) - new Date(req.created_at);
-                    return sum + (responseTime / 60000); // Convert to minutes
-                }, 0);
-                averageResponseMinutes = Math.round(totalMinutes / acceptedRequests.length);
-            }
 
             return {
                 id: provider.uuid,
@@ -482,18 +419,7 @@ const getProviderStats = async (req, res) => {
             ? parseFloat(avgRatingResult.avg).toFixed(1)
             : 0;
 
-        const commissionResult = await ServiceRequest.findOne({
-            attributes: [
-                [sequelize.fn('SUM', sequelize.col('commission_amount')), 'total']
-            ],
-            where: {
-                provider_id: { [Op.in]: providerIds },
-                status: { [Op.in]: ['completed', 'payment_confirmed'] },
-                commission_amount: { [Op.gt]: 0 }
-            },
-            raw: true
-        });
-        const totalCommissionDue = commissionResult?.total || 0;
+        const totalCommissionDue = 0; // classifieds model — no commission
 
         console.log('✅ [SERVICE_PROVIDER_ADMIN] Provider statistics retrieved');
 

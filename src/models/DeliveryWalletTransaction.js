@@ -134,6 +134,9 @@ module.exports = (sequelize) => {
                     // ── Earnings (digital payment deliveries) ────────
                     'delivery_earning',     // driver_payout credited post-delivery
 
+                    // ── Milestone / quest bonus ──────────────────────
+                    'bonus_quest',          // milestone bonus credited to wallet
+
                     // ── Withdrawals ──────────────────────────────────
                     'withdrawal',           // cashout processed
                     'withdrawal_reversal',  // cashout rejected/reversed

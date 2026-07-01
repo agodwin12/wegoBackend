@@ -1,10 +1,14 @@
-# Node.js
+# Node.j
 node_modules/
+
+# Env files — only the template is committed
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
 serviceAccountKey.json
 google-services.json
+serviceAccount*.json
 # Logs
 logs
 *.log

@@ -39,11 +39,16 @@ const captureRawBody = (req, res, next) => {
     req.on('data', chunk => { data += chunk; });
     req.on('end',  ()    => {
         req.rawBody = data;
+        // CamPay may send JSON or application/x-www-form-urlencoded depending on
+        // how the webhook is configured. Handle both so req.body is always populated.
         try {
-            // Parse body manually so req.body is still available downstream
             req.body = JSON.parse(data);
         } catch {
-            req.body = {};
+            try {
+                req.body = Object.fromEntries(new URLSearchParams(data));
+            } catch {
+                req.body = {};
+            }
         }
         next();
     });

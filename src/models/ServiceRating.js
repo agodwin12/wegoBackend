@@ -18,12 +18,11 @@ ServiceRating.init(
             autoIncrement: true,
         },
 
-        // Request Reference
+        // Kept nullable — classifieds model anchors ratings to listings, not requests
         request_id: {
             type: DataTypes.INTEGER,
-            allowNull: false,
-            unique: true,
-            comment: 'Service request ID (one rating per request)',
+            allowNull: true,
+            comment: 'Deprecated — was service request ID. Now null for listing-based reviews.',
         },
 
         // Provider & Customer

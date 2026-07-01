@@ -1,6 +1,7 @@
 // src/sockets/driverHandlers.js
 
-const { DriverLocation, Trip } = require('../models');
+const { v4: uuidv4 } = require('uuid');
+const { DriverLocation, Trip, TripEvent } = require('../models');
 const {
     redisClient,
     setDriverOnline,
@@ -12,6 +13,9 @@ const {
 
 // ── Notification service (lazy — avoids circular dep at startup) ──────────────
 const getNotificationService = () => require('../services/NotificationService');
+
+// Central ride state machine — the ONLY way trip.status should change.
+const { applyTransition } = require('../services/tripState.service');
 
 // ═══════════════════════════════════════════════════════════════════════
 // INTERNAL HELPER
@@ -35,7 +39,6 @@ async function _updateDriverLocationInRedis(driverId, lat, lng, heading = 0, spe
         lastUpdated: new Date().toISOString(),
     }, 3600);
 
-    console.log(`📍 [REDIS] Driver location stored: ${driverId} (${lat}, ${lng})`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -47,11 +50,7 @@ async function _updateDriverLocationInRedis(driverId, lat, lng, heading = 0, spe
  */
 async function handleDriverOnline(socket, data) {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🟢 [SOCKET-DRIVER] Driver going online');
-        console.log('👤 Driver ID:', socket.userId);
-        console.log('📍 Location:', data?.lat, data?.lng);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.log(`🟢 [SOCKET-DRIVER] ${socket.userId} going online`);
 
         const { lat, lng, heading = 0, speed = 0, accuracy = 10 } = data || {};
 
@@ -111,10 +110,7 @@ async function handleDriverOnline(socket, data) {
  */
 async function handleDriverOffline(socket, data) {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('🔴 [SOCKET-DRIVER] Driver going offline (explicit)');
-        console.log('👤 Driver ID:', socket.userId);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.log(`🔴 [SOCKET-DRIVER] ${socket.userId} going offline`);
 
         const activeTrip = await Trip.findOne({
             where: {
@@ -177,16 +173,22 @@ async function handleDriverLocationUpdate(socket, data, io) {
             console.error('⚠️ [SOCKET-DRIVER] Location update DB error:', err.message);
         });
 
-        const activeTrip = await Trip.findOne({
-            where: {
-                driverId: socket.userId,
-                status:   ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
-            },
-        });
+        // Use Redis cache first to avoid DB hit on every GPS ping
+        let passengerId = null;
+        let tripId      = null;
 
-        if (activeTrip?.passengerId) {
-            io.to(`passenger:${activeTrip.passengerId}`).emit('driver:location', {
-                tripId:    activeTrip.id,
+        const activeTripRef = await redisHelpers.getJson(`driver:active_trip:${socket.userId}`);
+        if (activeTripRef?.tripId) {
+            const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(activeTripRef.tripId));
+            if (tripData && !['COMPLETED', 'CANCELED'].includes(tripData.status)) {
+                passengerId = tripData.passengerId;
+                tripId      = tripData.id || activeTripRef.tripId;
+            }
+        }
+
+        if (passengerId) {
+            io.to(`passenger:${passengerId}`).emit('driver:location', {
+                tripId,
                 lat,
                 lng,
                 heading,
@@ -207,12 +209,6 @@ async function handleTripAccept(socket, data, io) {
     const { tripId } = data || {};
     const driverId   = socket.userId;
 
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('✅ [SOCKET-DRIVER] Driver accepting trip');
-    console.log('👤 Driver ID:', driverId);
-    console.log('🚕 Trip ID:', tripId);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
     try {
         if (!tripId) {
             return socket.emit('trip:accept:failed', { message: 'Trip ID is required' });
@@ -228,23 +224,29 @@ async function handleTripAccept(socket, data, io) {
 
         console.log('✅ [SOCKET-DRIVER] Trip accepted successfully');
 
+        // Join the trip room so driver receives passenger cancel events
+        socket.join(`trip:${tripId}`);
+
+        const t = result.trip || {};
         socket.emit('trip:accept:success', {
-            tripId:  result.trip?.id,
+            tripId:  tripId,
             message: 'Trip accepted successfully',
             trip: {
-                id:             result.trip?.id,
-                status:         result.trip?.status,
-                pickupLat:      result.trip?.pickupLat,
-                pickupLng:      result.trip?.pickupLng,
-                pickupAddress:  result.trip?.pickupAddress,
-                dropoffLat:     result.trip?.dropoffLat,
-                dropoffLng:     result.trip?.dropoffLng,
-                dropoffAddress: result.trip?.dropoffAddress,
-                fareEstimate:   result.trip?.fareEstimate,
-                distanceM:      result.trip?.distanceM,
-                durationS:      result.trip?.durationS,
+                id:             tripId,
+                status:         t.status         || 'MATCHED',
+                pickupLat:      t.pickupLat,
+                pickupLng:      t.pickupLng,
+                pickupAddress:  t.pickupAddress,
+                dropoffLat:     t.dropoffLat,
+                dropoffLng:     t.dropoffLng,
+                dropoffAddress: t.dropoffAddress,
+                fareEstimate:   t.fareEstimate,
+                distanceM:      t.distanceM,
+                durationS:      t.durationS,
+                passenger:      result.passenger,
             },
-            driver: result.driver,
+            driver:    result.driver,
+            passenger: result.passenger,
         });
 
     } catch (error) {
@@ -291,9 +293,7 @@ async function handleDriverEnRoute(socket, data, io) {
             return socket.emit('error', { message: 'Trip not found or not assigned to you' });
         }
 
-        trip.status          = 'DRIVER_EN_ROUTE';
-        trip.driverEnRouteAt = new Date();
-        await trip.save();
+        await applyTransition(trip, 'DRIVER_EN_ROUTE', { actor: 'DRIVER' });
 
         console.log('✅ [SOCKET-DRIVER] Status updated to DRIVER_EN_ROUTE');
 
@@ -328,18 +328,18 @@ async function handleDriverArrived(socket, data, io) {
             return socket.emit('error', { message: 'Trip not found or not assigned to you' });
         }
 
-        trip.status          = 'DRIVER_ARRIVED';
-        trip.driverArrivedAt = new Date();
-        await trip.save();
+        await applyTransition(trip, 'DRIVER_ARRIVED', { actor: 'DRIVER' });
 
         console.log('✅ [SOCKET-DRIVER] Status updated to DRIVER_ARRIVED');
 
-        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', {
+        const arrivedPayload = {
             tripId:    trip.id,
             status:    'DRIVER_ARRIVED',
             message:   'Driver has arrived at pickup location',
             timestamp: new Date().toISOString(),
-        });
+        };
+        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', arrivedPayload);
+        io.to(`passenger:${trip.passengerId}`).emit('trip:driver_arrived', arrivedPayload);
 
         socket.emit('trip:status:success', { tripId: trip.id, status: 'DRIVER_ARRIVED' });
 
@@ -377,18 +377,19 @@ async function handleTripStart(socket, data, io) {
             return socket.emit('error', { message: 'Trip not found or not assigned to you' });
         }
 
-        trip.status        = 'IN_PROGRESS';
-        trip.tripStartedAt = new Date();
-        await trip.save();
+        await applyTransition(trip, 'IN_PROGRESS', { actor: 'DRIVER' });
 
         console.log('✅ [SOCKET-DRIVER] Trip started');
 
-        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', {
+        const startedPayload = {
             tripId:    trip.id,
             status:    'IN_PROGRESS',
             message:   'Trip has started',
+            startedAt: new Date().toISOString(),
             timestamp: new Date().toISOString(),
-        });
+        };
+        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', startedPayload);
+        io.to(`passenger:${trip.passengerId}`).emit('trip:started', startedPayload);
 
         socket.emit('trip:status:success', { tripId: trip.id, status: 'IN_PROGRESS' });
 
@@ -414,10 +415,8 @@ async function handleTripComplete(socket, data, io) {
             return socket.emit('error', { message: 'Trip not found or not assigned to you' });
         }
 
-        trip.status          = 'COMPLETED';
-        trip.tripCompletedAt = new Date();
         if (finalFare) trip.fareFinal = finalFare;
-        await trip.save();
+        await applyTransition(trip, 'COMPLETED', { actor: 'DRIVER', meta: { finalFare: trip.fareFinal } });
 
         await setDriverAvailable(socket.userId);
         await DriverLocation.update(
@@ -425,15 +424,22 @@ async function handleTripComplete(socket, data, io) {
             { where: { driver_id: socket.userId } }
         );
 
+        // Clean up Redis trip state
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`driver:active_trip:${socket.userId}`);
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+
         console.log('✅ [SOCKET-DRIVER] Trip completed');
 
-        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', {
+        const completedPayload = {
             tripId:    trip.id,
             status:    'COMPLETED',
             message:   'Trip completed',
             finalFare: trip.fareFinal,
             timestamp: new Date().toISOString(),
-        });
+        };
+        io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', completedPayload);
+        io.to(`passenger:${trip.passengerId}`).emit('trip:completed', completedPayload);
 
         socket.emit('trip:status:success', {
             tripId:  trip.id,
@@ -469,11 +475,19 @@ async function handleTripCancel(socket, data, io) {
         trip.canceledAt   = new Date();
         await trip.save();
 
+        TripEvent.create({ id: uuidv4(), tripId, type: 'trip_canceled',
+            payload: { canceledBy: 'DRIVER', driverId: socket.userId, reason: reason || 'No reason', timestamp: new Date().toISOString() } }).catch(() => {});
+
         await setDriverAvailable(socket.userId);
         await DriverLocation.update(
             { is_available: true },
             { where: { driver_id: socket.userId } }
         );
+
+        // Clean up Redis trip state
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`driver:active_trip:${socket.userId}`);
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
 
         console.log('✅ [SOCKET-DRIVER] Trip canceled by driver');
 

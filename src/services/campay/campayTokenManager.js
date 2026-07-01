@@ -30,9 +30,11 @@ class CamPayTokenManager {
 
         // ── Shortcut: permanent token configured ──────────────────────────────
         // Set CAMPAY_PERMANENT_TOKEN in .env to skip the token exchange entirely.
-        // Useful for testing or if CamPay issues you a non-expiring key.
-        if (process.env.CAMPAY_PERMANENT_TOKEN) {
-            return process.env.CAMPAY_PERMANENT_TOKEN;
+        // Trim first: a blank-with-whitespace value (e.g. "   ") is truthy and
+        // would otherwise be sent as the token, breaking every CamPay call.
+        const permanent = (process.env.CAMPAY_PERMANENT_TOKEN || '').trim();
+        if (permanent) {
+            return permanent;
         }
 
         // ── Try cache first ───────────────────────────────────────────────────

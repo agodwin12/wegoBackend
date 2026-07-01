@@ -14,7 +14,7 @@ const {
 const { issueOtp } = require('./otp.service');
 const { deleteFromR2 } = require('../utils/r2Upload');
 
-const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const SIGNUP_EXPIRY_MINUTES = parseInt(process.env.SIGNUP_EXPIRY_MINUTES || '30', 10);
 
 // ═══════════════════════════════════════════════════════════════

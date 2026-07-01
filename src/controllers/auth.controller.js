@@ -227,14 +227,8 @@ exports.googleAuth = async (req, res) => {
             });
         }
 
-        if (!user_type) {
-            return res.status(400).json({
-                success: false,
-                message: 'User type is required. Use PASSENGER or DRIVER.',
-                code: 'GOOGLE_USER_TYPE_REQUIRED',
-            });
-        }
-
+        // user_type is optional: omit to LOG IN (existing account), or send
+        // PASSENGER/DRIVER to SIGN UP a new account in that role.
         const result = await googleAuthService({
             idToken: id_token,
             userType: user_type,

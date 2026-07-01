@@ -88,12 +88,6 @@ async function _resetVerticalState(vertical, verticalId) {
 
     switch (vertical) {
 
-        case 'trip':
-            // Trip stays in SEARCHING — passenger can retry payment or cancel normally.
-            // No state change needed; the trip is untouched.
-            console.log(`  ↩️  [EXPIRY][TRIP] Trip ${verticalId} stays SEARCHING — passenger can retry`);
-            break;
-
         case 'delivery':
             // Reset payment_status to 'pending' so the sender can initiate again.
             // Only reset if still 'pending' — don't overwrite 'paid' or 'cash_pending'.
@@ -107,11 +101,6 @@ async function _resetVerticalState(vertical, verticalId) {
                 }
             );
             console.log(`  ↩️  [EXPIRY][DELIVERY] Delivery ${verticalId} payment_status reset to pending`);
-            break;
-
-        case 'service_request':
-            // ServiceRequest stays in 'payment_pending' — no change needed.
-            console.log(`  ↩️  [EXPIRY][SERVICE] ServiceRequest ${verticalId} stays payment_pending — customer can retry`);
             break;
 
         case 'rental':

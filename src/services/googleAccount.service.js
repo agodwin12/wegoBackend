@@ -23,16 +23,12 @@ function makeGoogleAccountError(message, status = 400, code = 'GOOGLE_ACCOUNT_ER
     return err;
 }
 
+// user_type is OPTIONAL: omit it to LOG IN (role taken from the existing
+// account); provide PASSENGER/DRIVER to SIGN UP (the role the new account gets).
 function normalizeRequestedUserType(userType) {
     const normalized = String(userType || '').trim().toUpperCase();
 
-    if (!normalized) {
-        throw makeGoogleAccountError(
-            'user_type is required. Use PASSENGER or DRIVER.',
-            400,
-            'GOOGLE_USER_TYPE_REQUIRED'
-        );
-    }
+    if (!normalized) return null; // login — role-agnostic
 
     if (!ALLOWED_GOOGLE_USER_TYPES.includes(normalized)) {
         throw makeGoogleAccountError(
@@ -165,7 +161,10 @@ function buildCompleteUser(account) {
 async function linkGoogleToExistingAccount(account, googleProfile, requestedUserType) {
     console.log('🔗 [GOOGLE ACCOUNT] Existing account found. Checking link rules...');
 
-    if (account.user_type !== requestedUserType) {
+    // Only block when a SIGNUP explicitly asks for a different role than the
+    // existing account. A role-agnostic LOGIN (requestedUserType = null) just
+    // signs the user into their existing account.
+    if (requestedUserType && account.user_type !== requestedUserType) {
         throw makeGoogleAccountError(
             `This email is already registered as ${account.user_type}.`,
             409,
@@ -346,6 +345,13 @@ async function googleAuth({ idToken, userType, tokenOptions = {} }) {
             account,
             googleProfile,
             requestedUserType
+        );
+    } else if (!requestedUserType) {
+        // Role-agnostic login but no account yet → tell the app to sign up.
+        throw makeGoogleAccountError(
+            'No WeGo account is linked to this Google account yet. Please sign up and choose passenger or driver.',
+            404,
+            'GOOGLE_ACCOUNT_NOT_FOUND'
         );
     } else if (requestedUserType === 'PASSENGER') {
         account = await createGooglePassengerAccount(googleProfile);

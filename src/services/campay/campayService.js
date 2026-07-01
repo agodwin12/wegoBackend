@@ -37,7 +37,6 @@ const {
 // ── Vertical identifiers ──────────────────────────────────────────────────────
 // Must match WegoPayment.vertical ENUM exactly.
 const VERTICALS = {
-    TRIP:             'trip',
     DELIVERY:         'delivery',
     SERVICE_REQUEST:  'service_request',
     RENTAL:           'rental',
@@ -45,11 +44,8 @@ const VERTICALS = {
     DELIVERY_TOPUP:   'delivery_topup',   // agent wallet reload via MoMo/Orange
 };
 
-// ── Disbursement types ────────────────────────────────────────────────────────
-const DISBURSE_TYPES = {
-    DRIVER_CASHOUT: 'driver_cashout',
-    AGENT_CASHOUT:  'agent_cashout',
-};
+// Disbursements (withdrawals) are intentionally NOT supported — WeGo is
+// deposit/top-up only. Money only ever flows IN via collections.
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -168,107 +164,6 @@ class CamPayService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // INITIATE DISBURSEMENT
-    //
-    // Pay money from WeGo's CamPay balance to a driver or delivery agent.
-    // Called when admin approves a cashout request.
-    // Disbursement is synchronous — CamPay returns a final status immediately,
-    // no webhook needed.
-    //
-    // @param {object} params
-    //   @param {string} params.type          — 'driver_cashout' | 'agent_cashout'
-    //   @param {string} params.recipientId   — Account UUID of recipient
-    //   @param {number} params.amount        — Amount in XAF (integer)
-    //   @param {string} params.phone         — Recipient phone
-    //   @param {string} params.initiatedBy   — Employee/admin UUID who approved
-    //
-    // @returns {object}
-    //   { success: bool, paymentId, campayRef, status: 'SUCCESSFUL' | 'FAILED' }
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    async initiateDisbursement({ type, recipientId, amount, phone, initiatedBy }) {
-
-        if (!Object.values(DISBURSE_TYPES).includes(type)) {
-            throw new Error(
-                `[CAMPAY SERVICE] Unknown disbursement type: "${type}". ` +
-                `Must be one of: ${Object.values(DISBURSE_TYPES).join(', ')}`
-            );
-        }
-
-        if (!amount || amount <= 0) {
-            throw new Error('[CAMPAY SERVICE] Disbursement amount must be greater than 0');
-        }
-
-        const normalisedPhone = _normalisePhone(phone);
-
-        const shortId     = String(recipientId).slice(0, 12);
-        const shortUuid   = uuidv4().replace(/-/g, '').slice(0, 10).toUpperCase();
-        const externalRef = `WEGO-DSB-${shortId}-${shortUuid}`;
-
-        console.log(`\n💸 [CAMPAY SERVICE] Initiating disbursement`);
-        console.log(`   Type        : ${type}`);
-        console.log(`   Recipient   : ${recipientId}`);
-        console.log(`   Amount      : ${amount} XAF`);
-        console.log(`   Phone       : ${normalisedPhone}`);
-        console.log(`   ExternalRef : ${externalRef}`);
-
-        const payment = await WegoPayment.create({
-            id:           uuidv4(),
-            vertical:     null,
-            vertical_id:  String(recipientId),
-            external_ref: externalRef,
-            phone:        normalisedPhone,
-            amount:       Math.floor(amount),
-            direction:    'disburse',
-            status:       'PENDING',
-            initiated_by: initiatedBy,
-            initiated_at: new Date(),
-        });
-
-        let campayResponse;
-        try {
-            campayResponse = await campayClient.disburse({
-                amount:             String(Math.floor(amount)),
-                currency:           'XAF',
-                to:                 normalisedPhone,
-                description:        `WeGo ${type} payout`,
-                external_reference: externalRef,
-            });
-        } catch (campayErr) {
-            await payment.update({
-                status:         'FAILED',
-                failure_reason: campayErr.message,
-                resolved_at:    new Date(),
-            });
-
-            console.error(`❌ [CAMPAY SERVICE] Disbursement failed for ${externalRef}:`, campayErr.message);
-            throw campayErr;
-        }
-
-        const finalStatus = campayResponse.status === 'SUCCESSFUL' ? 'SUCCESSFUL' : 'FAILED';
-
-        await payment.update({
-            campay_ref:      campayResponse.reference,
-            campay_response: campayResponse,
-            operator:        campayResponse.operator || null,
-            status:          finalStatus,
-            resolved_at:     new Date(),
-        });
-
-        console.log(
-            `${finalStatus === 'SUCCESSFUL' ? '✅' : '❌'} [CAMPAY SERVICE] ` +
-            `Disbursement ${finalStatus} — campay_ref: ${campayResponse.reference}`
-        );
-
-        return {
-            success:   finalStatus === 'SUCCESSFUL',
-            paymentId: payment.id,
-            campayRef: campayResponse.reference,
-            status:    finalStatus,
-        };
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
     // CHECK PAYMENT STATUS
     //
     // Poll CamPay for the current status of a pending payment.
@@ -347,23 +242,8 @@ function _normalisePhone(phone) {
 async function _resolveAmountAndDescription(vertical, verticalId) {
     switch (vertical) {
 
-        case VERTICALS.TRIP: {
-            const trip = await Trip.findByPk(verticalId, {
-                attributes: ['id', 'fareEstimate', 'fareFinal', 'status'],
-            });
-            if (!trip) throw new Error(`[CAMPAY SERVICE] Trip #${verticalId} not found`);
-            if (!['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED'].includes(trip.status)) {
-                throw new Error(
-                    `[CAMPAY SERVICE] Trip #${verticalId} is not in a payable state (status: ${trip.status})`
-                );
-            }
-            const amount = trip.fareFinal || trip.fareEstimate;
-            if (!amount || amount <= 0) throw new Error(`[CAMPAY SERVICE] Trip #${verticalId} has no fare set`);
-            return {
-                amount:      Math.floor(amount),
-                description: 'WeGo ride payment',
-            };
-        }
+        // Rides are NOT paid through CamPay — the passenger pays the driver
+        // directly (P2P). CamPay only handles driver wallet top-ups.
 
         case VERTICALS.DELIVERY: {
             const delivery = await Delivery.findByPk(verticalId, {
@@ -467,7 +347,6 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
  */
 function _verticalCode(vertical) {
     const codes = {
-        trip:            'TRIP',
         delivery:        'DLV',
         service_request: 'SVC',
         rental:          'RNT',
@@ -480,4 +359,3 @@ function _verticalCode(vertical) {
 // ── Export singleton ──────────────────────────────────────────────────────────
 module.exports                = new CamPayService();
 module.exports.VERTICALS      = VERTICALS;
-module.exports.DISBURSE_TYPES = DISBURSE_TYPES;

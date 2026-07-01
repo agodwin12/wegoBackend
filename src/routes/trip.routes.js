@@ -7,7 +7,8 @@ const { authenticate } = require('../middleware/auth.middleware');
 router.get('/recent', authenticate, tripController.getRecentTrips);
 router.get('/active', authenticate, tripController.getActiveTrip);
 router.get('/history', authenticate, tripController.getTripHistory);
-router.post('/:tripId/pay', authenticate, tripController.initiatePayment);
+// Trip payment route removed — ride fares are paid directly to the driver (P2P),
+// never through WeGo/CamPay. CamPay is only used for driver wallet top-ups.
 // Parameterized routes AFTER
 router.get('/:tripId', authenticate, tripController.getTripDetails);
 router.get('/:tripId/events', authenticate, tripController.getTripEvents);

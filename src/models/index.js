@@ -55,9 +55,7 @@ const IdempotencyKey = require('./IdempotencyKey');
 
 const ServiceCategory    = require('./ServiceCategory');
 const ServiceListing     = require('./ServiceListing');
-const ServiceRequest     = require('./ServiceRequest');
 const ServiceRating      = require('./ServiceRating');
-const ServiceDispute     = require('./ServiceDispute');
 const BroadcastMessage = require('./BroadcastMessage');
 const Notification     = require('./Notification');
 const DeviceToken      = require('./DeviceToken');
@@ -77,16 +75,9 @@ const EarningRule             = require('./EarningRule');
 const { BonusProgram, BonusAward } = require('./BonusProgramAndAward');
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MODEL IMPORTS — PAYOUT SYSTEM
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const DailyBalanceSheet = require('./DailyBalanceSheet');
-const PayoutRequest     = require('./PayoutRequest');
-const DebtPayment       = require('./DebtPayment');
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — DELIVERY
 // ═══════════════════════════════════════════════════════════════════════════════
+// (Payout/withdrawal/balance-sheet models removed — WeGo is deposit/top-up only.)
 
 const DeliveryPricing           = require('./DeliveryPricing')(sequelize);
 const DeliverySurgeRule         = require('./DeliverySurgeRule')(sequelize);
@@ -96,7 +87,6 @@ const DeliveryDispute           = require('./DeliveryDispute')(sequelize);
 const DeliveryCategory          = require('./DeliveryCategory')(sequelize);
 const DeliveryWallet            = require('./DeliveryWallet')(sequelize);
 const DeliveryWalletTransaction = require('./DeliveryWalletTransaction')(sequelize);
-const DeliveryPayoutRequest     = require('./DeliveryPayoutRequest')(sequelize);
 const DeliveryWalletTopUp       = require('./DeliveryWalletTopUp')(sequelize);
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -110,12 +100,11 @@ const _allModels = {
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
     PriceRule, IdempotencyKey,
-    ServiceCategory, ServiceListing, ServiceRequest, ServiceRating, ServiceDispute,
+    ServiceCategory, ServiceListing, ServiceRating,
     ServiceListingPlan, ServiceAdPayment,
     TripReceipt, DriverWallet, DriverWalletTransaction, EarningRule, BonusProgram, BonusAward,
-    DailyBalanceSheet, PayoutRequest, DebtPayment,
     DeliveryPricing, DeliverySurgeRule, Delivery, DeliveryTracking, DeliveryDispute,
-    DeliveryCategory, DeliveryWallet, DeliveryWalletTransaction, DeliveryPayoutRequest,
+    DeliveryCategory, DeliveryWallet, DeliveryWalletTransaction,
     DeliveryWalletTopUp,
 };
 
@@ -396,21 +385,7 @@ Employee.hasMany(ServiceAdPayment, {
     as:         'reviewedHeroPlacements',
 });
 
-// ── Service request / rating / dispute (unchanged) ────────────────────────────
-
-ServiceListing.hasMany(ServiceRequest,   { foreignKey: 'listing_id', as: 'requests' });
-ServiceRequest.belongsTo(ServiceListing, { foreignKey: 'listing_id', as: 'listing' });
-
-ServiceRequest.belongsTo(Account, { foreignKey: 'provider_id', targetKey: 'uuid', as: 'provider' });
-Account.hasMany(ServiceRequest,   { foreignKey: 'provider_id', sourceKey: 'uuid', as: 'serviceRequestsAsProvider' });
-
-ServiceRequest.belongsTo(Account, { foreignKey: 'customer_id', targetKey: 'uuid', as: 'customer' });
-Account.hasMany(ServiceRequest,   { foreignKey: 'customer_id', sourceKey: 'uuid', as: 'serviceRequestsAsCustomer' });
-
-ServiceRequest.belongsTo(Account, { foreignKey: 'cancelled_by', targetKey: 'uuid', as: 'canceller' });
-
-ServiceRequest.hasOne(ServiceRating,    { foreignKey: 'request_id', as: 'rating' });
-ServiceRating.belongsTo(ServiceRequest, { foreignKey: 'request_id', as: 'request' });
+// ── ServiceRating — listing-level reviews (no request anchor) ────────────────
 
 ServiceRating.belongsTo(Account, { foreignKey: 'provider_id', targetKey: 'uuid', as: 'provider' });
 Account.hasMany(ServiceRating,   { foreignKey: 'provider_id', sourceKey: 'uuid', as: 'serviceRatingsReceived' });
@@ -423,21 +398,6 @@ ServiceListing.hasMany(ServiceRating,   { foreignKey: 'listing_id', as: 'ratings
 
 ServiceRating.belongsTo(Employee, { foreignKey: 'moderated_by', as: 'moderator' });
 Employee.hasMany(ServiceRating,   { foreignKey: 'moderated_by', as: 'moderatedServiceRatings' });
-
-ServiceDispute.belongsTo(ServiceRequest, { foreignKey: 'request_id', as: 'request' });
-ServiceRequest.hasMany(ServiceDispute,   { foreignKey: 'request_id', as: 'disputes' });
-
-ServiceDispute.belongsTo(Account, { foreignKey: 'filed_by',     targetKey: 'uuid', as: 'filer' });
-Account.hasMany(ServiceDispute,   { foreignKey: 'filed_by',     sourceKey: 'uuid', as: 'serviceDisputesFiled' });
-
-ServiceDispute.belongsTo(Account, { foreignKey: 'against_user', targetKey: 'uuid', as: 'defendant' });
-Account.hasMany(ServiceDispute,   { foreignKey: 'against_user', sourceKey: 'uuid', as: 'serviceDisputesAgainst' });
-
-ServiceDispute.belongsTo(Employee, { foreignKey: 'assigned_to', as: 'assignedEmployee' });
-Employee.hasMany(ServiceDispute,   { foreignKey: 'assigned_to', as: 'assignedServiceDisputes' });
-
-ServiceDispute.belongsTo(Employee, { foreignKey: 'resolved_by', as: 'resolver' });
-Employee.hasMany(ServiceDispute,   { foreignKey: 'resolved_by', as: 'resolvedServiceDisputes' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — EARNINGS ENGINE
@@ -500,52 +460,6 @@ Trip.hasMany(BonusAward,   { foreignKey: 'triggerTripId', as: 'triggeredAwards' 
 BonusAward.belongsTo(Trip, { foreignKey: 'triggerTripId', as: 'triggerTrip' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ASSOCIATIONS — PAYOUT SYSTEM
-// ═══════════════════════════════════════════════════════════════════════════════
-
-Account.hasMany(DailyBalanceSheet,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'balanceSheets', onDelete: 'RESTRICT' });
-DailyBalanceSheet.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
-
-DailyBalanceSheet.belongsTo(Employee, { foreignKey: 'closedBy', as: 'closedByEmployee' });
-Employee.hasMany(DailyBalanceSheet,   { foreignKey: 'closedBy', as: 'closedBalanceSheets' });
-
-Account.hasMany(PayoutRequest,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'payoutRequests', onDelete: 'RESTRICT' });
-PayoutRequest.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
-
-DailyBalanceSheet.hasMany(PayoutRequest,   { foreignKey: 'balanceSheetId', as: 'payoutRequests' });
-PayoutRequest.belongsTo(DailyBalanceSheet, { foreignKey: 'balanceSheetId', as: 'balanceSheet' });
-
-PayoutRequest.belongsTo(Employee, { foreignKey: 'initiatedByEmployeeId', as: 'initiatedByEmployee' });
-Employee.hasMany(PayoutRequest,   { foreignKey: 'initiatedByEmployeeId', as: 'initiatedPayouts' });
-
-PayoutRequest.belongsTo(Employee, { foreignKey: 'processedBy', as: 'processedByEmployee' });
-Employee.hasMany(PayoutRequest,   { foreignKey: 'processedBy', as: 'processedPayouts' });
-
-PayoutRequest.belongsTo(Employee, { foreignKey: 'confirmedBy', as: 'confirmedByEmployee' });
-Employee.hasMany(PayoutRequest,   { foreignKey: 'confirmedBy', as: 'confirmedPayouts' });
-
-PayoutRequest.belongsTo(Employee, { foreignKey: 'rejectedBy', as: 'rejectedByPayoutEmployee' });
-Employee.hasMany(PayoutRequest,   { foreignKey: 'rejectedBy', as: 'rejectedPayouts' });
-
-PayoutRequest.belongsTo(Employee, { foreignKey: 'cancelledBy', as: 'cancelledByEmployee' });
-Employee.hasMany(PayoutRequest,   { foreignKey: 'cancelledBy', as: 'cancelledPayouts' });
-
-Account.hasMany(DebtPayment,   { foreignKey: 'driverId', sourceKey: 'uuid', as: 'debtPayments', onDelete: 'RESTRICT' });
-DebtPayment.belongsTo(Account, { foreignKey: 'driverId', targetKey: 'uuid', as: 'driver' });
-
-DailyBalanceSheet.hasMany(DebtPayment,   { foreignKey: 'balanceSheetId', as: 'debtPayments' });
-DebtPayment.belongsTo(DailyBalanceSheet, { foreignKey: 'balanceSheetId', as: 'balanceSheet' });
-
-DebtPayment.belongsTo(Employee, { foreignKey: 'handledByEmployeeId', as: 'handledByEmployee' });
-Employee.hasMany(DebtPayment,   { foreignKey: 'handledByEmployeeId', as: 'handledDebtPayments' });
-
-DebtPayment.belongsTo(Employee, { foreignKey: 'verifiedBy', as: 'verifiedByEmployee' });
-Employee.hasMany(DebtPayment,   { foreignKey: 'verifiedBy', as: 'verifiedDebtPayments' });
-
-DebtPayment.belongsTo(Employee, { foreignKey: 'rejectedBy', as: 'rejectedByDebtEmployee' });
-Employee.hasMany(DebtPayment,   { foreignKey: 'rejectedBy', as: 'rejectedDebtPayments' });
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — DELIVERY
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -564,7 +478,6 @@ const deliveryModels = {
     DeliveryWallet,
     DeliveryWalletTransaction,
     DeliveryWalletTopUp,
-    DeliveryPayoutRequest,
     DeliveryCategory,
 };
 
@@ -575,7 +488,6 @@ DeliveryTracking.associate(deliveryModels);
 DeliveryDispute.associate(deliveryModels);
 DeliveryWallet.associate(deliveryModels);
 DeliveryWalletTransaction.associate(deliveryModels);
-DeliveryPayoutRequest.associate(deliveryModels);
 DeliveryWalletTopUp.associate(deliveryModels);
 DeliveryCategory.associate(deliveryModels);
 
@@ -622,9 +534,7 @@ module.exports = {
     // ── Services marketplace ─────────────────────────────────────────────────
     ServiceCategory,
     ServiceListing,
-    ServiceRequest,
     ServiceRating,
-    ServiceDispute,
     ServiceListingPlan,
     ServiceAdPayment,
 
@@ -640,11 +550,6 @@ module.exports = {
     BonusProgram,
     BonusAward,
 
-    // ── Payout system ────────────────────────────────────────────────────────
-    DailyBalanceSheet,
-    PayoutRequest,
-    DebtPayment,
-
     // ── Delivery ─────────────────────────────────────────────────────────────
     Delivery,
     DeliveryDispute,
@@ -654,7 +559,6 @@ module.exports = {
     DeliveryWallet,
     DeliveryWalletTransaction,
     DeliveryWalletTopUp,
-    DeliveryPayoutRequest,
     DeliveryCategory,
 
     // ── CamPay payments ──────────────────────────────────────────────────────

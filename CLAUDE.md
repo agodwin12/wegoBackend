@@ -4,244 +4,208 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-WEGO is a ride-hailing platform backend built with Node.js, Express, Socket.IO, Sequelize (MySQL), and Redis. It supports real-time driver-passenger matching, trip management, vehicle rentals, and geospatial location tracking.
+WEGO is a multi-vertical platform backend built with Node.js, Express, Socket.IO, Sequelize (MySQL), and Redis. It runs four business verticals from a single process: **ride-hailing**, **parcel delivery**, **services marketplace**, and **vehicle rentals**.
 
 ## Development Commands
 
-### Running the Server
 ```bash
-# Start server (development)
+# Start (development — root-level server.js is the real entry point)
 node server.js
-
-# Start with nodemon (auto-restart)
 nodemon server.js
+
+# The package.json scripts reference src/server.js which does not exist —
+# always run from the project root using server.js directly.
 ```
 
-### Database
-- Database migrations are located in `src/migrations/`
-- Sequelize models are in `src/models/`
-- Database config: `src/config/database.js`
-- No Sequelize CLI commands configured in package.json - run migrations manually if needed
+### Environment Variables
+Required in `.env`:
+- `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS`, `DB_PORT`
+- `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` (optional)
+- `JWT_SECRET`
+- `MAPBOX_ACCESS_TOKEN`
+- `EMAIL_PROVIDER`, `EMAIL_FROM`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`
+- `CAMPAY_APP_USERNAME`, `CAMPAY_APP_PASSWORD`, `CAMPAY_BASE_URL`
+- `FIREBASE_SERVICE_ACCOUNT_PATH` (default: `./google-services.json`)
+- `CORS_ORIGIN` (default: `*`)
+- `DRIVER_SEARCH_RADIUS_KM` (default: 5)
 
-### Environment Setup
-- Copy environment variables from production or create `.env` file
-- Required variables:
-  - `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS`, `DB_PORT`
-  - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` (optional)
-  - `JWT_SECRET`
-  - `GOOGLE_MAPS_API_KEY` (for route calculation)
-  - `EMAIL_PROVIDER`, `EMAIL_FROM` (SendGrid or SMTP)
-  - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` (for SMS OTP)
+### Database
+- Migrations: `src/migrations/` and `migrations/` (root-level)
+- Models: `src/models/index.js` (all models and associations)
+- Config: `src/config/database.js`
+- No Sequelize CLI in package.json — run migrations manually
+- `sequelize.sync({ alter: false })` runs on startup; schema changes require explicit migrations
 
 ## Architecture Overview
 
-### Core Components
+### Startup Sequence (`server.js`)
+DB connect → sync models → init email → init Firebase Admin → start notification cleaner cron → start HTTP server + Socket.IO
 
-**Entry Point**: `server.js`
-- Initializes database, email service, HTTP server, and Socket.IO
-- Handles graceful shutdown (SIGTERM, SIGINT)
-- Startup sequence: DB connect → sync models → init email → start server
+Firebase init is non-fatal — if `google-services.json` is missing or invalid, push notifications are skipped but all other features continue.
 
-**Application**: `src/app.js`
-- Express middleware setup (helmet, cors, morgan, express.json)
-- Routes mounted at `/api/auth`, `/api/driver`, `/api/trips`, `/api/rentals`
-- Static file serving from `/uploads` directory
+### Route Structure (`src/app.js`)
+Routes are organized into two top-level namespaces:
 
-**Database Models**: `src/models/index.js`
-- All Sequelize models and relationships defined here
-- Key models: Account, DriverProfile, PassengerProfile, Trip, TripEvent, Vehicle, VehicleRental, DriverLocation
-- Relationships:
-  - Account (1:1) → PassengerProfile, DriverProfile, Employee
-  - Trip (1:N) → TripEvent, ChatMessage
-  - Trip (1:1) → Payment
-  - Vehicle (N:1) → VehicleCategory
-  - VehicleRental (N:1) → Vehicle, Account (user)
+**Public/mobile** (`/api/*`):
+- `/api/auth` — registration, login, OTP, token refresh, mode switching
+- `/api/driver/*` — driver availability, wallet, earnings, payout
+- `/api/trips/*` — fare estimation, trip requests, ride history
+- `/api/deliveries/*` — delivery CRUD, agent actions, agent wallet
+- `/api/services/*` — service categories, listings, requests, ratings, disputes, ad payments
+- `/api/rentals/*` — vehicle rentals
+- `/api/payments/*` — CamPay payment initiation
+- `/api/webhooks/*` — CamPay HMAC webhooks (**MUST be mounted before `express.json()`**)
+- `/api/notifications/*`, `/api/device-tokens` — push notification management
 
-**Socket.IO Setup**: `src/sockets/index.js`
-- JWT authentication middleware validates token from `socket.handshake.auth.token`
-- User info attached to socket: `socket.userId`, `socket.userType`, `socket.email`
-- Socket rooms: `user:{userId}`, `driver:{driverId}`, `passenger:{passengerId}`
-- Driver events: `driver:online`, `driver:offline`, `driver:location`, `trip:accept`, `trip:decline`, `driver:en_route`, `driver:arrived`, `trip:start`, `trip:complete`, `trip:cancel`
-- Passenger events: `trip:cancel`
-- General events: `ping/pong`, `connection:test`
-- On disconnect: removes socket from Redis, marks drivers offline
+**Backoffice/admin** (`/api/backoffice/*`, `/api/admin/*`, `/api/services/admin/*`):
+- Uses separate `authenticateEmployee` middleware (Employee model, not Account)
+- Covers all verticals: ride-hailing, delivery, services, rentals, finance
 
-### Real-Time Trip Matching Flow
+**Route ordering is critical** — specific sub-paths must be registered before catch-all param routes (e.g., `/deliveries/driver/wallet` before `/deliveries`, backoffice delivery sub-routes before `deliveryWalletsRoutes`).
 
-**Trip Request** (`src/controllers/tripController.js`):
-1. Passenger sends pickup/dropoff coordinates via REST API
-2. System calculates route and fare using Google Maps API (`src/services/fareCalculatorService.js`)
-3. Trip stored in Redis with status `searching`
-4. `tripMatchingService.broadcastTripToDrivers()` is called
+### User Types and Mode Switching
 
-**Trip Broadcasting** (`src/services/tripMatchingService.js`):
-1. Finds nearby drivers using Redis geospatial search (`GEORADIUS`)
-2. Filters for online AND available drivers
-3. Emits `trip:new_request` to driver sockets with trip details and expiry time
-4. Stores list of notified drivers in Redis
-5. Sets timeout to check if trip was accepted
+Accounts have a `user_type` (permanent: `PASSENGER`, `DRIVER`, `DELIVERY_AGENT`) and an `active_mode` (mutable). A `DRIVER` can switch to `DELIVERY_AGENT` mode and back via `/api/auth/switch-mode`.
 
-**Trip Acceptance**:
-1. Driver accepts via Socket.IO event `trip:accept`
-2. Acquires Redis lock to prevent race conditions
-3. Saves trip to MySQL database with status `matched`
-4. Creates `trip_created` and `driver_matched` events in TripEvent table
-5. Updates driver status to `busy` in Redis
-6. Notifies other drivers with `trip:request_expired`
-7. Notifies passenger with `trip:driver_assigned`
+The auth middleware (`src/middleware/auth.middleware.js`) exports:
+- `authenticate` — standard mobile user auth; attaches `req.user` (Account) and `req.auth` (decoded claims + resolved `active_mode`)
+- `requireRole(...roles)` — gates on `user_type` (permanent)
+- `requireMode(...modes)` — gates on `active_mode` (current session mode)
+- `requireVerified` — phone or email must be verified
+- `requireDriverApproval` — driver profile must be `APPROVED`
+- `optionalAuth` — attaches user if token present, otherwise continues
 
-**Trip Lifecycle**:
-- `searching` → `matched` → `en_route` → `arrived` → `in_progress` → `completed`/`cancelled`
-- Each status change creates a TripEvent record
-- Driver location updates broadcast to passenger in real-time
+The backoffice uses a separate middleware (`src/middleware/employeeAuth.middleware.js`):
+- `authenticateEmployee` — verifies employee JWT (token type `'employee'`), attaches `req.user` (Employee)
+- `requireEmployeeRole(...roles)` — employee roles: `super_admin`, `admin`, `support`, etc.
+
+**Token stale detection**: if `active_mode` in the JWT doesn't match the DB, the middleware returns `401 MODE_TOKEN_STALE` with `shouldRefresh: true` — clients should call the refresh endpoint and retry.
+
+### Real-Time: Socket.IO (`src/sockets/index.js`)
+
+Token passed via `socket.handshake.auth.token` (or `.query.token`). Decoded payload includes `uuid`, `user_type`, `active_mode`, `email`. Rooms:
+- `user:{userId}` — all users
+- `driver:{userId}` — DRIVER and DELIVERY_AGENT
+- `passenger:{userId}` — PASSENGER
+- `trip:{tripId}` — joined explicitly via `chat:join`
+
+**On reconnect**, the server replays missed state from Redis. Replay is mode-gated — a driver reconnecting in `DELIVERY_AGENT` mode does not receive stale ride-trip state (prevents `invalid payload` crashes). All socket payloads pass through `_sanitize()` (strips `undefined` via JSON round-trip) before emit.
+
+**Disconnect does NOT set driver offline** — Redis geo/online state persists through network blips. Drivers go offline only via explicit `driver:offline` event.
+
+Driver/agent socket events: `driver:online`, `driver:offline`, `driver:location` / `driver:location_update`, `trip:accept`, `trip:decline`, `driver:en_route`, `driver:arrived` / `trip:arrived`, `trip:start`, `trip:complete`, `trip:cancel`
+
+Chat socket events: `chat:join`, `chat:leave`, `chat:send`, `chat:typing`, `chat:mark_read`
+
+### Ride-Hailing Trip Flow
+
+1. Passenger POSTs `/api/trips/request` → fare calculated via Google Maps → stored in Redis (`trip:{id}`) with status `SEARCHING`
+2. `tripMatchingService.broadcastTripToDrivers()` → `GEORADIUS` search → emits `trip:new_request` to nearby online+available drivers
+3. Driver emits `trip:accept` → acquires Redis lock → saves to MySQL (`status: MATCHED`) → notifies passenger via `trip:driver_assigned`
+4. Lifecycle: `SEARCHING` → `MATCHED` → `DRIVER_EN_ROUTE` → `DRIVER_ARRIVED` → `IN_PROGRESS` → `COMPLETED`/`CANCELED`
+5. Each status change writes a `TripEvent` record
+
+### Delivery System (`src/controllers/delivery/`, `src/sockets/delivery/`)
+
+Delivery agents work similarly to drivers but use `DELIVERY_AGENT` mode. Key models: `Delivery`, `DeliveryTracking`, `DeliveryCategory`, `DeliveryPricing`, `DeliverySurgeRule`, `DeliveryDispute`, `DeliveryWallet`, `DeliveryWalletTopUp`, `DeliveryWalletTransaction`.
+
+Agents have a `DeliveryWallet` for earnings. Top-ups go through CamPay (`delivery_topup` vertical). Payout requests are managed via `DeliveryPayoutRequest`.
+
+### Services Marketplace (`src/controllers/serviceListing.controller.js`, etc.)
+
+Providers create `ServiceListing`s under `ServiceCategory`s and optionally buy `ServiceListingPlan` ad placements (paid via CamPay `service_request` vertical → `ServiceAdPayment`). Customers create `ServiceRequest`s. Disputes go through `ServiceDispute`.
+
+### Payments: CamPay (`src/services/campay/`)
+
+CamPay handles Mobile Money (MTN/Orange) for Cameroon. Payment flow:
+1. Client POSTs `/api/payments/initiate` → creates `WegoPayment` record → calls CamPay collection API
+2. CamPay sends webhook to `/api/webhooks/campay` (HMAC-verified, raw body required — route mounted before `express.json()`)
+3. Webhook handler updates `WegoPayment.status` and triggers vertical-specific completion logic
+
+Verticals: `trip`, `delivery`, `rental`, `service_request` / `listing_fee` (alias → `ServiceAdPayment`), `delivery_topup`
+
+Token management: `src/services/campay/campayTokenManager.js` caches OAuth tokens with auto-refresh.
+
+### Push Notifications (`src/services/NotificationService.js`)
+
+Firebase Admin SDK sends FCM push notifications. Device tokens stored in `DeviceToken` model via `/api/device-tokens`. Notification rows written to `Notification` model regardless of whether Firebase is initialized — FCM is best-effort. Background job `src/jobs/notification_cleaner.js` prunes old records.
+
+### Background Jobs (node-cron)
+
+Started from `src/app.js`:
+- `src/jobs/cleanup.job.js` — cleans expired Redis trips, stale locks, etc.
+- `src/services/balanceSheetCron.js` — writes `DailyBalanceSheet` records
+- `src/jobs/paymentExpiry.job.js` — expires pending CamPay payments
+
+Started from `server.js`:
+- `src/jobs/notification_cleaner.js` — prunes old notifications
 
 ### Redis Data Structure
 
-**Driver Management**:
-- `driver:online:{driverId}` - online status (SETEX)
-- `driver:location:{driverId}` - location hash (lat, lng, heading, speed, accuracy, timestamp)
-- `drivers:geo:locations` - geospatial index (GEOADD/GEORADIUS)
-- `drivers:online` - set of online driver IDs
-- `drivers:available` - set of available (not busy) driver IDs
+**Driver/Agent state**:
+- `driver:online:{id}` — online flag (SETEX)
+- `driver:location:{id}` — hash (lat, lng, heading, speed, accuracy, timestamp)
+- `drivers:geo:locations` — geospatial index (GEOADD / GEORADIUS)
+- `drivers:online`, `drivers:available` — sets
 
-**Trip Management**:
-- `trip:{tripId}` - trip data JSON
-- `trip:lock:{tripId}` - distributed lock for accepting trips
-- `trip:{tripId}:offers` - list of notified drivers
-- `passenger:{passengerId}:active_trip` - passenger's current trip ID
+**Trip state**:
+- `trip:{id}` (via `REDIS_KEYS.ACTIVE_TRIP(id)`) — full trip JSON
+- `trip:lock:{id}` — distributed lock (10s TTL)
+- `driver:pending_offers:{driverId}` — pending trip offers for reconnect replay
+- `driver:active_trip:{driverId}`, `passenger:active_trip:{passengerId}`
 
-**Socket Management**:
-- `user:socket:{userId}` - maps user ID to socket ID
+**Socket mapping**:
+- `user:socket:{userId}` → socket ID
 
-**Helper Functions** (`src/config/redis.js`):
-- `setDriverLocation()`, `getDriverLocation()`, `findNearbyDrivers()`
-- `setDriverOnline()`, `setDriverOffline()`, `setDriverUnavailable()`, `setDriverAvailable()`
-- `storeTripInRedis()`, `getTripFromRedis()`
-- `acquireLock()`, `releaseLock()` - prevent race conditions
-- `storeUserSocket()`, `getUserSocket()`, `removeUserSocket()`
+Helper module: `src/config/redis.js` exports `redisClient`, `redisHelpers`, `REDIS_KEYS`, and named helpers (`setDriverOnline`, `acquireLock`, `releaseLock`, etc.).
 
-### Authentication & Authorization
+### File Storage
 
-**REST API Auth** (`src/middleware/auth.middleware.js`):
-- Uses `Authorization: Bearer <token>` header
-- Validates JWT using `verifyAccessToken()` from `src/utils/jwt.js`
-- Checks account exists and is not DELETED/SUSPENDED
-- Attaches `req.user` (Account model instance)
-
-**Socket.IO Auth**:
-- Token passed in `socket.handshake.auth.token`
-- Verified using `jwt.verify()` with `process.env.JWT_SECRET`
-- Decoded payload contains: `uuid`, `user_type`, `email`
-
-**OTP Flow** (`src/services/otp.service.js`, `src/services/auth.services.js`):
-- OTP sent via SMS (Twilio) or email (SendGrid/SMTP)
-- Stored in VerificationCode table with expiry
-- Verified during registration/login
-
-### Location Services
-
-**Location Tracking** (`src/services/locationService.js`):
-- Drivers send location updates via Socket.IO (`driver:location`)
-- Stored in Redis geospatial index for fast radius queries
-- Broadcasted to passengers during active trips
-
-**Nearby Driver Search**:
-- Uses Redis `GEORADIUS` command
-- Default radius: 5km (configurable via `DRIVER_SEARCH_RADIUS_KM`)
-- Returns drivers sorted by distance
-
-**Fare Calculation** (`src/services/fareCalculatorService.js`):
-- Uses Google Maps Directions API for route details
-- Calculates fare: `base + (distance_km * per_km) + (duration_min * per_min)`
-- Applies surge multiplier and enforces minimum fare
-- Pricing rules stored per city in PriceRule table
-
-### File Uploads
-
-**Middleware** (`src/middleware/upload.js`):
-- Uses Multer for file handling
-- Sharp for image processing (resize, compress)
-- Uploads stored in `uploads/` directory
-- Static files served at `/uploads/*`
-
-**Common Use Cases**:
-- Driver documents (license, insurance, vehicle photos)
-- Profile pictures
+Local uploads via Multer + Sharp → `uploads/` directory (served at `/uploads/*`). Cloudflare R2 uploads available via `src/utils/r2Upload.js` (`@aws-sdk/client-s3`).
 
 ## Important Patterns
 
-### Error Handling
-- Use structured error objects with `status` property
-- Middleware in `src/middleware/error.js`
-- Console logging with emojis for visibility (🔄, ✅, ❌, ⚠️, 📍, 💾, etc.)
-
-### Idempotency
-- Middleware in `src/middleware/idempotency.js`
-- Uses IdempotencyKey model to prevent duplicate trip requests
-
-### Validation
-- Validators in `src/validators/` using Joi
-- Middleware in `src/middleware/validate.js`
-
-### Distributed Locks
-- Always use Redis locks when modifying shared resources (trips, driver status)
-- Pattern: `acquireLock()` → try/catch → `releaseLock()` in finally block
-- Default TTL: 10 seconds
-
-### Socket.IO Event Naming
-- Format: `{entity}:{action}` (e.g., `trip:accept`, `driver:online`)
-- Always emit acknowledgments or error events back to client
-- Log all socket events with context (userId, tripId, etc.)
-
-## Vehicle Rental System
-
-**Models**:
-- `Vehicle` - vehicle details, belongs to partner (Account), posted by employee
-- `VehicleCategory` - categories (sedan, SUV, motorcycle, etc.) with daily/weekly/monthly base prices
-- `VehicleRental` - rental bookings with status tracking
-
-**Relationships**:
-- Vehicle → VehicleCategory (N:1)
-- VehicleRental → Vehicle (N:1)
-- VehicleRental → Account/user (N:1)
-- VehicleRental → Account/employee (N:1, handledByEmployeeId)
-- VehicleRental → Account/admin (N:1, approvedByAdminId)
-
-## Debugging Tips
-
-### Check Redis State
-```bash
-# Connect to Redis CLI
-redis-cli
-
-# Check online drivers
-SMEMBERS drivers:online
-
-# Check available drivers
-SMEMBERS drivers:available
-
-# Get driver location
-HGETALL driver:location:{driverId}
-
-# Find nearby drivers
-GEORADIUS drivers:geo:locations {lng} {lat} 5 km WITHDIST
+### Auth Middleware Composition
+```js
+router.post('/route', authenticate, requireMode('DRIVER'), requireDriverApproval, controller);
+// Backoffice:
+router.get('/route', authenticateEmployee, requireEmployeeRole('admin', 'super_admin'), controller);
 ```
 
-### Check Active Sockets
-- Socket IDs stored in Redis: `user:socket:{userId}`
-- Use `io.sockets.sockets.get(socketId)` to check if socket is connected
+### Distributed Locks
+Always wrap shared resource mutations (trips, driver status) in Redis locks:
+```js
+const lock = await acquireLock(REDIS_KEYS.TRIP_LOCK(tripId), 10);
+try { /* modify */ } finally { await releaseLock(REDIS_KEYS.TRIP_LOCK(tripId)); }
+```
 
-### Common Issues
-- **"No drivers available"**: Check Redis geospatial index is populated with driver locations
-- **Trip not accepting**: Check Redis lock isn't stuck (should auto-expire in 10s)
-- **Socket not receiving events**: Verify JWT token is valid and socket is authenticated
-- **Google Maps errors**: Check API key and quota limits
+### Code Conventions
+- `async/await` throughout
+- Console logs with emoji prefixes and `[TAG]` identifiers (e.g., `[SOCKET]`, `[AUTH]`, `[MATCHING]`)
+- Temporary/ephemeral data in Redis; persistent data in MySQL
+- UUIDs for all Account/Trip/Delivery PKs (`uuid.v4()`); integer PKs for backoffice models (Employee, etc.)
+- Joi validators in `src/validators/`; applied via `src/middleware/validate.js`
+- Idempotency keys (`src/middleware/idempotency.js`) on trip/delivery creation endpoints
 
-## Code Conventions
+## Debugging
 
-- Use `async/await` over promises
-- Console log with contextual emojis and clear prefixes (e.g., `[MATCHING]`, `[SOCKET]`, `[AUTH]`)
-- Store temporary/ephemeral data in Redis, persistent data in MySQL
-- Always validate user input with Joi schemas
-- Use UUIDs for all primary keys (via `uuid.v4()`)
-- Timestamps handled by Sequelize (`createdAt`, `updatedAt`)
+```bash
+# Redis state inspection
+redis-cli SMEMBERS drivers:online
+redis-cli SMEMBERS drivers:available
+redis-cli HGETALL driver:location:{driverId}
+redis-cli GEORADIUS drivers:geo:locations {lng} {lat} 5 km WITHDIST
+redis-cli GET user:socket:{userId}
+
+# Check active trip
+redis-cli GET trip:{tripId}
+```
+
+Common issues:
+- **"No drivers available"**: Redis geo index not populated — driver must emit `driver:online` after connecting
+- **Trip not accepting**: Redis lock stuck — auto-expires in 10s; check `trip:lock:{tripId}`
+- **Socket invalid payload**: `undefined` in emitted data — all payloads must pass through `_sanitize()`
+- **MODE_TOKEN_STALE 401**: Client's JWT `active_mode` doesn't match DB — client should refresh token
+- **CamPay webhook 400**: Raw body not available — confirm webhook route is mounted before `express.json()`
+- **Firebase disabled**: `google-services.json` missing or malformed — push notifications skipped, rest of app unaffected

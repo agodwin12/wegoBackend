@@ -131,9 +131,7 @@ router.post(
     topUpCtrl.submitTopUp
 );
 
-router.post('/driver/cashout', driverAuthAny, ctrl.requestCashout);
-
-router.post('/driver/cashout/:requestId/cancel', driverAuthAny, ctrl.cancelCashout);
+// Cashout/withdrawal routes removed — deposit/top-up only.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DRIVER / DELIVERY AGENT OPERATIONAL

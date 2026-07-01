@@ -12,12 +12,14 @@ services:
     ports:
       - "10002:10000"
     env_file:
-      - .env
+      - .env.production
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 10000
       DB_HOST: host.docker.internal
       DB_PORT: 3306
+      REDIS_URL: redis://redis:6379
+      RUN_JOBS: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -25,6 +27,8 @@ services:
         condition: service_healthy
     volumes:
       - uploads_data:/app/uploads
+      # Firebase service account — mounted read-only, never baked into the image:
+      - ./serviceAccountKey.json:/app/serviceAccountKey.json:ro
     networks:
       - wego_net
     healthcheck:

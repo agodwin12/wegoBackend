@@ -1,19 +1,21 @@
-// backend/src/controllers/servicesMarketplace.ratings.controller.js
-// FIXED - Made listing_id optional and accepts from both query and path params
+// backend/src/controllers/serviceRating.controller.js
+// Ratings are listing-level reviews — no service request required.
 
-const { ServiceRating, ServiceRequest, ServiceListing, Account } = require('../models');
+const { ServiceRating, ServiceListing, Account } = require('../models');
 const { uploadFileToR2 } = require('../middleware/upload');
 const { Op } = require('sequelize');
 
 // ═══════════════════════════════════════════════════════════════════════
-// CREATE RATING (Customer rates provider after service completion)
+// CREATE RATING (Any authenticated user who contacted a provider)
 // POST /api/services/ratings
+// Body: { listing_id, rating, quality_rating?, professionalism_rating?,
+//         communication_rating?, value_rating?, review_text? }
 // ═══════════════════════════════════════════════════════════════════════
 
 exports.createRating = async (req, res) => {
     try {
         const {
-            request_id,
+            listing_id,
             rating,
             quality_rating,
             professionalism_rating,
@@ -24,91 +26,59 @@ exports.createRating = async (req, res) => {
 
         const customer_id = req.user.uuid;
 
-        // ─────────────────────────────────────────────────────────────────
-        // VALIDATION
-        // ─────────────────────────────────────────────────────────────────
-
-        if (!request_id || isNaN(request_id)) {
+        if (!listing_id || isNaN(listing_id)) {
             return res.status(400).json({
                 success: false,
-                message: 'Invalid request ID. Please provide a valid service request.',
+                message: 'listing_id is required.',
             });
         }
 
         if (!rating || rating < 1 || rating > 5) {
             return res.status(400).json({
                 success: false,
-                message: 'Overall rating is required and must be between 1 and 5 stars.',
+                message: 'Overall rating must be between 1 and 5 stars.',
             });
         }
 
-        // Validate specific ratings if provided
         const specificRatings = [quality_rating, professionalism_rating, communication_rating, value_rating];
-        for (const specificRating of specificRatings) {
-            if (specificRating !== undefined && (specificRating < 1 || specificRating > 5)) {
+        for (const r of specificRatings) {
+            if (r !== undefined && r !== null && (r < 1 || r > 5)) {
                 return res.status(400).json({
                     success: false,
-                    message: 'All specific ratings must be between 1 and 5 stars.',
+                    message: 'All sub-ratings must be between 1 and 5 stars.',
                 });
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // CHECK SERVICE REQUEST
-        // ─────────────────────────────────────────────────────────────────
-
-        const request = await ServiceRequest.findOne({
-            where: {
-                id: request_id,
-                customer_id,
-            },
-            include: [
-                {
-                    model: ServiceListing,
-                    as: 'listing',
-                }
-            ]
+        const listing = await ServiceListing.findOne({
+            where: { id: listing_id, status: 'active' },
         });
 
-        if (!request) {
+        if (!listing) {
             return res.status(404).json({
                 success: false,
-                message: 'Service request not found or you do not have permission to rate it.',
+                message: 'Listing not found or not available for review.',
             });
         }
 
-        if (request.status !== 'completed' && request.status !== 'payment_confirmed') {
-            return res.status(400).json({
-                success: false,
-                message: 'You can only rate completed services.',
-            });
-        }
-
-        // ─────────────────────────────────────────────────────────────────
-        // CHECK IF ALREADY RATED
-        // ─────────────────────────────────────────────────────────────────
-
+        // One review per listing per customer
         const existingRating = await ServiceRating.findOne({
-            where: { request_id }
+            where: { listing_id, customer_id },
         });
 
         if (existingRating) {
             return res.status(409).json({
                 success: false,
-                message: 'You have already rated this service. Ratings cannot be edited once submitted.',
+                message: 'You have already reviewed this listing.',
             });
         }
-
-        // ─────────────────────────────────────────────────────────────────
-        // HANDLE REVIEW PHOTOS (max 3)
-        // ─────────────────────────────────────────────────────────────────
 
         let review_photos = [];
         if (req.files && req.files.length > 0) {
             if (req.files.length > 3) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Too many photos. Maximum 3 photos allowed per review.',
+                    message: 'Maximum 3 photos allowed per review.',
                 });
             }
 
@@ -126,55 +96,41 @@ exports.createRating = async (req, res) => {
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // CREATE RATING
-        // ─────────────────────────────────────────────────────────────────
-
         const newRating = await ServiceRating.create({
-            request_id,
-            provider_id: request.provider_id,
+            request_id:            null,
+            provider_id:           listing.provider_id,
             customer_id,
-            listing_id: request.listing_id,
+            listing_id:            parseInt(listing_id),
             rating,
-            quality_rating: quality_rating || null,
+            quality_rating:        quality_rating || null,
             professionalism_rating: professionalism_rating || null,
-            communication_rating: communication_rating || null,
-            value_rating: value_rating || null,
-            review_text: review_text ? review_text.trim() : null,
-            review_photos: review_photos.length > 0 ? review_photos : null,
-            is_verified: true,
+            communication_rating:  communication_rating || null,
+            value_rating:          value_rating || null,
+            review_text:           review_text ? review_text.trim() : null,
+            review_photos:         review_photos.length > 0 ? review_photos : null,
+            is_verified:           true,
         });
 
-        // ─────────────────────────────────────────────────────────────────
-        // UPDATE LISTING STATISTICS
-        // ─────────────────────────────────────────────────────────────────
+        // Update listing aggregate rating
+        const allRatings = await ServiceRating.findAll({
+            where: { listing_id: parseInt(listing_id) },
+            attributes: ['rating'],
+        });
+        const totalRating = allRatings.reduce((sum, r) => sum + r.rating, 0);
+        await listing.update({
+            average_rating: (totalRating / allRatings.length).toFixed(2),
+            total_reviews:  allRatings.length,
+        });
 
-        const listing = await ServiceListing.findByPk(request.listing_id);
-        if (listing) {
-            // Calculate new average rating
-            const allRatings = await ServiceRating.findAll({
-                where: { listing_id: request.listing_id },
-                attributes: ['rating'],
-            });
-
-            const totalRating = allRatings.reduce((sum, r) => sum + r.rating, 0);
-            const averageRating = (totalRating / allRatings.length).toFixed(2);
-
-            await listing.update({
-                average_rating: averageRating,
-                total_reviews: allRatings.length,
-            });
-        }
-
-        console.log('✅ [SERVICE_RATING_CONTROLLER] Rating created for request:', request.id);
+        console.log(`✅ [SERVICE_RATING_CONTROLLER] Rating created for listing ${listing_id} by ${customer_id}`);
 
         res.status(201).json({
             success: true,
-            message: 'Rating submitted successfully. Thank you for your feedback!',
+            message: 'Review submitted. Thank you for your feedback!',
             data: {
-                id: newRating.id,
-                rating: newRating.rating,
-                request_id: newRating.request_id,
+                id:         newRating.id,
+                rating:     newRating.rating,
+                listing_id: newRating.listing_id,
                 created_at: newRating.created_at,
             },
         });
@@ -183,23 +139,12 @@ exports.createRating = async (req, res) => {
         console.error('❌ [SERVICE_RATING_CONTROLLER] Error in createRating:', error);
 
         if (error.name === 'SequelizeUniqueConstraintError') {
-            return res.status(409).json({
-                success: false,
-                message: 'You have already rated this service.',
-            });
-        }
-
-        if (error.name === 'SequelizeValidationError') {
-            return res.status(400).json({
-                success: false,
-                message: 'Validation error. Please check your input and try again.',
-                errors: error.errors.map(e => e.message),
-            });
+            return res.status(409).json({ success: false, message: 'You have already reviewed this listing.' });
         }
 
         res.status(500).json({
             success: false,
-            message: 'Unable to submit rating. Please try again later.',
+            message: 'Unable to submit review. Please try again later.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined,
         });
     }
@@ -435,11 +380,6 @@ exports.getRatingById = async (req, res) => {
                     model: ServiceListing,
                     as: 'listing',
                     attributes: ['id', 'listing_id', 'title'],
-                },
-                {
-                    model: ServiceRequest,
-                    as: 'request',
-                    attributes: ['id', 'request_id', 'service_location', 'completed_at'],
                 },
             ],
         });

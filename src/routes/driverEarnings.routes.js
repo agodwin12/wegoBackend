@@ -64,12 +64,7 @@ router.get('/quests', earningsController.getQuests);
 // Balance credited asynchronously when /campay/webhook fires SUCCESSFUL.
 router.post('/topup', earningsController.initiateTopUp);
 
-// ── POST /api/driver/earnings/withdraw ────────────────────────────────
-// Initiate a CamPay disbursement (withdraw earnings to mobile money)
-// Body:    { amount: number, phone: string }
-// Returns: { txId, paymentId, campayRef, newBalance, message }
-// Result is SYNCHRONOUS — CamPay confirms or rejects immediately.
-// No webhook needed. Failed transfers are auto-reversed.
-router.post('/withdraw', earningsController.initiateWithdraw);
+// Withdrawal route removed — WeGo is deposit/top-up only. Drivers top up their
+// wallet (collection) to receive rides; there is no payout to mobile money.
 
 module.exports = router;

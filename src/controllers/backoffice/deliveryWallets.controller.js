@@ -4,7 +4,6 @@ const { Op, fn, col, literal } = require('sequelize');
 const {
     DeliveryWallet,
     DeliveryWalletTransaction,
-    DeliveryPayoutRequest,
     Driver,
     Account,
     sequelize,
@@ -71,8 +70,6 @@ exports.getWallets = async (req, res) => {
             DeliveryWallet.sum('total_withdrawn'),
         ]);
 
-        const pendingPayoutsCount = await DeliveryPayoutRequest.count({ where: { status: 'pending' } });
-
         const formatted = wallets.map(w => ({
             id:                    w.id,
             driverId:              w.driver_id,
@@ -112,7 +109,6 @@ exports.getWallets = async (req, res) => {
                 totalCashCollected:    totalCashCollected    || 0,
                 totalCommissionOwed:   totalCommissionOwed   || 0,
                 totalWithdrawn:        totalWithdrawn        || 0,
-                pendingPayoutsCount,
                 walletCount:           count,
             },
             pagination: {
@@ -413,217 +409,6 @@ exports.exportWallets = async (req, res) => {
 
     } catch (error) {
         console.error('❌ [WALLETS] exportWallets error:', error.message);
-        return res.status(500).json({ success: false, message: 'Failed to export' });
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET ALL PAYOUT REQUESTS
-// GET /api/backoffice/delivery/payouts
-// ═══════════════════════════════════════════════════════════════════════════════
-exports.getPayouts = async (req, res) => {
-    try {
-        const {
-            page   = 1,
-            limit  = 20,
-            status = '',
-        } = req.query;
-
-        const offset = (parseInt(page) - 1) * parseInt(limit);
-        const where  = {};
-        if (status) where.status = status;
-
-        const { count, rows } = await DeliveryPayoutRequest.findAndCountAll({
-            where,
-            include: [
-                {
-                    association: 'driver',
-                    attributes:  ['id', 'vehicle_make_model'],
-                    include: [
-                        {
-                            model:      Account,
-                            as:         'account',
-                            attributes: ['first_name', 'last_name', 'phone_e164', 'avatar_url'],
-                        },
-                    ],
-                },
-                {
-                    association: 'wallet',
-                    attributes:  ['id', 'balance', 'pending_withdrawal'],
-                },
-            ],
-            order: [
-                [sequelize.literal(`FIELD(\`DeliveryPayoutRequest\`.\`status\`, 'pending', 'processing', 'completed', 'rejected', 'cancelled')`), 'ASC'],
-                ['created_at', 'DESC'],
-            ],
-            limit:    parseInt(limit),
-            offset,
-            distinct: true,
-        });
-
-        // Summary counts
-        const [pendingCount, processingCount, completedToday, totalPaidOut] = await Promise.all([
-            DeliveryPayoutRequest.count({ where: { status: 'pending' } }),
-            DeliveryPayoutRequest.count({ where: { status: 'processing' } }),
-            DeliveryPayoutRequest.count({
-                where: {
-                    status:       'completed',
-                    completed_at: { [Op.gte]: new Date(new Date().setHours(0, 0, 0, 0)) },
-                },
-            }),
-            DeliveryPayoutRequest.sum('amount', { where: { status: 'completed' } }),
-        ]);
-
-        return res.json({
-            success:  true,
-            payouts:  rows,
-            summary: {
-                pendingCount,
-                processingCount,
-                completedToday,
-                totalPaidOut: totalPaidOut || 0,
-            },
-            pagination: {
-                total:      count,
-                page:       parseInt(page),
-                limit:      parseInt(limit),
-                totalPages: Math.ceil(count / parseInt(limit)),
-            },
-        });
-
-    } catch (error) {
-        console.error('❌ [WALLETS] getPayouts error:', error.message);
-        return res.status(500).json({ success: false, message: 'Failed to fetch payouts' });
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// APPROVE PAYOUT
-// POST /api/backoffice/delivery/payouts/:id/approve
-// ═══════════════════════════════════════════════════════════════════════════════
-exports.approvePayout = async (req, res) => {
-    try {
-        const { id }               = req.params;
-        const { payment_reference, admin_notes } = req.body;
-
-        const result = await deliveryEarningsService.approveCashout(
-            parseInt(id),
-            req.user.id,
-            payment_reference || null,
-            admin_notes || null
-        );
-
-        return res.json({
-            success:    true,
-            message:    'Payout approved and processed',
-            payoutCode: result.request.payout_code,
-            amount:     result.request.amount,
-        });
-
-    } catch (error) {
-        console.error('❌ [WALLETS] approvePayout error:', error.message);
-        return res.status(400).json({ success: false, message: error.message });
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// REJECT PAYOUT
-// POST /api/backoffice/delivery/payouts/:id/reject
-// ═══════════════════════════════════════════════════════════════════════════════
-exports.rejectPayout = async (req, res) => {
-    try {
-        const { id }    = req.params;
-        const { reason } = req.body;
-
-        if (!reason?.trim()) {
-            return res.status(400).json({ success: false, message: 'Rejection reason is required' });
-        }
-
-        await deliveryEarningsService.rejectCashout(parseInt(id), req.user.id, reason.trim());
-
-        return res.json({ success: true, message: 'Payout request rejected' });
-
-    } catch (error) {
-        console.error('❌ [WALLETS] rejectPayout error:', error.message);
-        return res.status(400).json({ success: false, message: error.message });
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// EXPORT PAYOUTS REPORT (Excel)
-// GET /api/backoffice/delivery/payouts/export
-// ═══════════════════════════════════════════════════════════════════════════════
-exports.exportPayouts = async (req, res) => {
-    try {
-        const { status = '', start_date = '', end_date = '' } = req.query;
-
-        const where = {};
-        if (status) where.status = status;
-        if (start_date || end_date) {
-            where.created_at = {};
-            if (start_date) where.created_at[Op.gte] = new Date(start_date);
-            if (end_date)   where.created_at[Op.lte] = new Date(new Date(end_date).setHours(23, 59, 59));
-        }
-
-        const payouts = await DeliveryPayoutRequest.findAll({
-            where,
-            include: [
-                {
-                    association: 'driver',
-                    include: [{ model: Account, as: 'account', attributes: ['first_name', 'last_name', 'phone_e164'] }],
-                },
-            ],
-            order: [['created_at', 'DESC']],
-        });
-
-        const workbook = new ExcelJS.Workbook();
-        const sheet    = workbook.addWorksheet('Payout Requests');
-
-        sheet.columns = [
-            { header: 'Payout Code',      key: 'payoutCode',   width: 22 },
-            { header: 'Agent Name',        key: 'agentName',    width: 25 },
-            { header: 'Phone',             key: 'phone',        width: 18 },
-            { header: 'Amount (XAF)',      key: 'amount',       width: 16 },
-            { header: 'Payment Method',    key: 'method',       width: 18 },
-            { header: 'Payout To',         key: 'payoutPhone',  width: 18 },
-            { header: 'Status',            key: 'status',       width: 14 },
-            { header: 'Payment Reference', key: 'reference',    width: 22 },
-            { header: 'Requested At',      key: 'requestedAt',  width: 20 },
-            { header: 'Completed At',      key: 'completedAt',  width: 20 },
-            { header: 'Agent Notes',       key: 'agentNotes',   width: 30 },
-        ];
-
-        sheet.getRow(1).eachCell(cell => {
-            cell.font      = { bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFDC71' } };
-            cell.alignment = { horizontal: 'center' };
-        });
-
-        payouts.forEach(p => {
-            sheet.addRow({
-                payoutCode:   p.payout_code,
-                agentName:    `${p.driver?.account?.first_name || ''} ${p.driver?.account?.last_name || ''}`.trim(),
-                phone:        p.driver?.account?.phone_e164 || '—',
-                amount:       parseFloat(p.amount),
-                method:       p.payment_method === 'mtn_mobile_money' ? 'MTN MoMo' : 'Orange Money',
-                payoutPhone:  p.phone_number,
-                status:       p.status,
-                reference:    p.payment_reference || '—',
-                requestedAt:  p.created_at ? new Date(p.created_at).toLocaleString('en-GB') : '—',
-                completedAt:  p.completed_at ? new Date(p.completed_at).toLocaleString('en-GB') : '—',
-                agentNotes:   p.agent_notes || '—',
-            });
-        });
-
-        const filename = `wego_delivery_payouts_${new Date().toISOString().split('T')[0]}.xlsx`;
-        res.setHeader('Content-Type',        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-        await workbook.xlsx.write(res);
-        res.end();
-
-    } catch (error) {
-        console.error('❌ [WALLETS] exportPayouts error:', error.message);
         return res.status(500).json({ success: false, message: 'Failed to export' });
     }
 };

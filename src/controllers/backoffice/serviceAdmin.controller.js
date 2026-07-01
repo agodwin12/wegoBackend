@@ -1,440 +1,221 @@
-// backend/src/controllers/serviceAdmin.controller.js
-// Service Admin Dashboard Controller - Overview Statistics & Metrics
+// backend/src/controllers/backoffice/serviceAdmin.controller.js
+// Service Admin Dashboard — classifieds model
 
 const {
     ServiceListing,
-    ServiceRequest,
+    ServiceAdPayment,
+    ServiceListingPlan,
     ServiceCategory,
     ServiceRating,
-    ServiceDispute,
     Account,
-    Employee
 } = require('../../models');
-const { Op } = require('sequelize');
-const sequelize = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET DASHBOARD STATISTICS (Admin - Overview metrics)
 // GET /api/services/admin/dashboard/stats
 // ═══════════════════════════════════════════════════════════════════════
-
 exports.getDashboardStats = async (req, res) => {
     try {
-        console.log('📊 [SERVICE_ADMIN] Fetching dashboard statistics...');
+        const today    = new Date(); today.setHours(0, 0, 0, 0);
+        const monthAgo = new Date(Date.now() - 30 * 86400000);
 
-        // ─────────────────────────────────────────────────────────────────
-        // TODAY'S DATE RANGE
-        // ─────────────────────────────────────────────────────────────────
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        // Listings
+        const [pendingReview, heroQueue, active, total] = await Promise.all([
+            ServiceListing.count({ where: { status: 'pending_review' } }),
+            ServiceListing.count({ where: { status: 'hero_pending'   } }),
+            ServiceListing.count({ where: { status: 'active'         } }),
+            ServiceListing.count(),
+        ]);
 
-        // ─────────────────────────────────────────────────────────────────
-        // LISTINGS STATS
-        // ─────────────────────────────────────────────────────────────────
-        const pendingListings = await ServiceListing.count({
-            where: { status: 'pending' }
-        });
-
-        const approvedToday = await ServiceListing.count({
-            where: {
-                status: ['approved', 'active'],
-                approved_at: { [Op.gte]: today }
-            }
-        });
-
-        const activeServices = await ServiceListing.count({
-            where: { status: 'active' }
-        });
-
-        const totalListings = await ServiceListing.count();
-
-        // ─────────────────────────────────────────────────────────────────
-        // PROVIDERS STATS
-        // ─────────────────────────────────────────────────────────────────
-
-        // Get all unique providers who have at least one listing
-        const allProviders = await ServiceListing.findAll({
-            attributes: [
-                [sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']
-            ],
-            raw: true
-        });
-        const totalProviders = allProviders.length;
-
-        // Active providers (have at least one active listing)
-        const activeProviders = await ServiceListing.findAll({
+        // Providers
+        const activeProvidersRows = await ServiceListing.findAll({
+            attributes: [[fn('DISTINCT', col('provider_id')), 'provider_id']],
             where: { status: 'active' },
-            attributes: [
-                [sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']
-            ],
-            raw: true
+            raw: true,
         });
-        const activeProvidersCount = activeProviders.length;
+        const activeProviders = activeProvidersRows.length;
 
-        // Verified providers (providers who are verified accounts)
-        const verifiedProviders = await Account.count({
-            where: {
-                uuid: { [Op.in]: allProviders.map(p => p.provider_id) },
-                phone_verified: true
-            }
+        const allProvidersRows = await ServiceListing.findAll({
+            attributes: [[fn('DISTINCT', col('provider_id')), 'provider_id']],
+            raw: true,
         });
+        const totalProviders = allProvidersRows.length;
 
-        // Suspended providers
-        const suspendedProviders = await Account.count({
-            where: {
-                uuid: { [Op.in]: allProviders.map(p => p.provider_id) },
-                status: 'SUSPENDED'
-            }
+        // Ratings
+        const [avgRow] = await ServiceRating.findAll({
+            attributes: [[fn('AVG', col('rating')), 'avg']],
+            raw: true,
         });
+        const averageRating = parseFloat(avgRow?.avg ?? 0).toFixed(2);
 
-        // Average rating across all listings
-        const avgRatingResult = await ServiceListing.findOne({
-            attributes: [
-                [sequelize.fn('AVG', sequelize.col('average_rating')), 'avg_rating']
-            ],
-            where: {
-                status: 'active',
-                average_rating: { [Op.gt]: 0 }
-            },
-            raw: true
+        // Plan revenue
+        const [revenueAllRow] = await ServiceAdPayment.findAll({
+            attributes: [[fn('SUM', col('amount_snapshot')), 'total']],
+            where: { status: { [Op.in]: ['active', 'expired'] } },
+            raw: true,
         });
-        const averageRating = avgRatingResult?.avg_rating
-            ? parseFloat(avgRatingResult.avg_rating).toFixed(2)
-            : 0;
+        const totalPlanRevenue = parseFloat(revenueAllRow?.total ?? 0);
 
-        // ─────────────────────────────────────────────────────────────────
-        // FINANCIAL STATS (Commission)
-        // ─────────────────────────────────────────────────────────────────
-
-        // Total commission from all completed services
-        const totalCommissionResult = await ServiceRequest.findOne({
-            attributes: [
-                [sequelize.fn('SUM', sequelize.col('commission_amount')), 'total']
-            ],
-            where: {
-                status: ['completed', 'payment_confirmed'],
-                commission_amount: { [Op.gt]: 0 }
-            },
-            raw: true
+        const [revMonthRow] = await ServiceAdPayment.findAll({
+            attributes: [[fn('SUM', col('amount_snapshot')), 'total']],
+            where: { status: { [Op.in]: ['active', 'expired'] }, created_at: { [Op.gte]: monthAgo } },
+            raw: true,
         });
-        const totalCommissionDue = totalCommissionResult?.total || 0;
+        const revenueLast30Days = parseFloat(revMonthRow?.total ?? 0);
 
-        // Commission earned today
-        const todayCommissionResult = await ServiceRequest.findOne({
-            attributes: [
-                [sequelize.fn('SUM', sequelize.col('commission_amount')), 'total']
-            ],
-            where: {
-                status: ['completed', 'payment_confirmed'],
-                payment_confirmed_at: { [Op.gte]: today },
-                commission_amount: { [Op.gt]: 0 }
-            },
-            raw: true
+        const [revTodayRow] = await ServiceAdPayment.findAll({
+            attributes: [[fn('SUM', col('amount_snapshot')), 'total']],
+            where: { status: { [Op.in]: ['active', 'expired'] }, created_at: { [Op.gte]: today } },
+            raw: true,
         });
-        const commissionToday = todayCommissionResult?.total || 0;
+        const revenueToday = parseFloat(revTodayRow?.total ?? 0);
 
-        // Total revenue (all completed services)
-        const totalRevenueResult = await ServiceRequest.findOne({
-            attributes: [
-                [sequelize.fn('SUM', sequelize.col('final_amount')), 'total']
-            ],
-            where: {
-                status: ['completed', 'payment_confirmed'],
-                final_amount: { [Op.gt]: 0 }
-            },
-            raw: true
-        });
-        const totalRevenue = totalRevenueResult?.total || 0;
+        const activePlans  = await ServiceAdPayment.count({ where: { status: 'active' } });
+        const expiredPlans = await ServiceAdPayment.count({ where: { status: 'expired' } });
+        const pendingPlans = await ServiceAdPayment.count({ where: { status: 'pending_payment' } });
 
-        // Revenue today
-        const todayRevenueResult = await ServiceRequest.findOne({
-            attributes: [
-                [sequelize.fn('SUM', sequelize.col('final_amount')), 'total']
-            ],
-            where: {
-                status: ['completed', 'payment_confirmed'],
-                payment_confirmed_at: { [Op.gte]: today },
-                final_amount: { [Op.gt]: 0 }
-            },
-            raw: true
-        });
-        const revenueToday = todayRevenueResult?.total || 0;
-
-        // ─────────────────────────────────────────────────────────────────
-        // SERVICE REQUESTS STATS
-        // ─────────────────────────────────────────────────────────────────
-
-        const totalRequests = await ServiceRequest.count();
-
-        const pendingRequests = await ServiceRequest.count({
-            where: { status: 'pending' }
-        });
-
-        const acceptedRequests = await ServiceRequest.count({
-            where: { status: 'accepted' }
-        });
-
-        const inProgressRequests = await ServiceRequest.count({
-            where: { status: 'in_progress' }
-        });
-
-        const paymentPendingRequests = await ServiceRequest.count({
-            where: { status: 'payment_pending' }
-        });
-
-        const completedToday = await ServiceRequest.count({
-            where: {
-                status: ['completed', 'payment_confirmed'],
-                completed_at: { [Op.gte]: today }
-            }
-        });
-
-        const totalCompleted = await ServiceRequest.count({
-            where: { status: ['completed', 'payment_confirmed'] }
-        });
-
-        const totalActive = pendingRequests + acceptedRequests + inProgressRequests + paymentPendingRequests;
-
-        // ─────────────────────────────────────────────────────────────────
-        // DISPUTES STATS
-        // ─────────────────────────────────────────────────────────────────
-
-        const openDisputes = await ServiceDispute.count({
-            where: { status: 'open' }
-        });
-
-        const investigatingDisputes = await ServiceDispute.count({
-            where: { status: 'investigating' }
-        });
-
-        const totalDisputes = await ServiceDispute.count();
-
-        const criticalDisputes = await ServiceDispute.count({
-            where: {
-                priority: 'critical',
-                status: { [Op.in]: ['open', 'investigating', 'awaiting_response', 'escalated'] }
-            }
-        });
-
-        // ─────────────────────────────────────────────────────────────────
-        // ALERTS (Items needing attention)
-        // ─────────────────────────────────────────────────────────────────
-
-        // Listings pending more than 24 hours
-        const urgentListingsCount = await ServiceListing.count({
-            where: {
-                status: 'pending',
-                created_at: {
-                    [Op.lt]: new Date(Date.now() - 24 * 60 * 60 * 1000)
-                }
-            }
-        });
-
-        // Payment disputes needing review
-        const paymentDisputesCount = await ServiceDispute.count({
-            where: {
-                dispute_type: 'payment_issue',
-                status: { [Op.in]: ['open', 'investigating'] }
-            }
-        });
-
-        // Flagged reviews
-        const flaggedReviewsCount = await ServiceRating.count({
-            where: { is_flagged: true }
-        });
-
-        // ─────────────────────────────────────────────────────────────────
-        // RECENT ACTIVITY (Last 5 activities)
-        // ─────────────────────────────────────────────────────────────────
-
-        const recentListings = await ServiceListing.findAll({
-            where: { status: 'pending' },
-            order: [['created_at', 'DESC']],
-            limit: 3,
-            include: [
-                {
-                    model: Account,
-                    as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name']
-                },
-                {
-                    model: ServiceCategory,
-                    as: 'category',
-                    attributes: ['id', 'name_en']
-                }
-            ]
-        });
-
-        const recentActivity = recentListings.map(listing => ({
-            type: 'new_listing',
-            id: listing.listing_id,
-            title: listing.title,
-            provider: `${listing.provider.first_name} ${listing.provider.last_name}`,
-            category: listing.category.name_en,
-            timestamp: listing.created_at,
-            time_ago: getTimeAgo(listing.created_at)
-        }));
-
-        // ─────────────────────────────────────────────────────────────────
-        // PROVIDER OVERVIEW
-        // ─────────────────────────────────────────────────────────────────
-
-        const providerOverview = {
-            total_providers: totalProviders,
-            active_providers: activeProvidersCount,
-            verified_providers: verifiedProviders,
-            suspended_providers: suspendedProviders,
-            average_rating: parseFloat(averageRating),
-            providers_with_earnings: await ServiceRequest.count({
-                where: {
-                    status: ['completed', 'payment_confirmed'],
-                    provider_net_amount: { [Op.gt]: 0 }
-                },
-                distinct: true,
-                col: 'provider_id'
-            })
-        };
-
-        // ─────────────────────────────────────────────────────────────────
-        // RETURN COMPLETE STATS
-        // ─────────────────────────────────────────────────────────────────
-
-        console.log('✅ [SERVICE_ADMIN] Dashboard statistics retrieved successfully');
-
-        res.status(200).json({
+        return res.json({
             success: true,
-            message: 'Dashboard statistics retrieved successfully',
             data: {
-                // Today's metrics
-                today_metrics: {
-                    pending_listings: pendingListings,
-                    approved_today: approvedToday,
-                    completed_today: completedToday,
-                    revenue_today: revenueToday,
-                    commission_today: commissionToday,
-                },
-
-                // Listings overview
                 listings: {
-                    total: totalListings,
-                    pending: pendingListings,
-                    approved: approvedToday,
-                    active: activeServices,
+                    total,
+                    active,
+                    pending_review: pendingReview,
+                    hero_queue:     heroQueue,
                 },
-
-                // Service requests overview
-                requests: {
-                    total: totalRequests,
-                    pending: pendingRequests,
-                    accepted: acceptedRequests,
-                    in_progress: inProgressRequests,
-                    payment_pending: paymentPendingRequests,
-                    completed_today: completedToday,
-                    total_completed: totalCompleted,
-                    total_active: totalActive,
+                providers: {
+                    total:  totalProviders,
+                    active: activeProviders,
                 },
-
-                // Financial overview
-                financial: {
-                    total_revenue: totalRevenue,
-                    revenue_today: revenueToday,
-                    total_commission: totalCommissionDue,
-                    commission_today: commissionToday,
+                ratings: {
+                    average: averageRating,
                 },
-
-                // Providers overview
-                providers: providerOverview,
-
-                // Disputes overview
-                disputes: {
-                    total: totalDisputes,
-                    open: openDisputes,
-                    investigating: investigatingDisputes,
-                    critical: criticalDisputes,
+                revenue: {
+                    total:         totalPlanRevenue,
+                    last_30_days:  revenueLast30Days,
+                    today:         revenueToday,
+                    active_plans:  activePlans,
+                    expired_plans: expiredPlans,
+                    pending_plans: pendingPlans,
                 },
-
-                // Alerts (items needing attention)
-                alerts: {
-                    urgent_listings: urgentListingsCount,
-                    payment_disputes: paymentDisputesCount,
-                    flagged_reviews: flaggedReviewsCount,
-                },
-
-                // Recent activity
-                recent_activity: recentActivity,
-            }
+            },
         });
-
-    } catch (error) {
-        console.error('❌ [SERVICE_ADMIN] Error in getDashboardStats:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Unable to retrieve dashboard statistics. Please try again later.',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] getDashboardStats:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch stats', error: err.message });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// HELPER FUNCTION: GET TIME AGO
-// ═══════════════════════════════════════════════════════════════════════
-
-function getTimeAgo(date) {
-    const now = new Date();
-    const diffMs = now - new Date(date);
-    const diffMinutes = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMinutes < 1) return 'just now';
-    if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes > 1 ? 's' : ''} ago`;
-    if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
-    return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// GET QUICK STATS (Lightweight version for frequent polling)
 // GET /api/services/admin/dashboard/quick-stats
+// Lightweight polling endpoint
 // ═══════════════════════════════════════════════════════════════════════
-
 exports.getQuickStats = async (req, res) => {
     try {
-        const pendingListings = await ServiceListing.count({
-            where: { status: 'pending' }
-        });
+        const [pendingReview, heroQueue, activePlans] = await Promise.all([
+            ServiceListing.count({ where: { status: 'pending_review' } }),
+            ServiceListing.count({ where: { status: 'hero_pending'   } }),
+            ServiceAdPayment.count({ where: { status: 'active' } }),
+        ]);
 
-        const activeServices = await ServiceListing.count({
-            where: { status: 'active' }
-        });
-
-        const openDisputes = await ServiceDispute.count({
-            where: { status: 'open' }
-        });
-
-        const inProgressRequests = await ServiceRequest.count({
-            where: { status: 'in_progress' }
-        });
-
-        res.status(200).json({
+        return res.json({
             success: true,
-            data: {
-                pending_listings: pendingListings,
-                active_services: activeServices,
-                open_disputes: openDisputes,
-                in_progress_requests: inProgressRequests,
-            }
+            data: { pending_review: pendingReview, hero_queue: heroQueue, active_plans: activePlans },
         });
-
-    } catch (error) {
-        console.error('❌ [SERVICE_ADMIN] Error in getQuickStats:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Unable to retrieve quick stats.',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] getQuickStats:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch quick stats' });
     }
 };
 
-module.exports = exports;
+// ═══════════════════════════════════════════════════════════════════════
+// GET /api/services/admin/ad-payments
+// List all ad payments (plan sales) for backoffice Plan Sales page
+// ═══════════════════════════════════════════════════════════════════════
+exports.getAdminAdPayments = async (req, res) => {
+    try {
+        const { status, date_range, page = 1, limit = 50 } = req.query;
+        const where = {};
+
+        if (status && status !== 'all') where.status = status;
+
+        if (date_range && date_range !== 'all') {
+            const now   = new Date();
+            let   start = new Date();
+            switch (date_range) {
+                case 'today': start.setHours(0, 0, 0, 0); break;
+                case 'week':  start = new Date(now.getTime() - 7 * 86400000); break;
+                case 'month': start = new Date(now.getFullYear(), now.getMonth(), 1); break;
+            }
+            where.created_at = { [Op.gte]: start };
+        }
+
+        const offset = (parseInt(page) - 1) * parseInt(limit);
+
+        const { count, rows: payments } = await ServiceAdPayment.findAndCountAll({
+            where,
+            include: [
+                { model: ServiceListingPlan, as: 'plan',    attributes: ['label_fr', 'label_en', 'plan_key', 'boost_priority'] },
+                { model: Account,            as: 'seller',  attributes: ['first_name', 'last_name', 'phone_e164'] },
+                { model: ServiceListing,     as: 'listing', attributes: ['title'], required: false },
+            ],
+            order:  [['created_at', 'DESC']],
+            limit:  parseInt(limit),
+            offset,
+        });
+
+        // Stats
+        const [totalRevRow] = await ServiceAdPayment.findAll({
+            attributes: [[fn('SUM', col('amount_snapshot')), 'total']],
+            where: { status: { [Op.in]: ['active', 'expired'] } },
+            raw: true,
+        });
+
+        const [activePlans, expiredPlans, pendingPlans] = await Promise.all([
+            ServiceAdPayment.count({ where: { status: 'active' } }),
+            ServiceAdPayment.count({ where: { status: 'expired' } }),
+            ServiceAdPayment.count({ where: { status: 'pending_payment' } }),
+        ]);
+
+        const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+        const salesThisMonth = await ServiceAdPayment.count({
+            where: { status: { [Op.in]: ['active', 'expired'] }, created_at: { [Op.gte]: monthStart } },
+        });
+
+        const formatted = payments.map(p => ({
+            id:                        p.id,
+            plan_key_snapshot:         p.plan_key_snapshot,
+            duration_days_snapshot:    p.duration_days_snapshot,
+            is_hero_placement_snapshot: p.is_hero_placement_snapshot,
+            amount_snapshot:           p.amount_snapshot,
+            status:                    p.status,
+            plan_starts_at:            p.plan_starts_at,
+            plan_expires_at:           p.plan_expires_at,
+            created_at:                p.createdAt,
+            paid_by:                   p.paid_by,
+            seller_name:               `${p.seller?.first_name ?? ''} ${p.seller?.last_name ?? ''}`.trim(),
+            seller_phone:              p.seller?.phone_e164 ?? '',
+            listing_id:                p.listing_id,
+            listing_title:             p.listing?.title ?? null,
+            plan_label:                p.plan?.label_fr ?? p.plan?.label_en ?? p.plan_key_snapshot,
+        }));
+
+        return res.json({
+            success: true,
+            data: {
+                payments: formatted,
+                pagination: { total: count, page: parseInt(page), limit: parseInt(limit) },
+                stats: {
+                    total_revenue:    parseFloat(totalRevRow?.total ?? 0),
+                    active_plans:     activePlans,
+                    expired_plans:    expiredPlans,
+                    pending_plans:    pendingPlans,
+                    sales_this_month: salesThisMonth,
+                },
+            },
+        });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] getAdminAdPayments:', err);
+        return res.status(500).json({ success: false, message: 'Failed to load plan sales', error: err.message });
+    }
+};

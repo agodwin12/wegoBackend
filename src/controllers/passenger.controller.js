@@ -1,6 +1,7 @@
 // src/controllers/passenger.controller.js
 
 const { Trip } = require('../models');
+const { applyTransition } = require('../services/tripState.service');
 const {
     findAndOfferTrip,
     calculateDistance,
@@ -244,12 +245,15 @@ exports.cancelTrip = async (req, res, next) => {
             });
         }
 
-        // Cancel the trip
-        trip.status = 'CANCELED';
-        trip.canceled_by = 'PASSENGER';
-        trip.cancellation_reason = reason;
-        trip.canceled_at = new Date();
-        await trip.save();
+        // Cancel the trip — validated transition + audit log. No fee charged.
+        try {
+            await applyTransition(trip, 'CANCELED', { actor: 'PASSENGER', reason });
+        } catch (e) {
+            if (e.code === 'ILLEGAL_TRANSITION') {
+                return res.status(400).json({ error: 'Cannot cancel', message: `Trip in ${trip.status} cannot be canceled` });
+            }
+            throw e;
+        }
 
         console.log('✅ [PASSENGER-CONTROLLER] Trip canceled');
 

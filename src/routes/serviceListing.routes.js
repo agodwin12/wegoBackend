@@ -142,6 +142,15 @@ router.post(
 // DYNAMIC ROUTES (/:id must always be last)
 // ═══════════════════════════════════════════════════════════════════════
 
+// @route   POST /api/services/moderation/:id/contact
+// @desc    Request/contact a provider (records lead + push-notifies provider)
+// @access  Private (authenticated customer)
+router.post(
+    '/:id/contact',
+    authenticateToken,
+    serviceListingController.requestService
+);
+
 // @route   GET /api/services/moderation/:id
 // @desc    Get listing by ID (increments view count)
 // @access  Public

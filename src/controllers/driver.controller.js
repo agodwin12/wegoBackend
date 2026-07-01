@@ -3,6 +3,7 @@
 const { Account, DriverProfile, Trip, TripEvent, Rating, DriverWallet, EarningRule, sequelize } = require('../models');
 const { Op }          = require('sequelize');
 const earningsEngine  = require('../services/earningsEngineService');
+const { applyTransition } = require('../services/tripState.service');
 const { v4: uuidv4 }  = require('uuid');
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO }       = require('../sockets/index');
@@ -279,11 +280,9 @@ exports.reportNoShow = async (req, res, next) => {
             });
         }
 
-        trip.status       = 'NO_SHOW';
+        // Validated transition (DRIVER_ARRIVED → NO_SHOW). No fee charged.
         trip.cancelReason = reason || 'Passenger did not show up';
-        trip.canceledBy   = 'DRIVER';
-        trip.canceledAt   = new Date();
-        await trip.save();
+        await applyTransition(trip, 'NO_SHOW', { actor: 'DRIVER', reason: trip.cancelReason });
 
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
         await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
@@ -680,10 +679,12 @@ exports.acceptTrip = async (req, res, next) => {
         } catch (walletErr) {
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
             console.error('❌ [ACCEPT-TRIP] Wallet check error:', walletErr.message);
-            return res.status(500).json({
-                error:   true,
-                message: 'Could not verify wallet balance. Please try again.',
+            // 503: this is a transient dependency failure (DB/Redis), not a
+            // client error — the driver should be told to retry.
+            return res.status(503).json({
+                success: false,
                 code:    'WALLET_CHECK_FAILED',
+                message: 'Could not verify wallet balance. Please try again.',
             });
         }
 
@@ -1070,11 +1071,12 @@ exports.completeTrip = async (req, res, next) => {
         }
 
         const result = await sequelize.transaction(async (t) => {
-            trip.status          = 'COMPLETED';
-            trip.tripCompletedAt = new Date();
             if (final_fare) trip.fareFinal = parseInt(final_fare, 10);
             if (notes)      trip.notes     = notes;
-            await trip.save({ transaction: t });
+            // Validated transition (IN_PROGRESS → COMPLETED) + audit log, in-tx.
+            await applyTransition(trip, 'COMPLETED', {
+                actor: 'DRIVER', transaction: t, meta: { finalFare: trip.fareFinal },
+            });
 
             console.log('✅ [DRIVER] Trip status → COMPLETED');
             console.log('   Final fare:', trip.fareFinal || trip.fareEstimate, 'XAF');
@@ -1171,11 +1173,8 @@ exports.cancelTrip = async (req, res, next) => {
             });
         }
 
-        trip.status       = 'CANCELED';
-        trip.cancelReason = reason;
-        trip.canceledBy   = 'DRIVER';
-        trip.canceledAt   = new Date();
-        await trip.save();
+        // Validated transition + audit log. No cancellation fee is charged.
+        await applyTransition(trip, 'CANCELED', { actor: 'DRIVER', reason });
 
         await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
         await redisClient.del(`passenger:active_trip:${trip.passengerId}`);

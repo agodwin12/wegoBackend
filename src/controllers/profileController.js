@@ -2,7 +2,7 @@
 // WEGO - Profile Management Controller
 // Complete & Fixed - Uses correct column naming conventions
 
-const { Account, Trip, ServiceListing, ServiceRequest, ServiceRating } = require('../models');
+const { Account, Trip, ServiceListing, ServiceAdPayment, ServiceRating } = require('../models');
 const { uploadProfileToR2, deleteFile } = require('../middleware/upload');
 
 /**
@@ -442,14 +442,11 @@ async function calculateUserStats(userUuid) {
 
         let completedServices = 0;
         try {
-            completedServices = await ServiceRequest.count({
-                where: {
-                    provider_id: userUuid,
-                    status: 'completed'
-                }
+            completedServices = await ServiceListing.count({
+                where: { provider_id: userUuid, status: 'active' }
             });
         } catch (error) {
-            console.log('⚠️ [PROFILE] Error counting completed services:', error.message);
+            console.log('⚠️ [PROFILE] Error counting active listings:', error.message);
         }
 
         // Average rating as service provider (snake_case)
@@ -525,22 +522,18 @@ async function calculateDetailedStats(userUuid) {
             console.log('⚠️ [PROFILE] Error calculating rides earnings:', error.message);
         }
 
-        // Total earnings from services - snake_case
+        // Plan fees paid to WeGo (classifieds model)
         let servicesEarnings = 0;
         try {
-            servicesEarnings = await ServiceRequest.sum('final_amount', {
-                where: {
-                    provider_id: userUuid,
-                    status: 'completed',
-                    payment_status: 'confirmed'
-                }
+            servicesEarnings = await ServiceAdPayment.sum('amount_snapshot', {
+                where: { paid_by: userUuid, status: ['active', 'expired'] }
             }) || 0;
         } catch (error) {
-            console.log('⚠️ [PROFILE] Error calculating services earnings:', error.message);
+            console.log('⚠️ [PROFILE] Error calculating plan fees:', error.message);
         }
 
-        const commissionOwed = servicesEarnings * 0.15;
-        const netEarnings = servicesEarnings - commissionOwed;
+        const commissionOwed = 0;
+        const netEarnings    = 0;
 
         const detailedStats = {
             ...basicStats,

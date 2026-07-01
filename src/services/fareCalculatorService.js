@@ -10,12 +10,12 @@ const VEHICLE_TYPES = ['economy', 'comfort', 'luxury'];
 
 class FareCalculatorService {
     constructor() {
-        this.googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
-        this.defaultCity      = process.env.DEFAULT_CITY || 'Douala';
+        this.mapboxToken  = process.env.MAPBOX_ACCESS_TOKEN;
+        this.defaultCity  = process.env.DEFAULT_CITY || 'Douala';
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🔹 Get route details from Google Maps Directions API
+    // 🔹 Get route details from Mapbox Directions API
     // ═══════════════════════════════════════════════════════════════
     async getRouteDetails(pickupLat, pickupLng, dropoffLat, dropoffLng) {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -24,98 +24,92 @@ class FareCalculatorService {
         console.log(`🏁 Destination: [${dropoffLat}, ${dropoffLng}]`);
 
         try {
-            const response = await axios.get(
-                'https://maps.googleapis.com/maps/api/directions/json',
-                {
-                    params: {
-                        origin:       `${pickupLat},${pickupLng}`,
-                        destination:  `${dropoffLat},${dropoffLng}`,
-                        mode:         'driving',
-                        key:          this.googleMapsApiKey,
-                        alternatives: false,
-                        language:     'fr',
-                    },
-                    timeout: 8000,
-                }
-            );
+            // Mapbox expects lng,lat order (GeoJSON)
+            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/` +
+                `${pickupLng},${pickupLat};${dropoffLng},${dropoffLat}`;
 
-            const status = response.data.status;
-            console.log(`📡 [FARE] Google Maps status: ${status}`);
+            const response = await axios.get(url, {
+                params: {
+                    access_token: this.mapboxToken,
+                    geometries:   'polyline',   // same encoding as Google (factor 1e5)
+                    overview:     'full',
+                    steps:        false,
+                    language:     'fr',
+                },
+                timeout: 8000,
+            });
 
-            if (status !== 'OK') {
-                const errorMap = {
-                    ZERO_RESULTS:      { msg: 'No driving route found between these locations.',            code: 400 },
-                    NOT_FOUND:         { msg: 'One or both locations could not be geocoded.',               code: 400 },
-                    OVER_DAILY_LIMIT:  { msg: 'Google Maps quota exceeded. Please try again later.',        code: 429 },
-                    OVER_QUERY_LIMIT:  { msg: 'Google Maps quota exceeded. Please try again later.',        code: 429 },
-                    REQUEST_DENIED:    { msg: 'Google Maps request denied. Check API key configuration.',   code: 403 },
-                    INVALID_REQUEST:   { msg: 'Invalid request to Google Maps. Check your coordinates.',    code: 400 },
-                };
-
-                const { msg, code } = errorMap[status] ?? {
-                    msg:  `Unexpected Google Maps error: ${status}`,
-                    code: 500,
-                };
-
-                const err    = new Error(msg);
-                err.status   = code;
+            const routes = response.data.routes;
+            if (!routes || routes.length === 0) {
+                const err    = new Error('No driving route found between these locations.');
+                err.status   = 400;
                 throw err;
             }
 
-            const route = response.data.routes[0];
-            const leg   = route.legs[0];
+            const route = routes[0];
 
             const details = {
-                distance_m:    leg.distance.value,
-                duration_s:    leg.duration.value,
-                distance_text: leg.distance.text,
-                duration_text: leg.duration.text,
-                polyline:      route.overview_polyline.points,
-                start_address: leg.start_address,
-                end_address:   leg.end_address,
+                distance_m:    route.distance,
+                duration_s:    route.duration,
+                distance_text: `${(route.distance / 1000).toFixed(1)} km`,
+                duration_text: `${Math.ceil(route.duration / 60)} min`,
+                polyline:      route.geometry,
+                start_address: null,
+                end_address:   null,
             };
 
             console.log(`✅ [FARE] Route OK: ${details.distance_text}, ${details.duration_text}`);
             return details;
 
         } catch (error) {
+            if (error.status) throw error;
+
+            const status = error.response?.status;
+            if (status === 401 || status === 403) {
+                const err    = new Error('Mapbox access token invalid or unauthorized.');
+                err.status   = 403;
+                throw err;
+            }
+            if (status === 429) {
+                const err    = new Error('Mapbox rate limit exceeded. Please try again later.');
+                err.status   = 429;
+                throw err;
+            }
+
             console.error('❌ [FARE] getRouteDetails() failed:', error.message);
             return { error: true, message: error.message, status: error.status || 500 };
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🔹 Reverse geocode coordinates → city name
+    // 🔹 Reverse geocode coordinates → city name via Mapbox
     // ═══════════════════════════════════════════════════════════════
     async detectCityFromCoords(lat, lng) {
         console.log(`🏙️  [FARE] detectCityFromCoords(${lat}, ${lng})`);
         try {
-            const response = await axios.get(
-                'https://maps.googleapis.com/maps/api/geocode/json',
-                {
-                    params: {
-                        latlng:      `${lat},${lng}`,
-                        key:         this.googleMapsApiKey,
-                        language:    'fr',
-                        result_type: 'locality|administrative_area_level_2',
-                    },
-                    timeout: 5000,
-                }
-            );
+            // Mapbox Geocoding: lng,lat order
+            const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json`;
 
-            const status = response.data.status;
-            if (status !== 'OK' || !response.data.results.length) {
-                console.warn(`⚠️  [FARE] Reverse geocode ${status} — using DEFAULT_CITY`);
+            const response = await axios.get(url, {
+                params: {
+                    access_token: this.mapboxToken,
+                    types:        'place,locality,district',
+                    language:     'fr',
+                    limit:        1,
+                },
+                timeout: 5000,
+            });
+
+            const features = response.data.features || [];
+            if (!features.length) {
+                console.warn(`⚠️  [FARE] Reverse geocode empty — using DEFAULT_CITY`);
                 return this.defaultCity;
             }
 
-            const components = response.data.results[0].address_components || [];
-            const cityComp   = components.find(c =>
-                c.types.includes('locality') ||
-                c.types.includes('administrative_area_level_2')
-            );
+            // Try to find a "place" type feature (city level) first
+            const feature = features[0];
+            const city    = feature.text || feature.place_name?.split(',')[0]?.trim() || this.defaultCity;
 
-            const city = cityComp ? cityComp.long_name : this.defaultCity;
             console.log(`✅ [FARE] Detected city: "${city}"`);
             return city;
 
@@ -127,8 +121,6 @@ class FareCalculatorService {
 
     // ═══════════════════════════════════════════════════════════════
     // 🔹 Fetch pricing rules for a city
-    //    Returns { economy: PriceRule, comfort: PriceRule, luxury: PriceRule }
-    //    or null for any missing type
     // ═══════════════════════════════════════════════════════════════
     async _getPricingRulesForCity(city) {
         console.log(`🔍 [FARE] _getPricingRulesForCity("${city}")`);
@@ -214,24 +206,13 @@ class FareCalculatorService {
 
     // ═══════════════════════════════════════════════════════════════
     // 🔹 MAIN: Estimate fares for ALL vehicle types in one call
-    //    This is what the /trips/fare-estimates endpoint calls
-    //
-    //    Returns:
-    //    {
-    //      distance_text, duration_text, polyline, city,
-    //      estimates: {
-    //        economy: { fare_estimate, breakdown, distance_text, duration_text },
-    //        comfort: { ... },
-    //        luxury:  { ... },
-    //      }
-    //    }
     // ═══════════════════════════════════════════════════════════════
     async estimateAllVehicleTypes(pickupLat, pickupLng, dropoffLat, dropoffLng, cityOverride = null) {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🚀 [FARE] estimateAllVehicleTypes() called');
 
         try {
-            // Step 1: Route from Google Maps (one call for all vehicle types)
+            // Step 1: Route from Mapbox (one call for all vehicle types)
             const route = await this.getRouteDetails(pickupLat, pickupLng, dropoffLat, dropoffLng);
             if (route.error) return route;
 
@@ -398,7 +379,7 @@ class FareCalculatorService {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🔹 Update surge multiplier for a city (can target one vehicle type or all)
+    // 🔹 Update surge multiplier for a city
     // ═══════════════════════════════════════════════════════════════
     async updateSurgeMultiplier(city, surgeMult, vehicleType = null) {
         console.log(`⚡ [FARE] updateSurgeMultiplier("${city}", ${surgeMult}, ${vehicleType ?? 'all'})`);

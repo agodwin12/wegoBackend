@@ -5,6 +5,7 @@ const { Op }         = require('sequelize');
 const { v4: uuidv4 } = require('uuid');
 const axios          = require('axios');
 
+const models = require('../models');
 const {
     Delivery,
     DeliveryPricing,
@@ -13,12 +14,15 @@ const {
     DeliveryWalletTransaction,
     Account,
     Driver,
-} = require('../models');
+    Coupon,
+    CouponUsage,
+} = models;
 
-const { redisClient, REDIS_KEYS, redisHelpers } = require('../config/redis');
+const { redisClient, REDIS_KEYS, redisHelpers, acquireLock, releaseLock } = require('../config/redis');
 const locationService           = require('../services/locationService');
 const deliveryEarningsService   = require('../services/deliveryEarningsService');
 const deliveryCommissionService = require('../services/delivery/deliveryCommission.service');
+const deliveryBonusService      = require('../services/delivery/deliveryBonusService');
 const deliverySocketService     = require('../sockets/delivery/deliverySocket.service');
 const { EXPRESS_SURCHARGE }     = require('../middleware/delivery.middleware');
 const { getIO }                 = require('../sockets/exports');
@@ -68,25 +72,32 @@ function _getIO(req) {
     return getIO();
 }
 
-async function getGoogleMapsDistance(originLat, originLng, destLat, destLng) {
+async function getMapboxDistance(originLat, originLng, destLat, destLng) {
     try {
-        const response = await axios.get('https://maps.googleapis.com/maps/api/directions/json', {
+        const token = process.env.MAPBOX_ACCESS_TOKEN;
+        if (!token) throw new Error('MAPBOX_ACCESS_TOKEN not set');
+
+        const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${originLng},${originLat};${destLng},${destLat}`;
+        const response = await axios.get(url, {
             params: {
-                origin:      `${originLat},${originLng}`,
-                destination: `${destLat},${destLng}`,
-                key:         process.env.GOOGLE_MAPS_API_KEY,
+                access_token: token,
+                overview:     'false',
             },
         });
-        const route = response.data.routes?.[0]?.legs?.[0];
+
+        const route = response.data.routes?.[0];
         if (!route) throw new Error('No route found');
-        return {
-            distanceKm:      route.distance.value / 1000,
-            durationSeconds: route.duration.value,
-            distanceText:    route.distance.text,
-            durationText:    route.duration.text,
-        };
+
+        const distanceKm = parseFloat((route.distance / 1000).toFixed(3));
+        const durationSeconds = Math.round(route.duration);
+        const distanceText = `${distanceKm.toFixed(1)} km`;
+        const durationText = `${Math.round(durationSeconds / 60)} min`;
+
+        return { distanceKm, durationSeconds, distanceText, durationText };
+
     } catch (error) {
-        console.error('❌ [DELIVERY] Google Maps error:', error.message);
+        console.error('❌ [DELIVERY] Mapbox directions error:', error.message);
+        // Haversine fallback (straight-line × 1.3 road factor)
         const R    = 6371;
         const dLat = (destLat - originLat) * Math.PI / 180;
         const dLng = (destLng - originLng) * Math.PI / 180;
@@ -99,6 +110,9 @@ async function getGoogleMapsDistance(originLat, originLng, destLat, destLng) {
         };
     }
 }
+
+// Alias kept for any internal callers
+const getGoogleMapsDistance = getMapboxDistance;
 
 async function findPricingZone() {
     return DeliveryPricing.findOne({ where: { is_active: true }, order: [['id', 'ASC']] });
@@ -152,6 +166,31 @@ function trackingMode(deliveryType) {
     return deliveryType === 'express' ? 'live_map' : 'stage_updates';
 }
 
+// ── Coupon evaluation (shared by estimate preview + booking) ──────────────────
+// Returns { ok, discount, coupon, message }. Discount is in whole XAF and is
+// capped so it can never exceed the order total. Never throws — callers decide
+// whether a bad code is fatal (booking) or ignorable (estimate preview).
+async function evaluateCoupon(rawCode, senderUuid, grossTotal) {
+    if (!rawCode || !String(rawCode).trim()) return { ok: false, discount: 0, coupon: null, message: 'No coupon' };
+    if (!Coupon) return { ok: false, discount: 0, coupon: null, message: 'Coupons unavailable' };
+
+    const coupon = await Coupon.findByCode(String(rawCode).trim());
+    if (!coupon)             return { ok: false, discount: 0, coupon: null, message: 'Invalid coupon code' };
+    if (!coupon.isValid())   return { ok: false, discount: 0, coupon: null, message: 'This coupon has expired or is no longer active' };
+
+    const usable = await coupon.canBeUsedByUser(senderUuid, models);
+    if (!usable)             return { ok: false, discount: 0, coupon: null, message: 'You are not eligible to use this coupon' };
+
+    if (grossTotal < coupon.min_trip_amount) {
+        return { ok: false, discount: 0, coupon: null, message: `Minimum order of ${coupon.min_trip_amount} XAF required for this coupon` };
+    }
+
+    const discount = coupon.calculateDiscount(Math.round(grossTotal));
+    if (discount <= 0)       return { ok: false, discount: 0, coupon: null, message: 'Coupon gives no discount on this order' };
+
+    return { ok: true, discount, coupon, message: 'Coupon applied' };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 0. GET PACKAGE CATEGORIES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +212,7 @@ exports.getEstimate = async (req, res) => {
     try {
         const {
             pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-            package_size, delivery_type = 'regular',
+            package_size, delivery_type = 'regular', coupon_code,
         } = req.query;
 
         if (!pickup_lat || !pickup_lng || !dropoff_lat || !dropoff_lng || !package_size) {
@@ -209,6 +248,19 @@ exports.getEstimate = async (req, res) => {
             totalPrice += expressSurchargeXAF;
         }
 
+        // Optional coupon preview (only if the user is authenticated & typed one).
+        let couponPreview = null;
+        if (coupon_code && String(coupon_code).trim() && req.user?.uuid) {
+            const evalResult = await evaluateCoupon(coupon_code, req.user.uuid, totalPrice);
+            couponPreview = {
+                code:      String(coupon_code).trim().toUpperCase(),
+                valid:     evalResult.ok,
+                discount:  evalResult.discount,
+                message:   evalResult.message,
+                newTotal:  evalResult.ok ? Math.max(0, totalPrice - evalResult.discount) : totalPrice,
+            };
+        }
+
         return res.json({
             success: true,
             estimate: {
@@ -222,6 +274,7 @@ exports.getEstimate = async (req, res) => {
                 pricingZoneName:  pricingZone.zone_name,
                 surgeActive:      surgeMultiplier > 1.00,
                 surgeRuleName:    surgeRule?.name || null,
+                coupon:           couponPreview,
                 currency:         'XAF',
             },
         });
@@ -248,6 +301,7 @@ exports.bookDelivery = async (req, res) => {
             recipient_name, recipient_phone, recipient_note,
             package_size, package_category, package_description,
             package_photo_url, is_fragile, payment_method,
+            coupon_code,
         } = req.body;
 
         const required = {
@@ -317,6 +371,25 @@ exports.bookDelivery = async (req, res) => {
             finalCommission    += expressSurchargeXAF;
         }
 
+        // ── Coupon (platform-funded discount) ─────────────────────────────
+        // The discount comes off the sender's price and is absorbed by WeGo's
+        // commission — the driver's payout is never reduced. If the customer
+        // typed a code and it's not valid, fail loudly rather than silently.
+        let couponRow          = null;
+        let couponDiscount     = 0;
+        const originalTotal    = finalTotalPrice;
+        if (coupon_code && String(coupon_code).trim()) {
+            const evalResult = await evaluateCoupon(coupon_code, senderUuid, finalTotalPrice);
+            if (!evalResult.ok) {
+                return res.status(400).json({ success: false, message: evalResult.message, code: 'COUPON_INVALID' });
+            }
+            couponRow       = evalResult.coupon;
+            couponDiscount  = evalResult.discount;
+            finalTotalPrice = Math.max(0, finalTotalPrice - couponDiscount);
+            // WeGo absorbs the discount; protect the driver payout.
+            finalCommission = Math.max(0, finalCommission - couponDiscount);
+        }
+
         const deliveryCode                           = await Delivery.generateDeliveryCode();
         const { plain: pinPlain, hashed: pinHashed } = await Delivery.generateDeliveryPin();
 
@@ -353,6 +426,10 @@ exports.bookDelivery = async (req, res) => {
             commission_percentage_applied: priceBreakdown.commissionPercentageApplied,
             commission_amount:             finalCommission,
             driver_payout:                 priceBreakdown.driverPayout,
+            coupon_id:                     couponRow?.id   || null,
+            coupon_code:                   couponRow?.code || null,
+            discount_amount:               couponDiscount,
+            original_total_price:          couponDiscount > 0 ? originalTotal : null,
             payment_method,
             payment_status:                payment_method === 'cash' ? 'cash_pending' : 'pending',
             delivery_pin:                  pinHashed,
@@ -360,6 +437,21 @@ exports.bookDelivery = async (req, res) => {
             status:                        'searching',
             search_attempts:               0,
         });
+
+        // Record the redemption (best-effort — never fail a booking over this).
+        if (couponRow && couponDiscount > 0) {
+            try {
+                await CouponUsage.create({
+                    coupon_id:        couponRow.id,
+                    user_id:          senderUuid,
+                    delivery_id:      delivery.id,
+                    discount_applied: couponDiscount,
+                });
+                await couponRow.incrementUsage();
+            } catch (e) {
+                console.warn('⚠️  [DELIVERY] coupon usage record failed:', e.message);
+            }
+        }
 
         await sendPinSms(recipient_phone, pinPlain, deliveryCode);
 
@@ -413,6 +505,9 @@ exports.bookDelivery = async (req, res) => {
                     surgeMultiplier:  priceBreakdown.surgeMultiplierApplied,
                     surgeActive:      priceBreakdown.isSurging,
                     expressSurcharge: expressSurchargeXAF,
+                    couponCode:       couponRow?.code || null,
+                    discount:         couponDiscount,
+                    subtotalBeforeDiscount: originalTotal,
                     total:            finalTotalPrice,
                 },
                 packageSize:     package_size,
@@ -536,6 +631,10 @@ async function _searchForDriver(deliveryId, io) {
                 notifiedAccountUuids.push(nd.driverId);
                 debugPrint(`📤 [DELIVERY] Offer → driver ${nd.driverId}`);
 
+                // Store for reconnect replay — expires when the offer window closes
+                const offerTtlSec = Math.ceil(DELIVERY_OFFER_TTL_MS / 1000) + 30;
+                await redisClient.set(`delivery:pending_offer:${nd.driverId}`, deliveryId, 'EX', offerTtlSec);
+
                 // ── 🔔 NOTIFICATION: Delivery offer to agent ──────────────
                 getNotificationService().send({
                     accountUuid: nd.driverId,
@@ -563,6 +662,9 @@ async function _searchForDriver(deliveryId, io) {
             broadcastAt: Date.now(),
             expiresAt:   Date.now() + DELIVERY_OFFER_TTL_MS,
         }, Math.ceil(DELIVERY_OFFER_TTL_MS / 1000) + 60);
+
+        // Cache base offer payload for reconnect replay (distance fields omitted — per-driver)
+        await redisHelpers.setJson(`delivery:offer_payload:${deliveryId}`, deliveryOffer, Math.ceil(DELIVERY_OFFER_TTL_MS / 1000) + 60);
 
         await delivery.increment('search_attempts');
 
@@ -882,25 +984,51 @@ exports.verifyPin = async (req, res) => {
             });
         }
 
-        const result = await Delivery.verifyPin(delivery, pin);
-        if (!result.success) {
-            return res.status(400).json({
+        // Distributed lock prevents duplicate commission/earnings on concurrent PIN attempts
+        const lockKey = `delivery:pin_lock:${deliveryId}`;
+        const locked  = await acquireLock(lockKey, driver.id, 30);
+        if (!locked) {
+            return res.status(409).json({
                 success: false,
-                message: result.message,
-                locked:  result.locked || false,
+                message: 'PIN verification already in progress. Please try again.',
             });
         }
 
-        await delivery.transitionTo('delivered');
-        if (delivery.payment_method === 'cash') {
-            await delivery.update({ payment_status: 'cash_pending' });
+        try {
+            // Re-fetch inside lock to guard against TOCTOU race
+            await delivery.reload();
+            if (delivery.status !== 'arrived_dropoff') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Delivery already completed or status changed.',
+                });
+            }
+
+            const result = await Delivery.verifyPin(delivery, pin);
+            if (!result.success) {
+                return res.status(400).json({
+                    success: false,
+                    message: result.message,
+                    locked:  result.locked || false,
+                });
+            }
+
+            await delivery.transitionTo('delivered');
+            if (delivery.payment_method === 'cash') {
+                await delivery.update({ payment_status: 'cash_pending' });
+            }
+
+            deliveryCommissionService.confirmCommission(deliveryId, driver.id)
+                .catch(err => console.error(`❌ [DELIVERY] Commission confirm FAILED:`, err.message));
+
+            // Post earnings, THEN evaluate milestone bonuses (so this delivery is
+            // counted). Bonuses reload the agent wallet like ride-hailing quests.
+            deliveryEarningsService.postDeliveryEarnings(delivery.id)
+                .then(() => deliveryBonusService.evaluateAndAward(delivery.id, io))
+                .catch(err => console.error(`❌ [DELIVERY] Earnings/bonus FAILED:`, err.message));
+        } finally {
+            await releaseLock(lockKey);
         }
-
-        deliveryCommissionService.confirmCommission(deliveryId, driver.id)
-            .catch(err => console.error(`❌ [DELIVERY] Commission confirm FAILED:`, err.message));
-
-        deliveryEarningsService.postDeliveryEarnings(delivery.id)
-            .catch(err => console.error(`❌ [DELIVERY] Earnings posting FAILED:`, err.message));
 
         await locationService.updateDriverStatus(driver.id, 'online', null);
         await redisClient.del(`delivery:active:${deliveryId}`);
@@ -1546,49 +1674,9 @@ exports.getWallet = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 14. REQUEST CASHOUT
+// (Cashout/withdrawal removed — WeGo is deposit/top-up only. Agents top up their
+//  wallet to receive deliveries; there is no payout back to mobile money.)
 // ═══════════════════════════════════════════════════════════════════════════════
-
-exports.requestCashout = async (req, res) => {
-    try {
-        const { amount, payment_method, phone_number, notes } = req.body;
-        if (!amount || !payment_method || !phone_number) return res.status(400).json({ success: false, message: 'amount, payment_method, and phone_number are required' });
-        if (!['mtn_mobile_money', 'orange_money'].includes(payment_method)) return res.status(400).json({ success: false, message: 'payment_method must be mtn_mobile_money or orange_money' });
-
-        const driver = await getDriverByAccountUuid(req.user.uuid);
-        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
-
-        const request = await deliveryEarningsService.requestCashout(
-            driver.id, parseFloat(amount), payment_method, phone_number.trim(), notes || null,
-        );
-
-        return res.status(201).json({
-            success: true,
-            message: 'Cashout request submitted. Admin will process it shortly.',
-            request: { id: request.id, payoutCode: request.payout_code, amount: request.amount, paymentMethod: request.payment_method, phoneNumber: request.phone_number, status: request.status, createdAt: request.created_at },
-        });
-
-    } catch (error) {
-        console.error('❌ [DELIVERY] requestCashout error:', error.message);
-        return res.status(400).json({ success: false, message: error.message });
-    }
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 15. CANCEL CASHOUT REQUEST
-// ═══════════════════════════════════════════════════════════════════════════════
-
-exports.cancelCashout = async (req, res) => {
-    try {
-        const driver = await getDriverByAccountUuid(req.user.uuid);
-        if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
-        await deliveryEarningsService.cancelCashout(driver.id, parseInt(req.params.requestId));
-        return res.json({ success: true, message: 'Cashout request cancelled' });
-    } catch (error) {
-        console.error('❌ [DELIVERY] cancelCashout error:', error.message);
-        return res.status(400).json({ success: false, message: error.message });
-    }
-};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 16. GET WALLET TRANSACTIONS

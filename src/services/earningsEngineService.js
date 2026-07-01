@@ -63,6 +63,10 @@ const RULES_CACHE_TTL_S  = 300; // 5 minutes
 const PROGRAMS_CACHE_KEY   = 'earnings:programs:active';
 const PROGRAMS_CACHE_TTL_S = 300;
 
+// Pure, money-critical settlement math lives in its own dependency-free
+// module so it can be unit-tested without loading the DB/Redis graph.
+const { computeSettlement } = require('../utils/settlement');
+
 class EarningsEngineService {
 
     // ═══════════════════════════════════════════════════════════════════
@@ -118,6 +122,11 @@ class EarningsEngineService {
         // ── STEP 3: Ensure driver has a wallet ────────────────────────
         const wallet = await this._ensureWallet(trip.driverId, transaction);
 
+        // Lock the wallet row FOR UPDATE so concurrent settlements for the same
+        // driver serialize — guarantees each ledger row's balanceAfter is exact
+        // and prevents lost updates on the cached balance.
+        await wallet.reload({ transaction, lock: transaction.LOCK.UPDATE });
+
         // ── STEP 4: Load and evaluate earning rules ────────────────────
         const rules = await this._loadActiveRules();
 
@@ -139,18 +148,38 @@ class EarningsEngineService {
         console.log(`   Fare: ${grossFare} XAF | Payment: ${tripContext.paymentMethod}\n`);
 
         // Evaluate all rules
-        const { commissionRule, commissionRate, commissionAmount, bonusRules } =
+        const { commissionRule, commissionRate, commissionAmount: baseCommission, bonusRules } =
             this._evaluateRules(rules, tripContext, grossFare);
 
+        // ── Coupon: WeGo funds the passenger's discount by giving up commission.
+        // The passenger already paid the driver (fare − discount) P2P, so reducing
+        // the commission by the same discount keeps the driver's net unchanged.
+        // Floored at 0 — WeGo never pays the driver (the discount was capped at
+        // the commission when the coupon was applied at trip creation).
+        const couponDiscount   = Math.max(0, Math.round(trip.discountAmount || 0));
+        const commissionAmount = Math.max(0, baseCommission - couponDiscount);
+        if (couponDiscount > 0) {
+            console.log(`🎟️  [EARNINGS ENGINE] Coupon ${trip.couponCode}: −${couponDiscount} XAF off commission (${baseCommission} → ${commissionAmount})`);
+        }
+
         // ── STEP 5: Calculate final amounts ───────────────────────────
+        // The passenger ALWAYS pays the driver directly (cash / MoMo / OM are
+        // all peer-to-peer and never touch WeGo). So the fare is NEVER credited
+        // to the wallet — WeGo only debits its commission and credits bonuses.
+        // The recorded paymentMethod is informational only (how the passenger
+        // settled with the driver); it does not change WeGo's money flow.
         const bonusTotal = bonusRules.reduce((sum, b) => sum + b.bonusAmount, 0);
-        const driverNet  = grossFare - commissionAmount + bonusTotal;
+        const { fareCredit, driverNet } = computeSettlement({
+            grossFare, commissionAmount, bonusTotal, directToDriver: true,
+        });
 
         console.log('📊 [EARNINGS ENGINE] Calculation:');
-        console.log(`   Gross fare       : +${grossFare} XAF`);
+        console.log(`   Payment mode     : ${trip.paymentMethod || 'CASH'} (paid directly to driver)`);
+        console.log(`   Gross fare       : ${grossFare} XAF (not credited — P2P)`);
+        console.log(`   Fare credited    : +${fareCredit} XAF`);
         console.log(`   Commission (${(commissionRate * 100).toFixed(0)}%) : -${commissionAmount} XAF`);
         console.log(`   Bonuses          : +${bonusTotal} XAF (${bonusRules.length} rules)`);
-        console.log(`   Driver net       : ${driverNet} XAF\n`);
+        console.log(`   Wallet delta     : ${driverNet} XAF\n`);
 
         // ── STEP 6: Create receipt (idempotency anchor) ────────────────
         // If two requests arrive simultaneously, only ONE can insert
@@ -196,27 +225,31 @@ class EarningsEngineService {
         const walletEntries = [];
         let   runningBalance = wallet.balance;
 
-        // 7a. TRIP_FARE — gross fare credit
-        runningBalance += grossFare;
-        const fareEntry = await this._writeWalletEntry({
-            driverId:     trip.driverId,
-            walletId:     wallet.id,
-            tripId:       trip.id,
-            receiptId:    receipt.id,
-            ruleId:       null,
-            type:         'TRIP_FARE',
-            amount:       grossFare,
-            balanceAfter: runningBalance,
-            reference:    `TRIP_FARE:${trip.id}`,
-            description:  `Trip fare — ${trip.pickupAddress || 'pickup'} → ${trip.dropoffAddress || 'dropoff'}`,
-            metadata: {
-                grossFare,
-                pickup:  trip.pickupAddress,
-                dropoff: trip.dropoffAddress,
-                distanceM: trip.distanceM,
-            },
-        }, transaction);
-        walletEntries.push(fareEntry);
+        // 7a. TRIP_FARE — gross fare credit (CASHLESS rides only).
+        // For cash rides the driver was paid directly, so no wallet credit.
+        if (fareCredit > 0) {
+            runningBalance += fareCredit;
+            const fareEntry = await this._writeWalletEntry({
+                driverId:     trip.driverId,
+                walletId:     wallet.id,
+                tripId:       trip.id,
+                receiptId:    receipt.id,
+                ruleId:       null,
+                type:         'TRIP_FARE',
+                amount:       fareCredit,
+                balanceAfter: runningBalance,
+                reference:    `TRIP_FARE:${trip.id}`,
+                description:  `Trip fare — ${trip.pickupAddress || 'pickup'} → ${trip.dropoffAddress || 'dropoff'}`,
+                metadata: {
+                    grossFare,
+                    paymentMethod: trip.paymentMethod || 'CASH',
+                    pickup:  trip.pickupAddress,
+                    dropoff: trip.dropoffAddress,
+                    distanceM: trip.distanceM,
+                },
+            }, transaction);
+            walletEntries.push(fareEntry);
+        }
 
         // 7b. COMMISSION — deduction
         runningBalance -= commissionAmount;
@@ -268,7 +301,9 @@ class EarningsEngineService {
         await DriverWallet.update(
             {
                 balance:         literal(`balance + ${driverNet}`),
-                totalEarned:     literal(`totalEarned + ${grossFare + bonusTotal}`),
+                // totalEarned tracks money credited TO the wallet, so for cash
+                // rides the (directly-paid) fare is excluded — only bonuses count.
+                totalEarned:     literal(`totalEarned + ${fareCredit + bonusTotal}`),
                 totalCommission: literal(`totalCommission + ${commissionAmount}`),
                 totalBonuses:    literal(`totalBonuses + ${bonusTotal}`),
             },
@@ -415,6 +450,8 @@ class EarningsEngineService {
         const programs = await BonusProgram.findAll({
             where: {
                 isActive: true,
+                // Ride engine only evaluates ride-facing programs.
+                vertical: { [Op.in]: ['RIDE', 'BOTH'] },
                 [Op.and]: [
                     { [Op.or]: [{ validFrom: null }, { validFrom: { [Op.lte]: today } }] },
                     { [Op.or]: [{ validTo:   null }, { validTo:   { [Op.gte]: today } }] },
@@ -844,3 +881,4 @@ class EarningsEngineService {
 }
 
 module.exports = new EarningsEngineService();
+module.exports.computeSettlement = computeSettlement;  // re-export for convenience

@@ -360,6 +360,29 @@ class TripMatchingService {
                 tripData.status    = 'MATCHED';
                 tripData.matchedAt = new Date().toISOString();
                 await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, 7200);
+
+                // ── Persist to MySQL (source of truth) ─────────────────────
+                await Trip.update(
+                    {
+                        driverId,
+                        status:    'MATCHED',
+                        matchedAt: new Date(),
+                    },
+                    { where: { id: tripId } }
+                );
+
+                // ── Index active trip by driver + passenger ─────────────────
+                await redisClient.setex(
+                    `driver:active_trip:${driverId}`,
+                    7200,
+                    JSON.stringify({ tripId, status: 'MATCHED' })
+                );
+                await redisClient.setex(
+                    `passenger:active_trip:${tripData.passengerId}`,
+                    7200,
+                    JSON.stringify({ tripId, status: 'MATCHED' })
+                );
+
                 await locationService.updateDriverStatus(driverId, 'busy', tripId);
 
                 // ── Notify other drivers offer expired ──────────────────────
@@ -491,6 +514,7 @@ class TripMatchingService {
 
                 return {
                     success:   true,
+                    trip:      tripData,
                     driver:    driverInfo,
                     passenger: passengerInfo,
                 };

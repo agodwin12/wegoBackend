@@ -34,4 +34,13 @@ router.get(
     serviceAdminController.getQuickStats
 );
 
+// @route   GET /api/services/admin/ad-payments
+// @desc    List all ad (plan) payments — Plan Sales backoffice page
+// @access  Employee (admin, manager, super_admin, accountant)
+router.get(
+    '/ad-payments',
+    requireEmployeeRole('super_admin', 'admin', 'manager', 'accountant'),
+    serviceAdminController.getAdminAdPayments
+);
+
 module.exports = router;

@@ -75,6 +75,15 @@ BonusProgram.init(
             allowNull: false,
         },
 
+        // Which vertical this program applies to. RIDE (default) keeps existing
+        // programs ride-only; DELIVERY targets delivery agents; BOTH applies to
+        // each vertical independently (counted per-vertical, credited per-wallet).
+        vertical: {
+            type:         DataTypes.ENUM('RIDE', 'DELIVERY', 'BOTH'),
+            allowNull:    false,
+            defaultValue: 'RIDE',
+        },
+
         // The threshold to reach (trips or XAF)
         targetValue: {
             type:      DataTypes.INTEGER,

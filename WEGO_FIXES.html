@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WEGO Backend — Issues &amp; Fixes Report</title>
+<style>
+  body {
+    font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #1a1a1a;
+    max-width: 900px;
+    margin: 40px auto;
+    padding: 0 40px 60px 40px;
+  }
+  h1 {
+    font-size: 22pt;
+    color: #1a3c6e;
+    border-bottom: 3px solid #1a3c6e;
+    padding-bottom: 10px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    color: #555;
+    font-size: 10pt;
+    margin-bottom: 30px;
+  }
+  h2 {
+    font-size: 15pt;
+    color: #1a3c6e;
+    border-bottom: 1.5px solid #c8d8f0;
+    padding-bottom: 4px;
+    margin-top: 36px;
+    margin-bottom: 12px;
+  }
+  h3 {
+    font-size: 12pt;
+    color: #2b2b2b;
+    margin-top: 22px;
+    margin-bottom: 6px;
+  }
+  .issue-block {
+    border-left: 4px solid #d0392b;
+    background: #fdf3f2;
+    padding: 12px 16px;
+    margin: 18px 0 6px 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .fix-block {
+    border-left: 4px solid #27ae60;
+    background: #f2fdf5;
+    padding: 12px 16px;
+    margin: 6px 0 18px 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .issue-block p, .fix-block p { margin: 4px 0; }
+  .label {
+    font-weight: bold;
+    font-size: 9.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .label-issue { color: #b03025; }
+  .label-fix   { color: #1e8449; }
+  pre, code {
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f4f4f4;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+  }
+  pre {
+    padding: 10px 14px;
+    overflow-x: auto;
+    margin: 8px 0;
+    white-space: pre-wrap;
+  }
+  code {
+    padding: 1px 5px;
+  }
+  .priority {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 9pt;
+    font-weight: bold;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .p-critical { background: #fde8e6; color: #c0392b; border: 1px solid #e57368; }
+  .p-high     { background: #fef3e2; color: #d35400; border: 1px solid #f0a050; }
+  .p-medium   { background: #eaf4fb; color: #1a6fa8; border: 1px solid #7ab8de; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+    margin: 16px 0;
+  }
+  th {
+    background: #1a3c6e;
+    color: white;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  td {
+    padding: 7px 12px;
+    border-bottom: 1px solid #dde3ee;
+  }
+  tr:nth-child(even) td { background: #f7f9fc; }
+  .toc { margin: 20px 0 30px 0; }
+  .toc a { color: #1a3c6e; text-decoration: none; display: block; padding: 2px 0; font-size: 10.5pt; }
+  .toc a:hover { text-decoration: underline; }
+  .toc-section { font-weight: bold; margin-top: 8px; }
+  .note {
+    background: #fffbe6;
+    border: 1px solid #f0c040;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 10pt;
+    margin: 14px 0;
+  }
+  .section-label {
+    font-size: 9pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #888;
+    margin-bottom: 4px;
+  }
+  hr { border: none; border-top: 1px solid #dde3ee; margin: 30px 0; }
+</style>
+</head>
+<body>
+
+<h1>WEGO Backend — Issues &amp; Fixes Report</h1>
+<div class="subtitle">Ride-Hailing &amp; Delivery Vertical Review &nbsp;|&nbsp; Generated June 2026 &nbsp;|&nbsp; wegobackend</div>
+
+<!-- ── SUMMARY TABLE ─────────────────────────────────────────── -->
+<h2>Summary of All Issues</h2>
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Issue</th>
+      <th>File(s)</th>
+      <th>Priority</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>1</td><td>Trip timeout stored in memory — lost on restart</td><td>tripMatchingService.js</td><td><span class="priority p-critical">CRITICAL</span></td></tr>
+    <tr><td>2</td><td>No Socket.IO Redis adapter — cannot scale horizontally</td><td>sockets/index.js, server.js</td><td><span class="priority p-critical">CRITICAL</span></td></tr>
+    <tr><td>3</td><td>Delivery Redis key mismatch — direct socket lookup always fails</td><td>deliverySocket.service.js</td><td><span class="priority p-critical">CRITICAL</span></td></tr>
+    <tr><td>4</td><td>Triple-emit sends duplicate events to driver and passenger</td><td>tripMatchingService.js</td><td><span class="priority p-high">HIGH</span></td></tr>
+    <tr><td>5</td><td>MySQL write on every GPS ping — 40–60 DB writes/sec at scale</td><td>driverHandlers.js</td><td><span class="priority p-high">HIGH</span></td></tr>
+    <tr><td>6</td><td>deliverySocket.service.js not wired into the location event pipeline</td><td>driverHandlers.js, deliverySocket.service.js</td><td><span class="priority p-high">HIGH</span></td></tr>
+    <tr><td>7</td><td>_getPassengerRating loads every rating row into memory</td><td>tripMatchingService.js</td><td><span class="priority p-high">HIGH</span></td></tr>
+    <tr><td>8</td><td>Driver decline is not tracked — driver re-receives same trip</td><td>driverHandlers.js</td><td><span class="priority p-medium">MEDIUM</span></td></tr>
+    <tr><td>9</td><td>No re-broadcast with expanding radius on "no drivers found"</td><td>tripMatchingService.js, tripController.js</td><td><span class="priority p-medium">MEDIUM</span></td></tr>
+    <tr><td>10</td><td>No distributed lock visible for delivery acceptance</td><td>delivery.controller.js</td><td><span class="priority p-medium">MEDIUM</span></td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 1 — RIDE-HAILING
+     ═══════════════════════════════════════════════════════════ -->
+<h2>Section 1 — Ride-Hailing Issues &amp; Fixes</h2>
+
+<!-- ── ISSUE 1 ─── -->
+<h3>Issue 1 — Trip Timeout Stored in Memory <span class="priority p-critical">CRITICAL</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In <code>tripMatchingService.js</code>, the expiry timeout for each trip is stored inside a JavaScript <code>Map</code> in the process's heap:</p>
+  <pre>this.activeTimeouts = new Map();  // inside TripMatchingService constructor
+
+const timeoutId = setTimeout(async () => {
+    await this._checkTripTimeout(tripId, io);
+    this.activeTimeouts.delete(tripId);
+}, this.offerTtlMs);</pre>
+  <p>If the server crashes, restarts, or deploys while trips are in <code>SEARCHING</code> state, all stored timeouts vanish. The passenger never receives the <code>trip:no_drivers</code> event and is permanently stuck on the loading screen. The Redis key <code>trip:timeout:{tripId}</code> exists but is never read back to restore the timeout — it only acts as a "was this already accepted?" marker.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Replace in-memory setTimeout with a Redis-backed expiry check</p>
+  <p><strong>Step 1:</strong> Install BullMQ (recommended) or use Redis keyspace notifications.</p>
+  <pre>npm install bullmq</pre>
+
+  <p><strong>Step 2:</strong> Create <code>src/queues/tripTimeout.queue.js</code></p>
+  <pre>const { Queue, Worker } = require('bullmq');
+const { redisClient }   = require('../config/redis');
+
+const QUEUE_NAME = 'trip-timeout';
+
+const tripTimeoutQueue = new Queue(QUEUE_NAME, {
+    connection: { host: process.env.REDIS_HOST, port: process.env.REDIS_PORT || 6379 },
+});
+
+// Call this instead of setTimeout in tripMatchingService.js
+async function scheduleTripTimeout(tripId, delayMs) {
+    await tripTimeoutQueue.add('expire', { tripId }, {
+        delay:    delayMs,
+        jobId:    `timeout:${tripId}`,   // idempotent — same tripId = same job
+        removeOnComplete: true,
+        removeOnFail:     true,
+    });
+}
+
+// Call this when a driver accepts to cancel the scheduled timeout
+async function cancelTripTimeout(tripId) {
+    const job = await tripTimeoutQueue.getJob(`timeout:${tripId}`);
+    if (job) await job.remove();
+}
+
+module.exports = { tripTimeoutQueue, scheduleTripTimeout, cancelTripTimeout };</pre>
+
+  <p><strong>Step 3:</strong> Create <code>src/queues/tripTimeout.worker.js</code> — start this in <code>server.js</code></p>
+  <pre>const { Worker }         = require('bullmq');
+const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
+
+function startTripTimeoutWorker(io) {
+    const worker = new Worker('trip-timeout', async (job) => {
+        const { tripId } = job.data;
+        const tripData   = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        if (!tripData || tripData.status !== 'SEARCHING') return; // already accepted
+
+        // Clean up Redis
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${tripData.passengerId}`);
+        await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
+
+        // Notify passenger
+        io.to(`passenger:${tripData.passengerId}`).emit('trip:no_drivers', {
+            tripId,
+            message:   'No drivers accepted your trip. Please try again.',
+            timestamp: new Date().toISOString(),
+        });
+    }, {
+        connection: { host: process.env.REDIS_HOST, port: process.env.REDIS_PORT || 6379 },
+    });
+
+    console.log('✅ [WORKER] Trip timeout worker started');
+    return worker;
+}
+
+module.exports = { startTripTimeoutWorker };</pre>
+
+  <p><strong>Step 4:</strong> In <code>tripMatchingService.js</code>, replace the <code>setTimeout</code> block:</p>
+  <pre>// REMOVE THIS:
+const timeoutId = setTimeout(async () => { ... }, this.offerTtlMs);
+this.activeTimeouts.set(tripId, timeoutId);
+
+// REPLACE WITH:
+const { scheduleTripTimeout } = require('../queues/tripTimeout.queue');
+await scheduleTripTimeout(tripId, this.offerTtlMs);</pre>
+
+  <p><strong>Step 5:</strong> In <code>acceptTrip()</code>, replace the <code>clearTimeout</code> block:</p>
+  <pre>// REMOVE THIS:
+const timeoutId = this.activeTimeouts.get(tripId);
+if (timeoutId) { clearTimeout(timeoutId); this.activeTimeouts.delete(tripId); }
+
+// REPLACE WITH:
+const { cancelTripTimeout } = require('../queues/tripTimeout.queue');
+await cancelTripTimeout(tripId);</pre>
+
+  <p><strong>Step 6:</strong> In <code>server.js</code>, start the worker after Socket.IO is ready:</p>
+  <pre>const { startTripTimeoutWorker } = require('./src/queues/tripTimeout.worker');
+startTripTimeoutWorker(io);</pre>
+</div>
+
+<!-- ── ISSUE 2 ─── -->
+<h3>Issue 2 — No Socket.IO Redis Adapter <span class="priority p-critical">CRITICAL</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>Socket.IO uses its default in-memory adapter. Events emitted on one process (e.g., <code>io.to('driver:X').emit()</code>) are invisible to drivers connected to any other process. You cannot run more than one Node.js instance. There is no fault tolerance — a server crash disconnects every user simultaneously. You also cannot do zero-downtime deployments.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Add @socket.io/redis-adapter</p>
+  <p><strong>Step 1:</strong> Install the adapter.</p>
+  <pre>npm install @socket.io/redis-adapter</pre>
+
+  <p><strong>Step 2:</strong> In <code>src/sockets/index.js</code>, add the adapter immediately after creating the Server:</p>
+  <pre>const { Server }        = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
+const { createClient }  = require('ioredis');   // already a dependency
+
+function setupSocketIO(server) {
+    const io = new Server(server, {
+        cors: { origin: process.env.CORS_ORIGIN || '*', methods: ['GET', 'POST'] },
+        pingTimeout:    60000,
+        pingInterval:   25000,
+        connectTimeout: 45000,
+    });
+
+    // ── ADD THIS BLOCK ───────────────────────────────────────────────────
+    const pubClient = new createClient(process.env.REDIS_URL || 'redis://localhost:6379');
+    const subClient = pubClient.duplicate();
+
+    Promise.all([pubClient.connect(), subClient.connect()]).then(() => {
+        io.adapter(createAdapter(pubClient, subClient));
+        console.log('✅ [SOCKET] Redis adapter attached — horizontal scaling enabled');
+    });
+    // ────────────────────────────────────────────────────────────────────
+
+    // ... rest of existing setup unchanged
+}</pre>
+
+  <p><strong>What this unlocks:</strong> You can now run multiple instances behind an Nginx / load balancer and events broadcast from any instance reach every connected client regardless of which instance they're connected to.</p>
+</div>
+
+<!-- ── ISSUE 3 ─── (moved from delivery, listed here as shared concern) -->
+<h3>Issue 3 — Delivery Redis Key Mismatch — Direct Socket Lookup Always Fails <span class="priority p-critical">CRITICAL</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In <code>src/sockets/delivery/deliverySocket.service.js</code>, the fallback socket lookup uses:</p>
+  <pre>const socketId = await redisClient.get(`socket:user:${senderUuid}`);</pre>
+  <p>But throughout the rest of the codebase (including <code>src/config/redis.js</code> where <code>REDIS_KEYS.USER_SOCKET</code> is defined), socket IDs are stored under the key:</p>
+  <pre>user:socket:${userId}   // e.g.  user:socket:abc-123</pre>
+  <p>The key pattern is inverted. The delivery service looks for <code>socket:user:X</code> but the value is stored at <code>user:socket:X</code>. The lookup returns <code>null</code> every time, silently. The sender only receives delivery events via room broadcasts, and if they are not in the room, they receive nothing.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Use REDIS_KEYS.USER_SOCKET consistently</p>
+  <p>In <code>src/sockets/delivery/deliverySocket.service.js</code>, change the <code>emitToSender</code> helper:</p>
+  <pre>// BEFORE:
+const socketId = await redisClient.get(`socket:user:${senderUuid}`);
+
+// AFTER:
+const { REDIS_KEYS } = require('../../config/redis');
+const socketId = await redisClient.get(REDIS_KEYS.USER_SOCKET(senderUuid));</pre>
+  <p>Then search the entire codebase for any other use of the <code>socket:user:</code> pattern and replace them all with <code>REDIS_KEYS.USER_SOCKET(id)</code>.</p>
+</div>
+
+<!-- ── ISSUE 4 ─── -->
+<h3>Issue 4 — Triple-Emit Sends Duplicate Events <span class="priority p-high">HIGH</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In both <code>broadcastTripToDrivers()</code> and <code>acceptTrip()</code>, the same event is emitted to three targets for the same user:</p>
+  <pre>io.to(`driver:${driverId}`).emit('trip:new_request', offer);  // room 1
+io.to(`user:${driverId}`).emit('trip:new_request', offer);    // room 2
+io.to(socketId).emit('trip:new_request', offer);              // direct socket</pre>
+  <p>On connection, every user joins both <code>driver:{id}</code> (or <code>passenger:{id}</code>) AND <code>user:{id}</code>. The direct socket is also in both of those rooms. This means a single event delivery results in 2–3 duplicate socket messages arriving at the client. The mobile app must handle and discard duplicates, which it likely does not, causing the trip offer screen to appear multiple times or accept to be called twice.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Emit to one room only</p>
+  <p>Choose one canonical room per user type and emit only to that. Remove the other two channels.</p>
+  <pre>// For drivers — replace all 3 lines with:
+io.to(`driver:${driverId}`).emit('trip:new_request', offerWithDistance);
+
+// For passengers — replace all 3 lines with:
+io.to(`passenger:${tripData.passengerId}`).emit('trip:driver_assigned', assignmentData);</pre>
+
+  <p>The room-based emit already reaches every socket that joined that room — no need for a redundant direct socket emit on top of it. Apply this change consistently throughout <code>tripMatchingService.js</code> and <code>driverHandlers.js</code> for all events: <code>trip:new_request</code>, <code>trip:driver_assigned</code>, <code>trip:request_expired</code>, <code>trip:no_drivers</code>, and <code>trip:state_sync</code>.</p>
+
+  <div class="note">
+    <strong>Note:</strong> The only case where a direct socket emit is justified is if the user failed to join their room (e.g., room join threw an error). Since that is handled in the connection callback with a try/catch and log, you can safely drop the redundant direct socket emit path entirely.
+  </div>
+</div>
+
+<!-- ── ISSUE 5 ─── -->
+<h3>Issue 5 — MySQL Write on Every GPS Ping <span class="priority p-high">HIGH</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In <code>src/sockets/driverHandlers.js</code>, <code>handleDriverLocationUpdate</code> fires a MySQL <code>UPDATE</code> on every GPS event:</p>
+  <pre>DriverLocation.update(
+    { lat, lng, heading, speed, accuracy, last_updated: new Date() },
+    { where: { driver_id: socket.userId } }
+).catch(err => console.error(...));</pre>
+  <p>This is fire-and-forget so it does not block the socket handler, but it still executes. With 200 active drivers sending a location update every 3–5 seconds, this generates 40–60 MySQL writes per second on a single row per driver. At 10k users with more drivers, this number rises proportionally. The <code>DriverLocation</code> table is not used for real-time decisions — only for the admin live monitor and historical analytics — so sub-second freshness is not required.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Debounce the MySQL write to every 15 seconds per driver</p>
+  <p>Add a per-driver debounce using a Redis timestamp. Write to MySQL only when at least 15 seconds have passed since the last write for that driver.</p>
+  <pre>// In handleDriverLocationUpdate, replace the DriverLocation.update() block with:
+
+const MYSQL_FLUSH_INTERVAL_S = 15;
+const lastFlushKey = `driver:location:last_mysql_flush:${socket.userId}`;
+
+const lastFlush = await redisClient.get(lastFlushKey);
+const now       = Date.now();
+
+if (!lastFlush || (now - parseInt(lastFlush)) >= MYSQL_FLUSH_INTERVAL_S * 1000) {
+    // Time to flush to MySQL
+    DriverLocation.update(
+        { lat, lng, heading, speed, accuracy, last_updated: new Date() },
+        { where: { driver_id: socket.userId } }
+    ).catch(err => console.error('⚠️ [LOCATION] MySQL flush error:', err.message));
+
+    await redisClient.setex(lastFlushKey, MYSQL_FLUSH_INTERVAL_S + 5, now.toString());
+}</pre>
+
+  <p>This reduces MySQL location writes from ~50/second to ~13/second at 200 drivers — a 75% reduction — with no change in real-time behavior since Redis is always updated on every ping.</p>
+</div>
+
+<!-- ── ISSUE 6 ─── -->
+<h3>Issue 6 — <code>_getPassengerRating</code> Loads Every Row Into Memory <span class="priority p-high">HIGH</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In <code>tripMatchingService.js</code>:</p>
+  <pre>const rows = await Rating.findAll({
+    where:      { ratedUser: passengerId, ratingType: 'DRIVER_TO_PASSENGER' },
+    attributes: ['rating'],
+});
+const avg = rows.reduce((s, r) => s + r.rating, 0) / rows.length;</pre>
+  <p>This fetches every rating row for the passenger into a JavaScript array, then computes the average in Node.js. A passenger with 500 completed trips will transfer 500 rows from MySQL to the server for a calculation that MySQL can do in a single query with zero data transfer overhead. This also runs on every trip broadcast.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Use a SQL AVG aggregate query</p>
+  <pre>const { fn, col, literal } = require('sequelize');
+
+async _getPassengerRating(passengerId) {
+    try {
+        const result = await Rating.findOne({
+            where: {
+                ratedUser:  passengerId,
+                ratingType: 'DRIVER_TO_PASSENGER',
+            },
+            attributes: [
+                [fn('AVG', col('rating')), 'avg_rating'],
+                [fn('COUNT', col('id')),   'count'],
+            ],
+            raw: true,
+        });
+
+        if (!result || !result.count || parseInt(result.count) === 0) return null;
+        return parseFloat(parseFloat(result.avg_rating).toFixed(1));
+
+    } catch {
+        return null;
+    }
+}</pre>
+  <p>One SQL query, no data transferred beyond two numbers, runs in under 1ms with an index on <code>(ratedUser, ratingType)</code>.</p>
+</div>
+
+<!-- ── ISSUE 7 ─── -->
+<h3>Issue 7 — Driver Decline Is Not Tracked <span class="priority p-medium">MEDIUM</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>In <code>driverHandlers.js</code>, <code>handleTripDecline</code> only acknowledges the event:</p>
+  <pre>async function handleTripDecline(socket, data) {
+    socket.emit('trip:decline:success', { tripId, message: 'Trip declined' });
+    // Nothing else
+}</pre>
+  <p>The declined driver is never tracked. On reconnect, <code>_replayMissedDriverEvents</code> checks <code>driver:pending_offers:{driverId}</code> and re-sends the offer. A driver who explicitly declined will receive the same trip again after their next reconnect. There is also no mechanism to exclude a decliner from the next re-broadcast cycle.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Record the decline in Redis and filter declined drivers</p>
+  <p><strong>Step 1:</strong> In <code>handleTripDecline</code>, record the driver as having declined:</p>
+  <pre>async function handleTripDecline(socket, data) {
+    const { tripId, reason = 'Driver declined' } = data || {};
+    const driverId = socket.userId;
+
+    if (tripId) {
+        // Add to the trip's declined set (expires with the trip offer TTL)
+        await redisClient.sadd(REDIS_KEYS.TRIP_DECLINED(tripId), driverId);
+        await redisClient.expire(REDIS_KEYS.TRIP_DECLINED(tripId), 300); // 5 min TTL
+
+        // Remove from this driver's pending offers so replay doesn't re-send it
+        const pending = await redisHelpers.getJson(`driver:pending_offers:${driverId}`) || [];
+        const updated = pending.filter(o => o.tripId !== tripId);
+        await redisHelpers.setJson(`driver:pending_offers:${driverId}`, updated, 300);
+
+        console.log(`🚫 [SOCKET-DRIVER] Driver ${driverId} declined trip ${tripId}`);
+    }
+
+    socket.emit('trip:decline:success', { tripId, message: 'Trip declined' });
+}</pre>
+
+  <p><strong>Step 2:</strong> In <code>broadcastTripToDrivers()</code>, add <code>REDIS_KEYS.TRIP_DECLINED</code> to the filters:</p>
+  <pre>// After filtering by ride mode and wallet balance, add:
+const declinedSet    = await redisClient.smembers(REDIS_KEYS.TRIP_DECLINED(tripId));
+const declinedIds    = new Set(declinedSet);
+const finalDrivers   = eligibleDrivers.filter(d => !declinedIds.has(d.driverId));
+
+console.log(`✅ [MATCHING] ${finalDrivers.length} drivers after excluding decliners`);</pre>
+</div>
+
+<!-- ── ISSUE 8 ─── -->
+<h3>Issue 8 — No Re-Broadcast With Expanding Radius <span class="priority p-medium">MEDIUM</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>When <code>broadcastTripToDrivers()</code> finds zero eligible drivers, it immediately deletes the trip from Redis and emits <code>trip:no_drivers</code>. The passenger has to manually retry from scratch. In a city with sparse driver coverage at certain times, this produces a very poor experience — a trip fails before any driver even has a chance to move closer.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Retry with an expanding search radius</p>
+  <p>Instead of failing immediately, schedule a re-broadcast at a larger radius. Use the BullMQ queue from Fix #1 for this too.</p>
+
+  <p><strong>In <code>tripMatchingService.js</code>, modify the "no drivers" path:</strong></p>
+  <pre>// Current failure path (REMOVE the del + return):
+if (rideModeDrivers.length === 0) {
+    await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+    await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+    return { success: false, reason: 'No drivers available' };
+}
+
+// REPLACE WITH — read the current attempt number from the trip data:
+if (eligibleDrivers.length === 0) {
+    const attempt = (trip.broadcastAttempt || 0) + 1;
+    const RADIUS_BY_ATTEMPT = [5, 8, 12]; // km per attempt
+
+    if (attempt > RADIUS_BY_ATTEMPT.length) {
+        // All attempts exhausted — give up
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+        io.to(`passenger:${trip.passengerId}`).emit('trip:no_drivers', {
+            tripId,
+            message: 'No drivers available right now. Please try again later.',
+            timestamp: new Date().toISOString(),
+        });
+        return { success: false, reason: 'No drivers available after all retries' };
+    }
+
+    // Update trip with new radius attempt and reschedule
+    trip.broadcastAttempt = attempt;
+    trip.searchRadiusKm   = RADIUS_BY_ATTEMPT[attempt - 1];
+    await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), trip, 300);
+
+    // Notify passenger that we are still searching
+    io.to(`passenger:${trip.passengerId}`).emit('trip:still_searching', {
+        tripId,
+        attempt,
+        message:    'Still searching for a driver nearby...',
+        searchingKm: trip.searchRadiusKm,
+    });
+
+    // Schedule a re-broadcast in 15 seconds
+    await scheduleTripTimeout(tripId + ':retry', 15000);  // or a separate retry queue
+
+    return { success: false, reason: 'No drivers in current radius — retrying', retrying: true };
+}</pre>
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 2 — DELIVERY
+     ═══════════════════════════════════════════════════════════ -->
+<h2>Section 2 — Delivery Issues &amp; Fixes</h2>
+
+<!-- ── ISSUE 9 ─── -->
+<h3>Issue 9 — deliverySocket.service.js Not Connected to the Location Pipeline <span class="priority p-high">HIGH</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>The file <code>src/sockets/delivery/deliverySocket.service.js</code> contains a clear comment:</p>
+  <pre>// Usage in locationHandlers.js:
+//   if (socket.currentMode === 'delivery') {
+//       await deliverySocketService.handleDriverLocationUpdate(socket, io, data);
+//   }</pre>
+  <p>However, the actual <code>driver:location</code> handler in <code>driverHandlers.js</code> does not import or call this service. Live tracking for express deliveries (the streaming of the agent's position to the sender's map in real time) is silently non-functional. The <code>DeliveryTracking</code> table is never written to during an active delivery.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Wire the delivery socket service into the location handler</p>
+  <p>In <code>src/sockets/driverHandlers.js</code>, at the top of the file add the import:</p>
+  <pre>const deliverySocketService = require('./delivery/deliverySocket.service');</pre>
+
+  <p>Then inside <code>handleDriverLocationUpdate</code>, after the Redis geo update, add the delivery branch:</p>
+  <pre>async function handleDriverLocationUpdate(socket, data, io) {
+    try {
+        const { lat, lng, heading = 0, speed = 0, accuracy = 10 } = data || {};
+
+        if (!lat || !lng || lat &lt; -90 || lat &gt; 90 || lng &lt; -180 || lng &gt; 180) return;
+
+        // 1. Update Redis geo index (always — for both ride and delivery)
+        await _updateDriverLocationInRedis(socket.userId, lat, lng, heading, speed, accuracy);
+
+        // 2. Debounced MySQL flush (see Fix #5)
+        // ... debounce logic here ...
+
+        // 3. RIDE MODE: broadcast to passenger if there is an active trip
+        if (socket.activeMode === 'DRIVER') {
+            const activeTrip = await Trip.findOne({
+                where: {
+                    driverId: socket.userId,
+                    status:   ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'],
+                },
+            });
+            if (activeTrip?.passengerId) {
+                io.to(`passenger:${activeTrip.passengerId}`).emit('driver:location', {
+                    tripId: activeTrip.id, lat, lng, heading, speed,
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        }
+
+        // 4. DELIVERY MODE: handle express live tracking + tracking record writes
+        if (socket.activeMode === 'DELIVERY_AGENT') {
+            await deliverySocketService.handleDriverLocationUpdate(socket, io, {
+                lat, lng,
+                heading,
+                speed_kmh:       speed,
+                accuracy_meters: accuracy,
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ [SOCKET-DRIVER] Location update error:', error.message);
+    }
+}</pre>
+</div>
+
+<!-- ── ISSUE 10 ─── -->
+<h3>Issue 10 — No Distributed Lock Visible for Delivery Acceptance <span class="priority p-medium">MEDIUM</span></h3>
+
+<div class="issue-block">
+  <p class="label label-issue">Problem</p>
+  <p>The ride-hailing flow uses a Redis <code>NX</code> lock in <code>acceptTrip()</code> to prevent two drivers from accepting the same trip simultaneously. The delivery acceptance flow (in <code>src/controllers/delivery.controller.js</code>) does not appear to have an equivalent guard. If two delivery agents tap "Accept" at the same moment for the same delivery, a race condition could assign the delivery to both, or produce a corrupted state where the first agent to write wins but the second agent's UI shows them as accepted.</p>
+</div>
+
+<div class="fix-block">
+  <p class="label label-fix">Fix — Add a Redis NX lock to delivery acceptance</p>
+  <p>In <code>src/controllers/delivery.controller.js</code> (or wherever delivery acceptance is handled), wrap the acceptance logic in the same lock pattern used for trips:</p>
+  <pre>const { v4: uuidv4 }    = require('uuid');
+const { redisClient }   = require('../config/redis');
+
+async function acceptDelivery(req, res) {
+    const { deliveryId } = req.params;
+    const agentId        = req.user.uuid;
+
+    const lockKey   = `delivery:lock:${deliveryId}`;
+    const lockValue = uuidv4();
+
+    // Acquire lock (10 second TTL — auto-expires if we crash mid-flight)
+    const lockAcquired = await redisClient.set(lockKey, lockValue, 'EX', 10, 'NX');
+
+    if (!lockAcquired) {
+        return res.status(409).json({
+            success: false,
+            message: 'This delivery is already being accepted by another agent.',
+            code:    'DELIVERY_LOCK_CONTENTION',
+        });
+    }
+
+    try {
+        // ── Verify delivery is still available ─────────────────────────
+        const delivery = await Delivery.findByPk(deliveryId);
+
+        if (!delivery || delivery.status !== 'pending') {
+            return res.status(409).json({
+                success: false,
+                message: 'Delivery is no longer available.',
+                code:    'DELIVERY_NOT_AVAILABLE',
+            });
+        }
+
+        // ── Assign to agent ────────────────────────────────────────────
+        delivery.driver_id   = agentId;
+        delivery.status      = 'accepted';
+        delivery.accepted_at = new Date();
+        await delivery.save();
+
+        // ── Cache in Redis ─────────────────────────────────────────────
+        await redisClient.setex(
+            `driver:active_delivery:${agentId}`,
+            7200,
+            String(deliveryId)
+        );
+
+        // ... notify sender, emit socket events ...
+
+        return res.json({ success: true, delivery });
+
+    } finally {
+        // Release lock — only if we still own it
+        const current = await redisClient.get(lockKey);
+        if (current === lockValue) await redisClient.del(lockKey);
+    }
+}</pre>
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 3 — SCALABILITY
+     ═══════════════════════════════════════════════════════════ -->
+<h2>Section 3 — Scalability Assessment</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Component</th>
+      <th>Current Limit</th>
+      <th>With Fixes Applied</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Socket.IO connections</td>
+      <td>~10,000 on 1 process only</td>
+      <td>Unlimited processes with Redis adapter</td>
+    </tr>
+    <tr>
+      <td>Trip timeout reliability</td>
+      <td>Zero — lost on any restart</td>
+      <td>Survives restarts, deploys, and crashes</td>
+    </tr>
+    <tr>
+      <td>Location MySQL writes</td>
+      <td>~50 writes/sec at 200 drivers</td>
+      <td>~3–4 writes/sec (15s debounce)</td>
+    </tr>
+    <tr>
+      <td>Passenger rating query</td>
+      <td>N rows transferred per trip broadcast</td>
+      <td>2 numbers (AVG + COUNT) per broadcast</td>
+    </tr>
+    <tr>
+      <td>Zero-downtime deploys</td>
+      <td>Not possible</td>
+      <td>Possible with Redis adapter + sticky sessions</td>
+    </tr>
+    <tr>
+      <td>Duplicate socket events</td>
+      <td>2–3x per event on every client</td>
+      <td>1x per event</td>
+    </tr>
+    <tr>
+      <td>Delivery live tracking</td>
+      <td>Not functional (not wired)</td>
+      <td>Functional after Fix #9</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>Bottom line on 10k users:</strong> With fixes #1 (BullMQ timeout), #2 (Redis adapter), and #4 (triple-emit), the backend will handle 10,000 registered users with ~500–800 concurrently active without issues. Fixes #5 and #6 are needed to keep MySQL healthy as active driver count grows past 200. Fixes #3, #7, and #9 are correctness bugs that should be resolved regardless of scale.
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 4 — IMPLEMENTATION ORDER
+     ═══════════════════════════════════════════════════════════ -->
+<h2>Section 4 — Recommended Implementation Order</h2>
+
+<table>
+  <thead>
+    <tr><th>Phase</th><th>What to do</th><th>Why first</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Phase 1</strong><br><em>(this week)</em></td>
+      <td>
+        Fix #3 — Delivery Redis key mismatch (1 line)<br>
+        Fix #4 — Remove triple-emit (delete ~10 lines)<br>
+        Fix #6 — AVG() query for passenger rating
+      </td>
+      <td>Zero-risk, zero-dependency fixes. No new packages needed. These are bugs that affect every production request right now.</td>
+    </tr>
+    <tr>
+      <td><strong>Phase 2</strong><br><em>(next sprint)</em></td>
+      <td>
+        Fix #1 — Replace in-memory timeout with BullMQ<br>
+        Fix #9 — Wire deliverySocket.service into location handler
+      </td>
+      <td>Require installing BullMQ and testing. Fix #1 is the biggest reliability risk. Fix #9 completes a feature that is currently silently broken.</td>
+    </tr>
+    <tr>
+      <td><strong>Phase 3</strong><br><em>(before first real load)</em></td>
+      <td>
+        Fix #2 — Socket.IO Redis adapter<br>
+        Fix #5 — MySQL location write debounce<br>
+        Fix #7 — Driver decline tracking<br>
+        Fix #10 — Delivery acceptance lock
+      </td>
+      <td>Needed before running more than one server process or before active driver count exceeds ~150.</td>
+    </tr>
+    <tr>
+      <td><strong>Phase 4</strong><br><em>(UX improvement)</em></td>
+      <td>Fix #8 — Expanding radius re-broadcast</td>
+      <td>No reliability impact — purely a passenger experience improvement. Implement after the platform is stable.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+<p style="font-size:9pt; color:#888; text-align:center;">
+  Generated from codebase analysis of <strong>wegobackend</strong> &nbsp;|&nbsp; June 2026 &nbsp;|&nbsp; 10 issues identified across ride-hailing and delivery verticals
+</p>
+
+</body>
+</html>

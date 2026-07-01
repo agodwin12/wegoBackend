@@ -27,6 +27,11 @@ const {
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION = 15 * 60; // 15 minutes in seconds
 const FAILED_ATTEMPTS_TTL = 15 * 60; // 15 minutes
+
+// Target bcrypt cost. Existing accounts hashed at a higher cost are transparently
+// re-hashed down to this on their next successful login (see verifyPassword), so
+// logins get fast without forcing a password reset. cost 10 ≈ OWASP minimum.
+const TARGET_BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const REFRESH_TOKEN_EXPIRY_DAYS = parseInt(
     process.env.REFRESH_TOKEN_EXPIRY_DAYS || '365',
     10
@@ -286,6 +291,26 @@ async function findAccountByIdentifier(identifier) {
 // PASSWORD
 // ═══════════════════════════════════════════════════════════════
 
+// Re-hash a verified password down to TARGET_BCRYPT_ROUNDS in the background.
+// Never awaited by the login path — a failure here just leaves the old hash.
+function _maybeRehashPassword(accountUuid, plainPassword, currentHash) {
+    let currentCost;
+    try {
+        currentCost = bcrypt.getRounds(currentHash);
+    } catch {
+        return; // not a bcrypt hash — leave it alone
+    }
+    if (currentCost <= TARGET_BCRYPT_ROUNDS) return;
+
+    bcrypt.hash(plainPassword, TARGET_BCRYPT_ROUNDS)
+        .then((newHash) => Account.update(
+            { password_hash: newHash },
+            { where: { uuid: accountUuid } }
+        ))
+        .then(() => console.log(`🔁 [PASSWORD] Re-hashed ${accountUuid} cost ${currentCost} → ${TARGET_BCRYPT_ROUNDS}`))
+        .catch((e) => console.warn('⚠️ [PASSWORD] Background re-hash failed:', e.message));
+}
+
 async function verifyPassword(plainPassword, hash, account = null) {
     console.log('🔐 [PASSWORD] Verifying password...');
 
@@ -327,6 +352,13 @@ async function verifyPassword(plainPassword, hash, account = null) {
         const isValid = await bcrypt.compare(plainPassword, hash);
 
         console.log(isValid ? '✅ [PASSWORD] Valid' : '❌ [PASSWORD] Invalid');
+
+        // Speed up this user's NEXT login: if their hash was made at a higher
+        // bcrypt cost, re-hash at the target cost. Fire-and-forget so it never
+        // adds latency to this response.
+        if (isValid && account && account.uuid) {
+            _maybeRehashPassword(account.uuid, plainPassword, hash);
+        }
 
         return {
             valid: isValid,

@@ -10,8 +10,8 @@ const redisClient              = require('../../utils/redis');
 const Account          = require('../../models/Account');
 const Trip             = require('../../models/Trip');
 const DriverProfile    = require('../../models/DriverProfile');
-const ServiceRequest   = require('../../models/ServiceRequest');
-const ServiceDispute   = require('../../models/ServiceDispute');
+const ServiceListing   = require('../../models/ServiceListing');
+const ServiceAdPayment = require('../../models/ServiceAdPayment');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -372,11 +372,11 @@ exports.getActivityFeed = async (req, res) => {
         const [
             recentTrips,
             recentSignups,
-            recentDisputes,
-            recentServiceRequests,
+            pendingListings,
+            pendingPlans,
         ] = await Promise.all([
 
-            // Last 5 completed trips — raw query, no include (avoid FK join issues)
+            // Last 5 completed trips
             Trip.findAll({
                 where      : { status: 'COMPLETED' },
                 order      : [['updatedAt', 'DESC']],
@@ -385,7 +385,7 @@ exports.getActivityFeed = async (req, res) => {
                 raw        : true,
             }),
 
-            // Last 5 new account signups — Account: underscored:true → created_at, user_type
+            // Last 5 new account signups
             Account.findAll({
                 order      : [['created_at', 'DESC']],
                 limit      : 5,
@@ -393,21 +393,21 @@ exports.getActivityFeed = async (req, res) => {
                 raw        : true,
             }),
 
-            // Last 3 open disputes — only guaranteed columns
-            ServiceDispute.findAll({
-                where      : { status: 'open' },
-                order      : [['createdAt', 'DESC']],
+            // Last 3 listings awaiting moderation
+            ServiceListing.findAll({
+                where      : { status: 'pending_review' },
+                order      : [['created_at', 'DESC']],
                 limit      : 3,
-                attributes : ['id', 'status', 'createdAt'],
+                attributes : ['id', 'title', 'status', 'created_at'],
                 raw        : true,
             }),
 
-            // Last 3 pending service requests — only guaranteed columns
-            ServiceRequest.findAll({
-                where      : { status: 'pending' },
-                order      : [['createdAt', 'DESC']],
+            // Last 3 ad plans awaiting payment
+            ServiceAdPayment.findAll({
+                where      : { status: 'pending_payment' },
+                order      : [['created_at', 'DESC']],
                 limit      : 3,
-                attributes : ['id', 'status', 'createdAt'],
+                attributes : ['id', 'plan_key_snapshot', 'status', 'created_at'],
                 raw        : true,
             }),
 
@@ -447,27 +447,27 @@ exports.getActivityFeed = async (req, res) => {
             });
         });
 
-        recentDisputes.forEach(d => {
+        pendingListings.forEach(l => {
             feed.push({
-                type      : 'dispute_opened',
-                id        : d.id,
-                icon      : '⚠️',
-                title     : 'New dispute',
-                subtitle  : 'Service dispute filed',
-                meta      : 'Awaiting review',
-                timestamp : d.createdAt,
+                type      : 'listing_pending',
+                id        : l.id,
+                icon      : '📋',
+                title     : 'Annonce en attente',
+                subtitle  : l.title || `Annonce #${l.id}`,
+                meta      : 'Modération requise',
+                timestamp : l.created_at,
             });
         });
 
-        recentServiceRequests.forEach(r => {
+        pendingPlans.forEach(p => {
             feed.push({
-                type      : 'service_request',
-                id        : r.id,
-                icon      : '🔧',
-                title     : 'Service request',
-                subtitle  : `Request #${String(r.id).slice(0, 8).toUpperCase()}`,
-                meta      : 'Pending',
-                timestamp : r.createdAt,
+                type      : 'plan_pending',
+                id        : p.id,
+                icon      : '💳',
+                title     : 'Plan en attente de paiement',
+                subtitle  : p.plan_key_snapshot,
+                meta      : 'Paiement attendu',
+                timestamp : p.created_at,
             });
         });
 

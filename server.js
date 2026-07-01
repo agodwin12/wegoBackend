@@ -81,11 +81,44 @@ function initFirebaseAdmin() {
 // STARTUP SEQUENCE
 // ═══════════════════════════════════════════════════════════════════════
 
+// Fail fast if critical configuration is missing or unsafe. A misconfigured
+// payments backend should refuse to start rather than run in a broken state.
+function assertRequiredEnv() {
+    const required = ['DB_NAME', 'DB_USER', 'DB_HOST'];
+    if (!process.env.JWT_ACCESS_SECRET && !process.env.JWT_SECRET) required.push('JWT_ACCESS_SECRET');
+    if (!process.env.JWT_REFRESH_SECRET && !process.env.JWT_SECRET) required.push('JWT_REFRESH_SECRET');
+
+    const missing = required.filter((k) => !process.env[k] || String(process.env[k]).trim() === '');
+    if (missing.length) {
+        console.error(`❌ [STARTUP] Missing required env vars: ${missing.join(', ')}`);
+        process.exit(1);
+    }
+
+    if (NODE_ENV === 'production') {
+        // CamPay (driver top-ups) must be configured in production.
+        const prodRequired = ['CAMPAY_APP_USERNAME', 'CAMPAY_APP_PASSWORD', 'CAMPAY_BASE_URL', 'CAMPAY_WEBHOOK_SECRET'];
+        const prodMissing  = prodRequired.filter((k) => !process.env[k] || String(process.env[k]).trim() === '');
+        if (prodMissing.length) {
+            console.error(`❌ [STARTUP] Production requires: ${prodMissing.join(', ')}`);
+            process.exit(1);
+        }
+        const cors = (process.env.CORS_ORIGIN || '').trim();
+        if (cors === '' || cors === '*') {
+            console.error('❌ [STARTUP] CORS_ORIGIN must be a real allowlist in production (not empty or "*").');
+            process.exit(1);
+        }
+    }
+    console.log('✅ [STARTUP] Required configuration present');
+}
+
 const startServer = async () => {
     try {
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🚀 WEGO API - Starting up...');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        // ── Step 0: Required configuration assertion (fail fast) ──────
+        assertRequiredEnv();
 
         // ── Step 1: Database Connection ───────────────────────────────
         console.log('🔄 [STARTUP] Connecting to database...');
@@ -96,9 +129,22 @@ const startServer = async () => {
         console.log('   Port:    ', process.env.DB_PORT);
 
         // ── Step 2: Database Synchronization ──────────────────────────
-        console.log('\n🔄 [STARTUP] Synchronizing database models...');
-        await sequelize.sync({ alter: false });
-        console.log('✅ [STARTUP] Database models synchronized');
+        // Migrations are the schema authority (see migrations/ + scripts/run-migration.js).
+        //   • default 'safe' → sync() creates MISSING tables but never ALTERs
+        //     existing ones. (MySQL's alter:true re-creates every unique index on
+        //     each boot, which silently piled up dozens of duplicate indexes on
+        //     `accounts` — never default to it.)
+        //   • DB_SYNC=alter → opt-in one-off heal for a local DB (use sparingly).
+        //   • DB_SYNC=off   → skip sync entirely (pure migrations).
+        const dbSyncMode = process.env.DB_SYNC || 'safe';
+        if (dbSyncMode === 'off') {
+            console.log('\nℹ️  [STARTUP] DB_SYNC=off — skipping sync (migrations only)');
+        } else {
+            const alter = dbSyncMode === 'alter';
+            console.log(`\n🔄 [STARTUP] Synchronizing database models (mode=${dbSyncMode}, alter=${alter})...`);
+            await sequelize.sync({ alter });
+            console.log('✅ [STARTUP] Database models synchronized');
+        }
 
         // ── Step 3: Email Service ─────────────────────────────────────
         console.log('\n🔄 [STARTUP] Initializing email service...');
@@ -112,9 +158,14 @@ const startServer = async () => {
         initFirebaseAdmin();
 
         // ── Step 5: Notification Cleaner Cron ─────────────────────────
-        console.log('\n🔄 [STARTUP] Starting notification cleaner jobs...');
-        const { startNotificationCleaner } = require('./src/jobs/notification_cleaner');
-        startNotificationCleaner();
+        // Guarded by RUN_JOBS so only one instance runs it when scaled out.
+        if (process.env.RUN_JOBS !== 'false') {
+            console.log('\n🔄 [STARTUP] Starting notification cleaner jobs...');
+            const { startNotificationCleaner } = require('./src/jobs/notification_cleaner');
+            startNotificationCleaner();
+        } else {
+            console.log('\n🚫 [STARTUP] RUN_JOBS=false — notification cleaner disabled on this instance');
+        }
 
         // ── Step 6: Start HTTP Server ─────────────────────────────────
         console.log('\n🔄 [STARTUP] Starting HTTP server...');

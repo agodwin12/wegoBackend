@@ -3,6 +3,10 @@
 const Coupon = require('../../models/Coupon');
 const { Op } = require('sequelize');
 const {CouponUsage, Trip} = require("../../models");
+const couponService = require('../../services/couponService');
+
+// Coupons on rides are capped at the commission so WeGo never pays the driver.
+const RIDE_COMMISSION_RATE = parseFloat(process.env.COMMISSION_RATE || '0.15');
 
 /**
  * 🎁 GET ACTIVE PROMOTIONS FOR MOBILE USERS
@@ -142,139 +146,45 @@ exports.getActivePromotions = async (req, res) => {
  */
 exports.validateCoupon = async (req, res) => {
     try {
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('✅ [PROMOTIONS] Validating coupon code...');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-        const { code, trip_amount } = req.body;
-        const userId = req.user?.uuid; // From auth middleware
+        // Mobile sends { code, fare_estimate }. Accept trip_amount too for safety.
+        const { code, fare_estimate, trip_amount } = req.body;
+        const userId = req.user?.uuid;
+        const gross  = Math.round(parseFloat(fare_estimate ?? trip_amount ?? 0));
 
         if (!code) {
-            return res.status(400).json({
-                success: false,
-                message: 'Coupon code is required'
-            });
+            return res.status(400).json({ success: false, message: 'Coupon code is required' });
+        }
+        if (!gross || gross <= 0) {
+            return res.status(400).json({ success: false, message: 'Valid fare amount is required' });
         }
 
-        if (!trip_amount || trip_amount <= 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Valid trip amount is required'
-            });
-        }
-
-        console.log(`🎫 Code: ${code}`);
-        console.log(`💰 Trip Amount: ${trip_amount} FCFA`);
-        console.log(`👤 User: ${userId}`);
-
-        // Find coupon
-        const coupon = await Coupon.findOne({
-            where: { code: code.toUpperCase() }
+        // Single source of truth — same evaluation + commission cap as booking,
+        // so the previewed discount is exactly what gets applied at trip creation.
+        const commissionCap = Math.floor(gross * RIDE_COMMISSION_RATE);
+        const result = await couponService.evaluate({
+            code, userUuid: userId, grossAmount: gross, maxDiscount: commissionCap,
         });
 
-        if (!coupon) {
-            console.log('❌ Coupon not found');
-            return res.status(404).json({
-                success: false,
-                message: 'Invalid coupon code',
-                code: 'COUPON_NOT_FOUND'
-            });
+        if (!result.ok) {
+            return res.status(400).json({ success: false, message: result.message, code: 'COUPON_INVALID' });
         }
 
-        // Check if valid (using model method)
-        if (!coupon.isValid()) {
-            const now = new Date();
-            let reason = 'Coupon is not active';
-
-            if (!coupon.is_active) {
-                reason = 'This coupon has been deactivated';
-            } else if (now < new Date(coupon.valid_from)) {
-                reason = 'This coupon is not yet valid';
-            } else if (now > new Date(coupon.valid_until)) {
-                reason = 'This coupon has expired';
-            } else if (coupon.usage_limit_total && coupon.used_count >= coupon.usage_limit_total) {
-                reason = 'This coupon has reached its usage limit';
-            }
-
-            console.log(`❌ Coupon invalid: ${reason}`);
-            return res.status(400).json({
-                success: false,
-                message: reason,
-                code: 'COUPON_INVALID'
-            });
-        }
-
-        // Check minimum trip amount
-        if (trip_amount < coupon.min_trip_amount) {
-            console.log(`❌ Trip amount too low. Minimum: ${coupon.min_trip_amount} FCFA`);
-            return res.status(400).json({
-                success: false,
-                message: `Minimum trip amount of ${coupon.min_trip_amount} FCFA required`,
-                code: 'MIN_AMOUNT_NOT_MET',
-                required_amount: coupon.min_trip_amount
-            });
-        }
-
-        // Calculate discount
-        let discountAmount = 0;
-
-        if (coupon.discount_type === 'PERCENTAGE') {
-            discountAmount = (trip_amount * coupon.discount_value) / 100;
-
-            // Apply max discount cap
-            if (coupon.max_discount_amount && discountAmount > coupon.max_discount_amount) {
-                discountAmount = coupon.max_discount_amount;
-            }
-        } else if (coupon.discount_type === 'FIXED_AMOUNT') {
-            discountAmount = coupon.discount_value;
-        } else if (coupon.discount_type === 'FREE_DELIVERY') {
-            // Free delivery type - set flag for payment processing
-            // The actual discount will be calculated during payment based on delivery fee
-            discountAmount = 0;
-        }
-
-        // Ensure discount doesn't exceed trip amount
-        if (discountAmount > trip_amount) {
-            discountAmount = trip_amount;
-        }
-
-        const finalAmount = Math.max(0, trip_amount - discountAmount);
-
-        console.log(`✅ Coupon valid!`);
-        console.log(`   Original: ${trip_amount} FCFA`);
-        console.log(`   Discount: -${discountAmount} FCFA`);
-        console.log(`   Final: ${finalAmount} FCFA`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        res.status(200).json({
+        const finalFare = Math.max(0, gross - result.discount);
+        return res.status(200).json({
             success: true,
             message: 'Coupon is valid',
             data: {
-                coupon: {
-                    id: coupon.id,
-                    code: coupon.code,
-                    description: coupon.description,
-                    discount_type: coupon.discount_type,
-                    discount_value: coupon.discount_value,
-                    applicable_to: coupon.applicable_to
-                },
-                calculation: {
-                    original_amount: trip_amount,
-                    discount_amount: Math.round(discountAmount),
-                    final_amount: Math.round(finalAmount),
-                    savings_percentage: trip_amount > 0 ? Math.round((discountAmount / trip_amount) * 100) : 0
-                }
-            }
+                code:            result.coupon.code,
+                discount_amount: result.discount,
+                final_fare:      finalFare,
+                discount_label:  result.coupon.description || result.coupon.code,
+                original_amount: gross,
+            },
         });
 
     } catch (error) {
         console.error('❌ [PROMOTIONS] Error validating coupon:', error);
-
-        res.status(500).json({
-            success: false,
-            message: 'Failed to validate coupon',
-            error: error.message
-        });
+        return res.status(500).json({ success: false, message: 'Failed to validate coupon', error: error.message });
     }
 };
 

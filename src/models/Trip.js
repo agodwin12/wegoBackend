@@ -108,6 +108,31 @@ Trip.init({
         field: 'fareFinal'
     },
 
+    // ── Coupon (platform-funded: the discount reduces WeGo's commission, capped
+    //    at the commission so the driver is always kept whole and WeGo — which
+    //    never touches the P2P fare — never has to pay the driver) ─────────────
+    couponId: {
+        type: DataTypes.STRING(36),
+        allowNull: true,
+        field: 'couponId'
+    },
+    couponCode: {
+        type: DataTypes.STRING(20),
+        allowNull: true,
+        field: 'couponCode'
+    },
+    discountAmount: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        field: 'discountAmount'
+    },
+    originalFare: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        field: 'originalFare'
+    },
+
     paymentMethod: {
         type: DataTypes.ENUM('CASH', 'MOMO', 'OM'),
         allowNull: false,

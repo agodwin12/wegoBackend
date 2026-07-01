@@ -95,6 +95,13 @@ module.exports = (sequelize) => {
                 comment:      'How many days the listing stays active after payment',
             },
 
+            listing_quota: {
+                type:         DataTypes.INTEGER,
+                allowNull:    true,
+                defaultValue: null,
+                comment:      'Total listings this plan entitles the seller to post. null = unlimited.',
+            },
+
             max_photos: {
                 type:         DataTypes.INTEGER,
                 allowNull:    false,

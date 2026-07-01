@@ -7,10 +7,14 @@
 # Dependencies (installed fresh inside the image)
 node_modules/
 
-# Secrets — NEVER bake real credentials into an image
+# Secrets — NEVER bake real credentials into an image.
+# Firebase keys are mounted read-only at runtime via docker-compose, not copied.
 .env
 .env.*
 !.env.example
+serviceAccountKey.json
+google-services.json
+serviceAccount*.json
 
 # Logs
 logs/

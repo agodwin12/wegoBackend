@@ -51,34 +51,6 @@ class CamPayClient {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // DISBURSE
-    // POST /disburse/
-    //
-    // Sends money FROM WeGo's CamPay balance TO a driver/agent's phone number.
-    // Used when admin approves a cashout request.
-    //
-    // ⚠️  Requires "API Withdrawal" to be enabled in the CamPay app settings.
-    //
-    // @param {object} payload
-    //   @param {string|number} payload.amount             — XAF integer, NO decimals
-    //   @param {string}        payload.currency           — always "XAF"
-    //   @param {string}        payload.to                 — phone with country code e.g. "237670000000"
-    //   @param {string}        payload.description        — internal note for the transfer
-    //   @param {string}        payload.external_reference — your unique ref for idempotency
-    //
-    // @returns {object} CamPay response:
-    //   { reference, external_reference, status, amount, currency, operator, operator_reference }
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    async disburse(payload) {
-        _validateDisbursePayload(payload);
-
-        console.log(`💸 [CAMPAY CLIENT] Disburse → ${payload.amount} XAF to ${payload.to} | ref: ${payload.external_reference}`);
-
-        return this._request('POST', '/disburse/', payload);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
     // GET TRANSACTION
     // GET /transaction/{reference}/
     //
@@ -218,29 +190,6 @@ function _validateCollectPayload(payload) {
     }
     if (!external_reference || typeof external_reference !== 'string') {
         throw new Error('[CAMPAY CLIENT] collect: external_reference is required for idempotency');
-    }
-}
-
-function _validateDisbursePayload(payload) {
-    const { amount, currency, to, description, external_reference } = payload;
-
-    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-        throw new Error('[CAMPAY CLIENT] disburse: amount must be a positive number');
-    }
-    if (String(amount).includes('.')) {
-        throw new Error('[CAMPAY CLIENT] disburse: amount must be a whole integer — CamPay rejects decimals (ER201)');
-    }
-    if (!currency || currency !== 'XAF') {
-        throw new Error('[CAMPAY CLIENT] disburse: currency must be "XAF"');
-    }
-    if (!to || !/^237\d{9}$/.test(String(to))) {
-        throw new Error('[CAMPAY CLIENT] disburse: "to" must be a valid Cameroonian number starting with 237 (e.g. 237670000000)');
-    }
-    if (!description || typeof description !== 'string' || description.trim().length === 0) {
-        throw new Error('[CAMPAY CLIENT] disburse: description is required');
-    }
-    if (!external_reference || typeof external_reference !== 'string') {
-        throw new Error('[CAMPAY CLIENT] disburse: external_reference is required for idempotency');
     }
 }
 

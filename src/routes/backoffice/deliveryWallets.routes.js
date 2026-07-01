@@ -37,22 +37,7 @@ router.patch('/wallets/:walletId/status',
 );
 
 // ─── PAYOUTS ──────────────────────────────────────────────────────────────────
-// GET  /api/backoffice/delivery/payouts                     — list all payout requests
-router.get('/payouts',                       ctrl.getPayouts);
-
-// GET  /api/backoffice/delivery/payouts/export              — Excel export
-router.get('/payouts/export',                ctrl.exportPayouts);
-
-// POST /api/backoffice/delivery/payouts/:id/approve         — approve payout
-router.post('/payouts/:id/approve',
-    requireEmployeeRole('super_admin', 'admin', 'accountant'),
-    ctrl.approvePayout
-);
-
-// POST /api/backoffice/delivery/payouts/:id/reject          — reject payout
-router.post('/payouts/:id/reject',
-    requireEmployeeRole('super_admin', 'admin', 'accountant'),
-    ctrl.rejectPayout
-);
+// Removed — WeGo is deposit/top-up only. Agents top up their wallet to receive
+// deliveries; there is no withdrawal/payout back to mobile money.
 
 module.exports = router;

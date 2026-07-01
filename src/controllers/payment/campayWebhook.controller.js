@@ -1,6 +1,7 @@
 'use strict';
 
-const crypto                  = require('crypto');
+const jwt                     = require('jsonwebtoken');
+const campayService           = require('../../services/campay/campayService');
 const deliveryEarningsService = require('../../services/deliveryEarningsService');
 const tripMatchingService     = require('../../services/tripMatchingService');
 const walletTopUpService      = require('../../services/delivery/walletTopUp.service');
@@ -14,6 +15,7 @@ const {
     Payment,
     ServiceAdPayment,
     ServiceListing,
+    ServiceListingPlan,
 } = require('../../models');
 
 // ── Notification service (lazy — avoids circular dep at startup) ──────────────
@@ -24,13 +26,18 @@ const getNotificationService = () => require('../../services/NotificationService
 // ═══════════════════════════════════════════════════════════════════════════════
 
 exports.handleWebhook = async (req, res) => {
-    const signatureValid = _validateSignature(req);
+    const payload = req.body || {};
+
+    // ── 1. Authenticate the webhook ───────────────────────────────────────────
+    // CamPay signs every notification with a JWT in `payload.signature`, signed
+    // with your app's Webhook Key (CAMPAY_WEBHOOK_SECRET). Verifying it proves
+    // the request really came from CamPay.
+    const signatureValid = _validateSignature(payload);
     if (!signatureValid) {
-        console.error('🚨 [WEBHOOK] Rejected — invalid signature. Possible spoofed request.');
+        console.error('🚨 [WEBHOOK] Rejected — invalid/missing signature. Possible spoofed request.');
+        // 200 so CamPay does not hammer us with retries; we simply do not process it.
         return res.status(200).json({ received: true });
     }
-
-    const payload = req.body;
 
     console.log('\n📨 [WEBHOOK] CamPay notification received');
     console.log(`   external_ref : ${payload.external_reference}`);
@@ -55,17 +62,16 @@ exports._finalizeFromPoll = async (payment, payload, io) => {
     console.log(`🔄 [POLL FINALIZER] vertical: ${payment.vertical}, id: ${payment.vertical_id}`);
     try {
         switch (payment.vertical) {
-            case 'trip':            await _finalizeTrip(payment, payload, io);           break;
-            case 'delivery':        await _finalizeDelivery(payment, payload, io);       break;
-            case 'service_request': await _finalizeServiceRequest(payment, payload, io); break;
-            case 'rental':          await _finalizeRental(payment, payload, io);         break;
-            case 'listing_fee':     await _finalizeListingFee(payment, payload, io);     break;
-            case 'delivery_topup':  await _finalizeDeliveryTopUp(payment, payload, io);  break;
+            case 'delivery':       await _finalizeDelivery(payment, payload, io);      break;
+            case 'rental':         await _finalizeRental(payment, payload, io);        break;
+            case 'listing_fee':    await _finalizeListingFee(payment, payload, io);    break;
+            case 'delivery_topup': await _finalizeDeliveryTopUp(payment, payload, io); break;
             default:
                 console.log(`ℹ️  [POLL FINALIZER] No finalizer for vertical "${payment.vertical}"`);
         }
     } catch (err) {
         console.error(`❌ [POLL FINALIZER] Failed for ${payment.vertical} #${payment.vertical_id}:`, err.message);
+        await _recordReconciliation(payment, err);
     }
 };
 
@@ -74,9 +80,8 @@ exports._finalizeFromPoll = async (payment, payload, io) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _processWebhook(payload, io) {
-    const externalRef  = payload.external_reference;
-    const campayRef    = payload.reference;
-    const campayStatus = payload.status;
+    const externalRef = payload.external_reference;
+    const campayRef   = payload.reference;
 
     if (!externalRef) {
         console.error('❌ [WEBHOOK] Payload missing external_reference — cannot process.');
@@ -94,21 +99,68 @@ async function _processWebhook(payload, io) {
         return;
     }
 
+    // ── Independent verification — never trust the webhook payload blindly ─────
+    // Re-query CamPay's own API for the authoritative status + amount. This
+    // defeats spoofed/replayed/mismatched-amount webhooks even if signature
+    // handling has an edge case, and is the single most important money safeguard.
+    const reference = payment.campay_ref || campayRef;
+    let authoritative;
+    try {
+        authoritative = await campayService.checkStatus(reference);
+    } catch (err) {
+        console.error(`❌ [WEBHOOK] Could not re-verify ${reference} with CamPay — NOT finalizing:`, err.message);
+        return; // leave PENDING; the poll finalizer / expiry job will retry
+    }
+
+    const campayStatus = authoritative.status;
+    if (campayStatus === 'PENDING') {
+        console.log(`ℹ️  [WEBHOOK] CamPay still reports ${reference} as PENDING — ignoring premature webhook.`);
+        return;
+    }
+
     const newStatus = campayStatus === 'SUCCESSFUL' ? 'SUCCESSFUL' : 'FAILED';
 
-    await payment.update({
-        campay_ref:      campayRef,
-        operator:        payload.operator || payment.operator,
-        campay_response: payload,
-        status:          newStatus,
-        resolved_at:     new Date(),
-        ...(newStatus === 'FAILED' && {
-            failure_reason: payload.reason
-                ? `${payload.reason} | operator: ${payload.operator || 'unknown'}`
-                : `CamPay status: FAILED | operator: ${payload.operator || 'unknown'}`,
-        }),
-    });
+    // ── Amount verification (only meaningful on success) ──────────────────────
+    if (newStatus === 'SUCCESSFUL') {
+        const paidAmount = Math.round(Number(authoritative.amount));
+        if (!Number.isFinite(paidAmount) || paidAmount !== payment.amount) {
+            console.error(
+                `🚨 [WEBHOOK] AMOUNT MISMATCH for ${externalRef} — ` +
+                `expected ${payment.amount} XAF, CamPay reports ${authoritative.amount}. Refusing to finalize.`
+            );
+            await payment.update({
+                status:          'FAILED',
+                resolved_at:     new Date(),
+                campay_response: { ...authoritative, _reason: 'amount_mismatch' },
+                failure_reason:  `amount_mismatch: expected ${payment.amount}, got ${authoritative.amount}`,
+            }).catch(() => {});
+            return;
+        }
+    }
 
+    // ── Atomic resolve — only one of {webhook, poll} may win the transition ────
+    // Conditional UPDATE ... WHERE status='PENDING' so a concurrent poll can't
+    // double-run a finalizer.
+    const [affected] = await WegoPayment.update(
+        {
+            campay_ref:      reference,
+            operator:        authoritative.operator || payload.operator || payment.operator,
+            campay_response: authoritative,
+            status:          newStatus,
+            resolved_at:     new Date(),
+            ...(newStatus === 'FAILED' && {
+                failure_reason: `CamPay status: FAILED | operator: ${authoritative.operator || payload.operator || 'unknown'}`,
+            }),
+        },
+        { where: { id: payment.id, status: 'PENDING' } }
+    );
+
+    if (affected === 0) {
+        console.log(`ℹ️  [WEBHOOK] ${externalRef} was resolved concurrently — skipping finalizer.`);
+        return;
+    }
+
+    await payment.reload();
     console.log(`${newStatus === 'SUCCESSFUL' ? '✅' : '❌'} [WEBHOOK] WegoPayment ${externalRef} → ${newStatus}`);
 
     if (newStatus === 'SUCCESSFUL') {
@@ -128,17 +180,16 @@ async function _finalizeSuccessful(payment, payload, io) {
 
     try {
         switch (vertical) {
-            case 'trip':            await _finalizeTrip(payment, payload, io);           break;
-            case 'delivery':        await _finalizeDelivery(payment, payload, io);       break;
-            case 'service_request': await _finalizeServiceRequest(payment, payload, io); break;
-            case 'rental':          await _finalizeRental(payment, payload, io);         break;
-            case 'listing_fee':     await _finalizeListingFee(payment, payload, io);     break;
-            case 'delivery_topup':  await _finalizeDeliveryTopUp(payment, payload, io);  break;
+            case 'delivery':       await _finalizeDelivery(payment, payload, io);      break;
+            case 'rental':         await _finalizeRental(payment, payload, io);        break;
+            case 'listing_fee':    await _finalizeListingFee(payment, payload, io);    break;
+            case 'delivery_topup': await _finalizeDeliveryTopUp(payment, payload, io); break;
             default:
                 console.log(`ℹ️  [WEBHOOK] vertical "${vertical}" has no finalizer — likely a disbursement.`);
         }
     } catch (err) {
         console.error(`❌ [WEBHOOK] Finalizer failed for ${vertical} #${vertical_id}:`, err.message);
+        await _recordReconciliation(payment, err);
     }
 }
 
@@ -146,39 +197,7 @@ async function _finalizeSuccessful(payment, payload, io) {
 // VERTICAL FINALIZERS — SUCCESS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── TRIP ──────────────────────────────────────────────────────────────────────
-
-async function _finalizeTrip(payment, payload, io) {
-    const tripId = payment.vertical_id;
-
-    const trip = await Trip.findByPk(tripId);
-    if (!trip) {
-        console.error(`❌ [WEBHOOK][TRIP] Trip ${tripId} not found`);
-        return;
-    }
-
-    await Payment.update(
-        { status: 'settled', reference: payload.reference },
-        { where: { tripId, status: 'pending' } }
-    ).catch(() => {});
-
-    if (trip.status === 'SEARCHING') {
-        console.log(`🚕 [WEBHOOK][TRIP] Starting driver matching for trip ${tripId}`);
-        tripMatchingService.broadcastTripToDrivers(tripId, io).catch(err => {
-            console.error(`❌ [WEBHOOK][TRIP] broadcastTripToDrivers failed:`, err.message);
-        });
-    }
-
-    _emitToUser(io, trip.passengerId, 'payment:confirmed', {
-        vertical:   'trip',
-        verticalId: tripId,
-        amount:     payment.amount,
-        operator:   payload.operator,
-        message:    'Payment confirmed! Finding you a driver...',
-    });
-
-    console.log(`✅ [WEBHOOK][TRIP] Trip ${tripId} payment finalised`);
-}
+// ── TRIP — removed: rides are never paid through CamPay (fare is P2P). ─────────
 
 // ── DELIVERY ──────────────────────────────────────────────────────────────────
 
@@ -211,12 +230,6 @@ async function _finalizeDelivery(payment, payload, io) {
     });
 
     console.log(`✅ [WEBHOOK][DELIVERY] Delivery ${deliveryId} payment finalised — driver search started`);
-}
-
-// ── SERVICE REQUEST ───────────────────────────────────────────────────────────
-
-async function _finalizeServiceRequest(payment, payload, io) {
-    await _finalizeListingFee(payment, payload, io);
 }
 
 // ── RENTAL ────────────────────────────────────────────────────────────────────
@@ -252,7 +265,9 @@ async function _finalizeRental(payment, payload, io) {
 async function _finalizeListingFee(payment, payload, io) {
     const adPaymentId = parseInt(payment.vertical_id);
 
-    const adPayment = await ServiceAdPayment.findByPk(adPaymentId);
+    const adPayment = await ServiceAdPayment.findByPk(adPaymentId, {
+        include: [{ model: ServiceListingPlan, as: 'plan' }],
+    });
     if (!adPayment) {
         console.error(`❌ [WEBHOOK][LISTING_FEE] ServiceAdPayment ${adPaymentId} not found`);
         return;
@@ -264,11 +279,21 @@ async function _finalizeListingFee(payment, payload, io) {
         return;
     }
 
+    const plan          = adPayment.plan;
     const now           = new Date();
     const planExpiresAt = new Date(
         now.getTime() + adPayment.duration_days_snapshot * 24 * 60 * 60 * 1000
     );
     const newAdStatus = adPayment.is_hero_placement_snapshot ? 'hero_pending' : 'active';
+
+    // Listing status: hero goes to hero_pending; paid non-hero respects admin approval flag;
+    // free plans (no DB payment path here — handled by activateFreePlan) default to active.
+    const requiresApproval = plan?.requires_admin_approval ?? true;
+    const newListingStatus = adPayment.is_hero_placement_snapshot
+        ? 'hero_pending'
+        : requiresApproval ? 'pending_review' : 'active';
+
+    const boostPriority = plan?.boost_priority ?? (adPayment.is_hero_placement_snapshot ? 2 : 1);
 
     await adPayment.update({
         status:          newAdStatus,
@@ -278,18 +303,18 @@ async function _finalizeListingFee(payment, payload, io) {
     });
 
     await listing.update({
-        status:            'pending',
+        status:            newListingStatus,
         current_plan_id:   adPayment.plan_id,
         plan_expires_at:   planExpiresAt,
         plan_activated_at: now,
-        boost_priority:    adPayment.is_hero_placement_snapshot ? 2 : 1,
+        boost_priority:    boostPriority,
     });
 
     _emitToUser(io, adPayment.paid_by, 'listing:payment_confirmed', {
         vertical:        'listing_fee',
         ad_payment_id:   adPayment.id,
         listing_id:      listing.id,
-        listing_status:  'pending',
+        listing_status:  newListingStatus,
         plan_key:        adPayment.plan_key_snapshot,
         plan_expires_at: planExpiresAt,
         is_hero:         adPayment.is_hero_placement_snapshot,
@@ -297,12 +322,14 @@ async function _finalizeListingFee(payment, payload, io) {
         operator:        payload.operator,
         message:         adPayment.is_hero_placement_snapshot
             ? 'Payment confirmed! Your listing is under review for hero placement.'
-            : 'Payment confirmed! Your listing is under review and will be live soon.',
+            : newListingStatus === 'active'
+                ? 'Payment confirmed! Your listing is now live.'
+                : 'Payment confirmed! Your listing is under review and will be live soon.',
     });
 
     console.log(
         `✅ [WEBHOOK][LISTING_FEE] ServiceAdPayment ${adPaymentId} → ${newAdStatus}, ` +
-        `listing ${listing.id} → pending`
+        `listing ${listing.id} → ${newListingStatus}`
     );
 }
 
@@ -426,10 +453,6 @@ async function _finalizeFailed(payment, payload, io) {
 
     switch (vertical) {
 
-        case 'trip':
-            console.log(`ℹ️  [WEBHOOK][TRIP] Trip ${vertical_id} payment failed — stays SEARCHING`);
-            break;
-
         case 'delivery':
             await Delivery.update(
                 { payment_status: 'pending' },
@@ -438,7 +461,6 @@ async function _finalizeFailed(payment, payload, io) {
             console.log(`ℹ️  [WEBHOOK][DELIVERY] Delivery ${vertical_id} payment failed — reset to pending`);
             break;
 
-        case 'service_request':
         case 'listing_fee':
             await ServiceAdPayment.update(
                 { status: 'pending_payment' },
@@ -480,42 +502,68 @@ async function _finalizeFailed(payment, payload, io) {
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function _validateSignature(req) {
+// CamPay signs each webhook with a JWT placed in the `signature` field of the
+// payload, signed (HS256) with your application's Webhook Key. We verify that
+// JWT with CAMPAY_WEBHOOK_SECRET. This is the documented CamPay mechanism — it
+// is NOT an HMAC header. Regardless of the outcome here, _processWebhook also
+// independently re-queries CamPay's API before crediting (defence in depth).
+function _validateSignature(payload) {
     const secret = process.env.CAMPAY_WEBHOOK_SECRET;
+    const isProd = process.env.NODE_ENV === 'production';
 
+    // Fail CLOSED in production: never process an unauthenticated webhook.
     if (!secret) {
-        if (process.env.NODE_ENV === 'production') {
-            console.error('🚨 [WEBHOOK] CAMPAY_WEBHOOK_SECRET not set in production!');
-        } else {
-            console.warn('⚠️  [WEBHOOK] CAMPAY_WEBHOOK_SECRET not set — skipping validation (DEV only).');
+        if (isProd) {
+            console.error('🚨 [WEBHOOK] CAMPAY_WEBHOOK_SECRET not set in production — rejecting.');
+            return false;
         }
+        console.warn('⚠️  [WEBHOOK] CAMPAY_WEBHOOK_SECRET not set — skipping validation (DEV only).');
         return true;
     }
 
-    const receivedSig = req.headers['signature'] || req.headers['x-campay-signature'];
-
-    if (!receivedSig) {
-        if (process.env.NODE_ENV !== 'production') {
-            console.warn('⚠️  [WEBHOOK] No signature header — allowing in non-production (sandbox mode).');
-            return true;
+    const token = payload && payload.signature;
+    if (!token) {
+        if (isProd) {
+            console.warn('⚠️  [WEBHOOK] No signature in payload (production) — rejecting.');
+            return false;
         }
-        console.warn('⚠️  [WEBHOOK] No signature header in production — rejecting.');
-        return false;
+        console.warn('⚠️  [WEBHOOK] No signature in payload — allowing in non-production (sandbox).');
+        return true;
     }
 
-    const rawBody     = req.rawBody || JSON.stringify(req.body);
-    const expectedSig = crypto
-        .createHmac('sha256', secret)
-        .update(rawBody)
-        .digest('hex');
-
     try {
-        return crypto.timingSafeEqual(
-            Buffer.from(receivedSig,  'hex'),
-            Buffer.from(expectedSig, 'hex')
-        );
-    } catch {
+        jwt.verify(token, secret); // throws on invalid signature/expiry
+        return true;
+    } catch (err) {
+        console.error('🚨 [WEBHOOK] Signature JWT verification failed:', err.message);
         return false;
+    }
+}
+
+// Durable record when a finalizer fails AFTER money is confirmed received.
+// We never silently swallow these — the money moved, the vertical action did
+// not. The error is stamped onto the payment's campay_response JSON so it is
+// queryable (WHERE JSON_EXTRACT(campay_response,'$._finalizer_error') IS NOT NULL)
+// and logged at error level for alerting.
+async function _recordReconciliation(payment, err) {
+    try {
+        const existing = (payment.campay_response && typeof payment.campay_response === 'object')
+            ? payment.campay_response
+            : {};
+        await payment.update({
+            campay_response: {
+                ...existing,
+                _finalizer_error: err.message,
+                _needs_reconciliation: true,
+                _flagged_at: new Date().toISOString(),
+            },
+        });
+        console.error(
+            `🧾 [RECONCILIATION] payment=${payment.id} vertical=${payment.vertical} ` +
+            `vertical_id=${payment.vertical_id} amount=${payment.amount} — MONEY RECEIVED but finalizer failed: ${err.message}`
+        );
+    } catch (e) {
+        console.error('❌ [RECONCILIATION] Failed to record reconciliation flag:', e.message);
     }
 }
 
