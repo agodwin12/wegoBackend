@@ -92,9 +92,9 @@ const DriverProfile = sequelize.define('DriverProfile', {
     vehicle_type: {
         type: DataTypes.STRING(50),
         allowNull: true,
-        comment: 'Vehicle category (Economy, Comfort, Luxury)',
+        comment: 'Ride tier — must match fare estimation tiers (Economy, Comfort, Luxury)',
         validate: {
-            isIn: [['Economy', 'Comfort', 'Luxury', 'Standard']]
+            isIn: [['Economy', 'Comfort', 'Luxury']]
         }
     },
     vehicle_make_model: {

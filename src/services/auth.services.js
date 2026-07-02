@@ -476,17 +476,19 @@ async function signupDriver(data) {
         console.log(`🆔 [UUID] ${uuid}`);
         console.log(`⏰ [EXPIRY] ${expires_at.toISOString()}`);
 
-        // Normalize vehicle_type to the platform's accepted tiers so NO client
-        // value can ever fail DriverProfile's isIn validation at OTP-verify time
-        // (old app builds offered Business/Premium/SUV/Van — map them sensibly).
+        // Normalize vehicle_type to the platform's THREE ride tiers — the same
+        // ones fare estimation and price_rules use (economy/comfort/luxury).
+        // Any casing or legacy label (Business/Premium/SUV/Van/Standard from old
+        // app builds) maps onto a tier, so signup can never fail validation and
+        // every driver belongs to a tier the ride-hailing section understands.
         const normalizeVehicleType = (raw) => {
             const v = String(raw || '').trim().toLowerCase();
             const map = {
                 economy: 'Economy', comfort: 'Comfort', luxury: 'Luxury',
-                standard: 'Standard', business: 'Comfort', premium: 'Luxury',
-                suv: 'Luxury', van: 'Standard', moto: 'Standard',
+                standard: 'Economy', business: 'Comfort', premium: 'Luxury',
+                suv: 'Luxury', van: 'Comfort', moto: 'Economy',
             };
-            return map[v] || 'Standard';
+            return map[v] || 'Economy';
         };
 
         const driver_data = {
