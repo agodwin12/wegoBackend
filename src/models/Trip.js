@@ -98,6 +98,15 @@ Trip.init({
         field: 'durationS'
     },
 
+    // Requested ride tier (economy/comfort/luxury) — matching is STRICT:
+    // only drivers whose DriverProfile.vehicle_type is this tier get the offer.
+    vehicleType: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: 'economy',
+        field: 'vehicleType'
+    },
+
     fareEstimate: {
         type: DataTypes.INTEGER,
         field: 'fareEstimate'

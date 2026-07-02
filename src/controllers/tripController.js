@@ -46,10 +46,17 @@ exports.createTrip = async (req, res, next) => {
             dropoffLng,
             dropoffAddress,
             payment_method,
+            vehicle_type,
             promo_code,   // mobile field
             coupon_code,  // accepted alias
         } = req.body;
         const couponInput = promo_code || coupon_code;
+
+        // Requested ride tier — STRICT matching sends the offer only to drivers
+        // of this tier. Normalize to the canonical lowercase tiers.
+        const RIDE_TIERS = ['economy', 'comfort', 'luxury'];
+        let requestedTier = String(vehicle_type || 'economy').trim().toLowerCase();
+        if (!RIDE_TIERS.includes(requestedTier)) requestedTier = 'economy';
 
         console.log('📦 [CREATE TRIP] Received body:', req.body);
 
@@ -168,6 +175,7 @@ exports.createTrip = async (req, res, next) => {
             payableFare,                       // what the passenger pays the driver
             discountAmount: couponDiscount,
             couponCode:     couponRow?.code || null,
+            vehicleType:    requestedTier,     // strict tier matching
             fareBreakdown:  estimate.breakdown || null,
             paymentMethod,
             createdAt:      new Date().toISOString(),
@@ -192,6 +200,7 @@ exports.createTrip = async (req, res, next) => {
             fareEstimate:   grossFare,
             routePolyline:  estimate.polyline,
             paymentMethod,
+            vehicleType:    requestedTier,
             couponId:       couponRow?.id   || null,
             couponCode:     couponRow?.code || null,
             discountAmount: couponDiscount,

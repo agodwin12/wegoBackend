@@ -103,6 +103,38 @@ class TripMatchingService {
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
+            // ── STEP 2.5: STRICT vehicle-tier filter ────────────────────────
+            // A driver ONLY receives requests for their own tier: an Economy
+            // driver never sees a Luxury request (and vice-versa). The trip's
+            // requested tier comes from the passenger's vehicle selection.
+            const requestedTier = String(trip.vehicleType || 'economy').trim().toLowerCase();
+
+            const tierProfiles = await DriverProfile.findAll({
+                where:      { account_id: { [Op.in]: rideModeDrivers.map(d => d.driverId) } },
+                attributes: ['account_id', 'vehicle_type'],
+            });
+            const tierByDriver = new Map(
+                tierProfiles.map(p => [p.account_id, String(p.vehicle_type || '').trim().toLowerCase()])
+            );
+
+            const tierDrivers = rideModeDrivers.filter(d => {
+                const driverTier = tierByDriver.get(d.driverId);
+                const match      = driverTier === requestedTier;
+                if (!match) {
+                    console.log(`   ⛔ Driver ${d.driverId} skipped — tier '${driverTier || 'none'}' ≠ requested '${requestedTier}'`);
+                }
+                return match;
+            });
+
+            console.log(`✅ [MATCHING] ${tierDrivers.length}/${rideModeDrivers.length} drivers match tier '${requestedTier}'`);
+
+            if (tierDrivers.length === 0) {
+                console.log(`❌ [MATCHING] No '${requestedTier}' drivers available for trip ${tripId}`);
+                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+            }
+
             // ── STEP 3: Wallet gate ─────────────────────────────────────────
             const fareEstimate       = Math.round(trip.fareEstimate || 0);
             const commissionRate     = await this._getCommissionRate(fareEstimate);
@@ -113,7 +145,7 @@ class TripMatchingService {
             console.log(`   Commission rate   : ${(commissionRate * 100).toFixed(1)}%`);
             console.log(`   Min balance needed: ${commissionRequired} XAF`);
 
-            const rideModeDriverIds = rideModeDrivers.map(d => d.driverId);
+            const rideModeDriverIds = tierDrivers.map(d => d.driverId);
 
             const wallets = await DriverWallet.findAll({
                 where: {
@@ -125,7 +157,7 @@ class TripMatchingService {
 
             const balanceMap = new Map(wallets.map(w => [w.driverId, w.balance]));
 
-            const eligibleDrivers = rideModeDrivers.filter(d => {
+            const eligibleDrivers = tierDrivers.filter(d => {
                 const balance  = balanceMap.get(d.driverId) ?? -1;
                 const eligible = balance >= commissionRequired;
                 if (!eligible) {
@@ -134,7 +166,7 @@ class TripMatchingService {
                 return eligible;
             });
 
-            console.log(`✅ [MATCHING] ${eligibleDrivers.length}/${rideModeDrivers.length} drivers have sufficient balance\n`);
+            console.log(`✅ [MATCHING] ${eligibleDrivers.length}/${tierDrivers.length} tier-matched drivers have sufficient balance\n`);
 
             if (eligibleDrivers.length === 0) {
                 console.log(`❌ [MATCHING] No drivers with sufficient wallet balance for trip ${tripId}`);
@@ -163,6 +195,8 @@ class TripMatchingService {
                 distance:      trip.distanceM,
                 duration:      trip.durationS,
                 paymentMethod: trip.paymentMethod,
+                vehicleType:   requestedTier,
+                vehicle_type:  requestedTier,
                 passenger: {
                     uuid:       passengerAccount.uuid,
                     name:       `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
