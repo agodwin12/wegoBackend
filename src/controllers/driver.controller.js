@@ -1,6 +1,6 @@
 /// src/controllers/driver.controller.js
 
-const { Account, DriverProfile, Trip, TripEvent, Rating, DriverWallet, EarningRule, sequelize } = require('../models');
+const { Account, Driver, DriverProfile, Trip, TripEvent, Rating, DriverWallet, EarningRule, sequelize } = require('../models');
 const { Op }          = require('sequelize');
 const earningsEngine  = require('../services/earningsEngineService');
 const { applyTransition } = require('../services/tripState.service');
@@ -323,6 +323,34 @@ exports.goOnline = async (req, res, next) => {
             if (driver.lastLatitude  !== undefined) driver.lastLatitude  = lat;
             if (driver.lastLongitude !== undefined) driver.lastLongitude = lng;
             await driver.save();
+        }
+
+        // Ensure the drivers row exists — trip matching filters on it
+        // (current_mode='ride'). Without this a freshly signed-up driver could
+        // go online but NEVER receive offers. Keyed by userId so an existing
+        // row (e.g. a delivery agent's) is reused, preserving its current_mode.
+        try {
+            const [driverRow, createdRow] = await Driver.findOrCreate({
+                where:    { userId: req.user.uuid },
+                defaults: {
+                    id:           req.user.uuid,
+                    userId:       req.user.uuid,
+                    status:       'online',
+                    current_mode: 'ride',
+                    phone:        req.user.phone_e164 || null,
+                    lat:          parseFloat(lat),
+                    lng:          parseFloat(lng),
+                },
+            });
+            if (!createdRow) {
+                driverRow.status = 'online';
+                driverRow.lat    = parseFloat(lat);
+                driverRow.lng    = parseFloat(lng);
+                await driverRow.save();
+            }
+            console.log(`✅ [DRIVER] drivers row ${createdRow ? 'created' : 'updated'} — mode: ${driverRow.current_mode}`);
+        } catch (rowErr) {
+            console.warn('⚠️  [DRIVER] goOnline: drivers row upsert failed (non-fatal):', rowErr.message);
         }
 
         await redisClient.geoadd(REDIS_KEYS.DRIVERS_GEO, parseFloat(lng), parseFloat(lat), req.user.uuid.toString());
