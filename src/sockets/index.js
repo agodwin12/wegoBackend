@@ -240,19 +240,35 @@ function setupSocketIO(server) {
 
                     const { redisHelpers: rh, REDIS_KEYS: RK } = require('../config/redis');
                     const { redisClient: rc } = require('../config/redis');
-                    const tripData = await rh.getJson(RK.ACTIVE_TRIP(tripId));
+                    const { Trip: TripLookup } = require('../models');
 
-                    if (!tripData) {
+                    // Redis entry may already be gone (TTL, or the no-drivers
+                    // path cleaned it) — fall back to the DB row so a cancel
+                    // NEVER strands a SEARCHING trip.
+                    const tripData   = await rh.getJson(RK.ACTIVE_TRIP(tripId));
+                    const dbTripPre  = await TripLookup.findByPk(tripId);
+
+                    if (!tripData && !dbTripPre) {
                         return socket.emit('trip:cancel:error', { message: 'Trip not found or already expired' });
                     }
-                    if (tripData.passengerId !== userId) {
+                    const ownerId = tripData?.passengerId ?? dbTripPre?.passengerId;
+                    if (ownerId !== userId) {
                         return socket.emit('trip:cancel:error', { message: 'Unauthorized' });
                     }
 
+                    const effectiveStatus = tripData?.status ?? dbTripPre?.status;
                     const cancelable = ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'];
-                    if (!cancelable.includes(tripData.status)) {
+                    // Idempotent: cancelling an already-canceled trip just re-acks.
+                    if (effectiveStatus === 'CANCELED') {
+                        const ack = { tripId, canceledBy: 'PASSENGER', reason: reason || 'Passenger canceled' };
+                        await rc.del(RK.ACTIVE_TRIP(tripId));
+                        await rc.del(`passenger:active_trip:${userId}`);
+                        socket.emit('trip:canceled', ack);
+                        return;
+                    }
+                    if (!cancelable.includes(effectiveStatus)) {
                         return socket.emit('trip:cancel:error', {
-                            message: `Cannot cancel a trip that is already ${tripData.status}`
+                            message: `Cannot cancel a trip that is already ${effectiveStatus}`
                         });
                     }
 
@@ -263,8 +279,7 @@ function setupSocketIO(server) {
                     // skipped the DB update for SEARCHING trips, leaving the row
                     // SEARCHING forever and permanently blocking the passenger
                     // with "you already have an active trip".
-                    const { Trip: TripModel } = require('../models');
-                    const dbTrip = await TripModel.findByPk(tripId);
+                    const dbTrip = dbTripPre;
                     if (dbTrip && dbTrip.status !== 'CANCELED' && dbTrip.status !== 'COMPLETED') {
                         dbTrip.status       = 'CANCELED';
                         dbTrip.canceledBy   = 'PASSENGER';

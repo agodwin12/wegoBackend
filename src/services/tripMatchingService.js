@@ -39,6 +39,25 @@ class TripMatchingService {
     // PUBLIC: BROADCAST TRIP TO NEARBY DRIVERS
     // ═══════════════════════════════════════════════════════════════════════
 
+    // When matching finds no drivers, the Redis keys are cleaned but the DB
+    // row must ALSO be closed — otherwise it stays SEARCHING forever and the
+    // passenger is permanently blocked by the "active trip" check.
+    async _closeUnmatchedTrip(tripId) {
+        try {
+            const trip = await Trip.findByPk(tripId);
+            if (trip && trip.status === 'SEARCHING') {
+                trip.status       = 'CANCELED';
+                trip.canceledBy   = 'SYSTEM';
+                trip.cancelReason = 'No drivers available';
+                trip.canceledAt   = new Date();
+                await trip.save();
+                console.log(`🧹 [MATCHING] Trip ${tripId} closed — no drivers available`);
+            }
+        } catch (e) {
+            console.warn(`⚠️  [MATCHING] Failed to close unmatched trip ${tripId}:`, e.message);
+        }
+    }
+
     async broadcastTripToDrivers(tripId, io) {
         try {
             console.log(`\n📢 [MATCHING] broadcastTripToDrivers(${tripId})`);
@@ -75,6 +94,7 @@ class TripMatchingService {
                 console.log(`❌ [MATCHING] No drivers near trip ${tripId}`);
                 await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
                 await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                await this._closeUnmatchedTrip(tripId);
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
@@ -100,6 +120,7 @@ class TripMatchingService {
                 console.log(`❌ [MATCHING] No ride-mode drivers available for trip ${tripId}`);
                 await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
                 await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                await this._closeUnmatchedTrip(tripId);
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
@@ -132,6 +153,7 @@ class TripMatchingService {
                 console.log(`❌ [MATCHING] No '${requestedTier}' drivers available for trip ${tripId}`);
                 await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
                 await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                await this._closeUnmatchedTrip(tripId);
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
@@ -172,6 +194,7 @@ class TripMatchingService {
                 console.log(`❌ [MATCHING] No drivers with sufficient wallet balance for trip ${tripId}`);
                 await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
                 await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
+                await this._closeUnmatchedTrip(tripId);
                 return { success: false, reason: 'No drivers available', driversNotified: 0 };
             }
 
