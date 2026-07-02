@@ -476,13 +476,26 @@ async function signupDriver(data) {
         console.log(`🆔 [UUID] ${uuid}`);
         console.log(`⏰ [EXPIRY] ${expires_at.toISOString()}`);
 
+        // Normalize vehicle_type to the platform's accepted tiers so NO client
+        // value can ever fail DriverProfile's isIn validation at OTP-verify time
+        // (old app builds offered Business/Premium/SUV/Van — map them sensibly).
+        const normalizeVehicleType = (raw) => {
+            const v = String(raw || '').trim().toLowerCase();
+            const map = {
+                economy: 'Economy', comfort: 'Comfort', luxury: 'Luxury',
+                standard: 'Standard', business: 'Comfort', premium: 'Luxury',
+                suv: 'Luxury', van: 'Standard', moto: 'Standard',
+            };
+            return map[v] || 'Standard';
+        };
+
         const driver_data = {
             cni_number,
             license_number,
             license_expiry: license_expiry || null,
             insurance_number: insurance_number || null,
             insurance_expiry: insurance_expiry || null,
-            vehicle_type: vehicle_type || 'Standard',
+            vehicle_type: normalizeVehicleType(vehicle_type),
             vehicle_make_model: vehicle_make_model || null,
             vehicle_color: vehicle_color || null,
             vehicle_year: vehicle_year ? parseInt(vehicle_year, 10) : null,
