@@ -116,15 +116,21 @@ async function sendBothSignupOtps({ uuid, email, phone_e164 }) {
             },
             null
         );
-        otpDelivery.email = {
-            delivery: emailOtp?.delivery || 'FAILED',
-            channel:  'EMAIL',
-            target:   email,
-        };
-        console.log(`✅ [OTP EMAIL] ${otpDelivery.email.delivery} → ${email}`);
+        // Only report the email channel when it was actually SENT. Clients pick
+        // their verification channel from otp_delivery — advertising a FAILED
+        // email would make them wait for a code that never arrives.
+        if (emailOtp?.delivery === 'SENT') {
+            otpDelivery.email = {
+                delivery: 'SENT',
+                channel:  'EMAIL',
+                target:   email,
+            };
+            console.log(`✅ [OTP EMAIL] SENT → ${email}`);
+        } else {
+            console.warn(`⚠️  [OTP EMAIL] not sent — omitted from otp_delivery (SMS is the required channel)`);
+        }
     } catch (emailErr) {
         console.warn(`⚠️  [OTP EMAIL] failed — continuing (SMS is the required channel): ${emailErr.message}`);
-        otpDelivery.email = { delivery: 'FAILED', channel: 'EMAIL', target: email };
     }
 
     // SMS OTP
