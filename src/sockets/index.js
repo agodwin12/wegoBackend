@@ -258,28 +258,44 @@ function setupSocketIO(server) {
 
                     const cancelPayload = { tripId, canceledBy: 'PASSENGER', reason: reason || 'Passenger canceled' };
 
-                    if (tripData.status === 'SEARCHING') {
-                        await rc.del(RK.ACTIVE_TRIP(tripId));
-                        await rc.del(`passenger:active_trip:${userId}`);
-                        await rc.del(`trip:timeout:${tripId}`);
-                    } else {
-                        const { Trip: TripModel } = require('../models');
-                        const dbTrip = await TripModel.findByPk(tripId);
-                        if (dbTrip) {
-                            dbTrip.status       = 'CANCELED';
-                            dbTrip.canceledBy   = 'PASSENGER';
-                            dbTrip.cancelReason = reason || null;
-                            dbTrip.canceledAt   = new Date();
-                            await dbTrip.save();
+                    // ALWAYS persist the cancellation to the DB. The trip row is
+                    // created at request time with status SEARCHING — the old code
+                    // skipped the DB update for SEARCHING trips, leaving the row
+                    // SEARCHING forever and permanently blocking the passenger
+                    // with "you already have an active trip".
+                    const { Trip: TripModel } = require('../models');
+                    const dbTrip = await TripModel.findByPk(tripId);
+                    if (dbTrip && dbTrip.status !== 'CANCELED' && dbTrip.status !== 'COMPLETED') {
+                        dbTrip.status       = 'CANCELED';
+                        dbTrip.canceledBy   = 'PASSENGER';
+                        dbTrip.cancelReason = reason || null;
+                        dbTrip.canceledAt   = new Date();
+                        await dbTrip.save();
+                    }
 
-                            await rc.del(RK.ACTIVE_TRIP(tripId));
-                            await rc.del(`passenger:active_trip:${userId}`);
-                            if (dbTrip.driverId) {
-                                await rc.del(`driver:active_trip:${dbTrip.driverId}`);
-                                io.to(`driver:${dbTrip.driverId}`).emit('trip:canceled', cancelPayload);
-                                io.to(`user:${dbTrip.driverId}`).emit('trip:canceled', cancelPayload);
-                            }
+                    // Dismiss the offer popup on any driver that received this
+                    // request while it was searching.
+                    try {
+                        const offers  = await rh.getJson(RK.TRIP_OFFERS(tripId));
+                        const offered = offers?.notifiedDrivers || offers?.drivers || [];
+                        for (const dId of offered) {
+                            io.to(`driver:${dId}`).emit('trip:request_expired', { tripId });
+                            io.to(`user:${dId}`).emit('trip:request_expired', { tripId });
                         }
+                    } catch (_) { /* best-effort */ }
+
+                    // Full Redis cleanup (mirror of the REST cancel path).
+                    await rc.del(RK.ACTIVE_TRIP(tripId));
+                    await rc.del(`passenger:active_trip:${userId}`);
+                    await rc.del(`trip:timeout:${tripId}`);
+                    await rc.del(RK.TRIP_OFFERS ? RK.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`);
+                    await rc.del(`trip:accepting:${tripId}`);
+                    await rc.del(`trip:no_expire:${tripId}`);
+
+                    if (dbTrip?.driverId) {
+                        await rc.del(`driver:active_trip:${dbTrip.driverId}`);
+                        io.to(`driver:${dbTrip.driverId}`).emit('trip:canceled', cancelPayload);
+                        io.to(`user:${dbTrip.driverId}`).emit('trip:canceled', cancelPayload);
                     }
 
                     socket.emit('trip:canceled', cancelPayload);
