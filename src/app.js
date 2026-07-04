@@ -33,7 +33,7 @@ const activityRoutes              = require('./routes/activity/activity.routes')
 
 // ─── Ride Hailing (public) ────────────────────────────────────────────────────
 const driverPublicRoutes          = require('./routes/driver.routes');
-const partnerFleetRoutes          = require('./routes/partner.routes');
+const fleetOwnerRoutes            = require('./routes/fleet.routes');
 const tripsPublicViewRoutes       = require('./routes/public/trips.routes');
 const fareRoutes                  = require('./routes/fareRoutes');
 const tripPublicRoutes            = require('./routes/trip.routes');
@@ -78,6 +78,7 @@ const employeeProfileRoutes       = require('./routes/backoffice/employeeProfile
 const passengerRoutes             = require('./routes/backoffice/passengerRoutes');
 const driverRoutes                = require('./routes/backoffice/driverRoutes');
 const partnerRoutes               = require('./routes/backoffice/partnerRoutes');
+const fleetOwnerAdminRoutes       = require('./routes/backoffice/fleetOwnerRoutes');
 
 // ─── Backoffice — Ride Hailing ────────────────────────────────────────────────
 const tripRoutes                  = require('./routes/backoffice/tripRoutes');
@@ -179,7 +180,7 @@ app.use('/api/payments', paymentRoutes);
 
 // ─── Ride Hailing ─────────────────────────────────────────────────────────────
 app.use('/api/driver',                driverPublicRoutes);
-app.use('/api/partner',               partnerFleetRoutes);          // partner fleet management
+app.use('/api/fleet',                 fleetOwnerRoutes);            // ride-hailing fleet-owner management
 app.use('/api/driver/wallet',         driverTopUpRoutes);           // ride-hailing driver wallet top-up
 app.use('/api/earnings/driver',       driverEarningsRoutes);
 
@@ -225,6 +226,7 @@ app.use('/api/employee/profile',     employeeProfileRoutes);
 app.use('/api/backoffice/passengers', passengerRoutes);
 app.use('/api/backoffice/drivers',    driverRoutes);
 app.use('/api/backoffice/partners',   partnerRoutes);
+app.use('/api/backoffice/fleet-owners', fleetOwnerAdminRoutes);   // ride-hailing fleet owners
 
 // ─── Ride Hailing ─────────────────────────────────────────────────────────────
 app.use('/api/backoffice/trips',           tripRoutes);

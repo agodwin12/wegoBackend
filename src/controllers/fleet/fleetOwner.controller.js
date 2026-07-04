@@ -1,24 +1,24 @@
-// src/controllers/partner/partner.controller.js
+// src/controllers/fleet/fleetOwner.controller.js
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// PARTNER FLEET API
+// FLEET-OWNER API
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// A PARTNER account (created by the company in the backoffice) manages a
+// A FLEET_OWNER account (created by the company in the backoffice) manages a
 // fleet of drivers it fully owns:
 //
-//   • create driver accounts (no OTP — the partner vouches; the driver gets
+//   • create driver accounts (no OTP — the fleet owner vouches; the driver gets
 //     credentials and behaves EXACTLY like a self-registered driver after:
 //     same app, same matching, same tier rules, same wallet)
 //   • suspend / reactivate (suspended drivers cannot log in)
 //   • delete a driver
 //   • top up a driver's wallet (same direct-credit flow drivers use today,
-//     ledger marked initiatedBy: 'partner')
+//     ledger marked initiatedBy: 'fleet_owner')
 //   • per-driver stats + fleet-level KPIs
 //
 // SECURITY: every driver-scoped endpoint verifies the driver belongs to the
-// requesting partner (accounts.partner_id === req.user.uuid). A partner can
-// never see or touch another partner's — or an independent — driver.
+// requesting fleet owner (accounts.fleet_owner_id === req.user.uuid). A fleet owner can
+// never see or touch another fleet owner's — or an independent — driver.
 // ═══════════════════════════════════════════════════════════════════════════
 
 'use strict';
@@ -50,23 +50,23 @@ function normalizeTier(raw) {
     return map[v] || 'Economy';
 }
 
-// ── Ownership guard: load a driver THIS partner owns, or 404 ─────────────────
-async function loadOwnedDriver(partnerUuid, driverUuid) {
+// ── Ownership guard: load a driver THIS fleet owner owns, or 404 ─────────────────
+async function loadOwnedDriver(ownerUuid, driverUuid) {
     return Account.findOne({
         where: {
             uuid:       driverUuid,
             user_type:  'DRIVER',
-            partner_id: partnerUuid,
+            fleet_owner_id: ownerUuid,
             status:     { [Op.ne]: 'DELETED' },  // soft-deleted = gone
         },
     });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// POST /api/partner/drivers — create a fleet driver
+// POST /api/fleet/drivers — create a fleet driver
 // ═══════════════════════════════════════════════════════════════════════════
 exports.createDriver = async (req, res) => {
-    const partnerUuid = req.user.uuid;
+    const ownerUuid = req.user.uuid;
 
     try {
         const {
@@ -116,10 +116,10 @@ exports.createDriver = async (req, res) => {
                 last_name,
                 civility:       civility   || null,
                 birth_date:     birth_date || null,
-                status:         'ACTIVE',       // partner is company-vetted → driver active immediately
+                status:         'ACTIVE',       // fleet owner is company-vetted → driver active immediately
                 email_verified: true,
                 phone_verified: true,
-                partner_id:     partnerUuid,    // fleet ownership
+                fleet_owner_id:     ownerUuid,    // fleet ownership
             }, { transaction: t });
 
             await DriverProfile.create({
@@ -134,7 +134,7 @@ exports.createDriver = async (req, res) => {
                 vehicle_color:      vehicle_color      || null,
                 vehicle_year:       vehicle_year ? parseInt(vehicle_year, 10) : null,
                 vehicle_plate,
-                verification_state: 'VERIFIED',      // vetted by the partner
+                verification_state: 'VERIFIED',      // vetted by the fleet owner
                 status:             'offline',
                 rating_avg:         0.0,
                 rating_count:       0,
@@ -153,7 +153,7 @@ exports.createDriver = async (req, res) => {
 
             await t.commit();
 
-            console.log(`✅ [PARTNER] Driver created: ${driverUuid} (partner ${partnerUuid})`);
+            console.log(`✅ [FLEET] Driver created: ${driverUuid} (fleet owner ${ownerUuid})`);
 
             return res.status(201).json({
                 success: true,
@@ -174,23 +174,23 @@ exports.createDriver = async (req, res) => {
             throw txErr;
         }
     } catch (error) {
-        console.error('❌ [PARTNER] createDriver error:', error.message);
+        console.error('❌ [FLEET] createDriver error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to create the driver. Please try again.', code: 'DRIVER_CREATE_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GET /api/partner/drivers — fleet list (with per-driver quick stats)
+// GET /api/fleet/drivers — fleet list (with per-driver quick stats)
 // ═══════════════════════════════════════════════════════════════════════════
 exports.listDrivers = async (req, res) => {
     try {
-        const partnerUuid = req.user.uuid;
+        const ownerUuid = req.user.uuid;
         const page   = Math.max(1, parseInt(req.query.page  || '1', 10));
         const limit  = Math.min(100, Math.max(5, parseInt(req.query.limit || '25', 10)));
         const offset = (page - 1) * limit;
 
         const { count, rows } = await Account.findAndCountAll({
-            where:      { partner_id: partnerUuid, user_type: 'DRIVER', status: { [Op.ne]: 'DELETED' } },
+            where:      { fleet_owner_id: ownerUuid, user_type: 'DRIVER', status: { [Op.ne]: 'DELETED' } },
             attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164', 'status', 'avatar_url', 'created_at'],
             order:      [['created_at', 'DESC']],
             limit, offset,
@@ -255,13 +255,13 @@ exports.listDrivers = async (req, res) => {
             pagination: { total: count, page, limit, totalPages: Math.ceil(count / limit) },
         });
     } catch (error) {
-        console.error('❌ [PARTNER] listDrivers error:', error.message);
+        console.error('❌ [FLEET] listDrivers error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to load your drivers.', code: 'FLEET_LIST_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GET /api/partner/drivers/:uuid — driver detail + full stats
+// GET /api/fleet/drivers/:uuid — driver detail + full stats
 // ═══════════════════════════════════════════════════════════════════════════
 exports.getDriver = async (req, res) => {
     try {
@@ -332,13 +332,13 @@ exports.getDriver = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('❌ [PARTNER] getDriver error:', error.message);
+        console.error('❌ [FLEET] getDriver error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to load this driver.', code: 'DRIVER_DETAIL_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PATCH /api/partner/drivers/:uuid/suspend | /reactivate
+// PATCH /api/fleet/drivers/:uuid/suspend | /reactivate
 // Suspended accounts are rejected by the login flow — driver cannot log in.
 // ═══════════════════════════════════════════════════════════════════════════
 exports.suspendDriver = async (req, res) => {
@@ -348,10 +348,10 @@ exports.suspendDriver = async (req, res) => {
 
         driver.status = 'SUSPENDED';
         await driver.save();
-        console.log(`⛔ [PARTNER] Driver ${driver.uuid} suspended by partner ${req.user.uuid}`);
+        console.log(`⛔ [FLEET] Driver ${driver.uuid} suspended by fleet owner ${req.user.uuid}`);
         return res.json({ success: true, message: 'Driver suspended — they can no longer log in or receive rides.', data: { uuid: driver.uuid, status: driver.status } });
     } catch (error) {
-        console.error('❌ [PARTNER] suspendDriver error:', error.message);
+        console.error('❌ [FLEET] suspendDriver error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to suspend this driver.', code: 'SUSPEND_FAILED' });
     }
 };
@@ -363,16 +363,16 @@ exports.reactivateDriver = async (req, res) => {
 
         driver.status = 'ACTIVE';
         await driver.save();
-        console.log(`✅ [PARTNER] Driver ${driver.uuid} reactivated by partner ${req.user.uuid}`);
+        console.log(`✅ [FLEET] Driver ${driver.uuid} reactivated by fleet owner ${req.user.uuid}`);
         return res.json({ success: true, message: 'Driver reactivated — they can log in and receive rides again.', data: { uuid: driver.uuid, status: driver.status } });
     } catch (error) {
-        console.error('❌ [PARTNER] reactivateDriver error:', error.message);
+        console.error('❌ [FLEET] reactivateDriver error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to reactivate this driver.', code: 'REACTIVATE_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DELETE /api/partner/drivers/:uuid
+// DELETE /api/fleet/drivers/:uuid
 // ═══════════════════════════════════════════════════════════════════════════
 exports.deleteDriver = async (req, res) => {
     try {
@@ -397,7 +397,7 @@ exports.deleteDriver = async (req, res) => {
             // driver disappears from the fleet, but ride records stay intact.
             driver.status = 'DELETED';
             await driver.save();
-            console.log(`🗑️  [PARTNER] Driver ${driver.uuid} soft-deleted (has ${tripCount} trips) by partner ${req.user.uuid}`);
+            console.log(`🗑️  [FLEET] Driver ${driver.uuid} soft-deleted (has ${tripCount} trips) by fleet owner ${req.user.uuid}`);
             return res.json({
                 success: true,
                 message: 'Driver account deleted. They can no longer log in; their trip history is kept for your records.',
@@ -421,22 +421,22 @@ exports.deleteDriver = async (req, res) => {
             throw txErr;
         }
 
-        console.log(`🗑️  [PARTNER] Driver ${req.params.uuid} hard-deleted by partner ${req.user.uuid}`);
+        console.log(`🗑️  [FLEET] Driver ${req.params.uuid} hard-deleted by fleet owner ${req.user.uuid}`);
         return res.json({ success: true, message: 'Driver account deleted.', data: { uuid: req.params.uuid, mode: 'hard' } });
     } catch (error) {
-        console.error('❌ [PARTNER] deleteDriver error:', error.message);
+        console.error('❌ [FLEET] deleteDriver error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to delete this driver.', code: 'DELETE_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// POST /api/partner/drivers/:uuid/topup — credit the driver's wallet
-// Same direct-credit flow drivers use themselves; ledger marks the partner.
+// POST /api/fleet/drivers/:uuid/topup — credit the driver's wallet
+// Same direct-credit flow drivers use themselves; ledger marks the fleet owner.
 // ═══════════════════════════════════════════════════════════════════════════
 exports.topupDriver = async (req, res) => {
     try {
-        const partnerUuid = req.user.uuid;
-        const driver = await loadOwnedDriver(partnerUuid, req.params.uuid);
+        const ownerUuid = req.user.uuid;
+        const driver = await loadOwnedDriver(ownerUuid, req.params.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver not found in your fleet.', code: 'DRIVER_NOT_FOUND' });
 
         const { amount, method, reference: externalRef, note } = req.body;
@@ -451,7 +451,7 @@ exports.topupDriver = async (req, res) => {
             ? `TOP_UP:PARTNER:${externalRef}`
             : `TOP_UP:PARTNER:${uuidv4()}`;
 
-        // Idempotency on partner-supplied references
+        // Idempotency on fleet owner-supplied references
         if (externalRef) {
             const dup = await DriverWalletTransaction.findOne({ where: { reference } });
             if (dup) {
@@ -481,13 +481,13 @@ exports.topupDriver = async (req, res) => {
                 type:         'TOP_UP',
                 amount:       parsedAmount,
                 balanceAfter: newBalance,
-                description:  `Fleet top-up by partner — ${parsedAmount.toLocaleString()} XAF${note ? ` (${note})` : ''}`,
+                description:  `Fleet top-up by fleet owner — ${parsedAmount.toLocaleString()} XAF${note ? ` (${note})` : ''}`,
                 reference,
                 topUpMethod:  method || 'PARTNER',
                 topUpRef:     externalRef || null,
                 metadata: {
-                    initiatedBy: 'partner',
-                    partnerId:   partnerUuid,
+                    initiatedBy: 'fleet_owner',
+                    partnerId:   ownerUuid,
                     driverId:    driver.uuid,
                     note:        note || null,
                 },
@@ -506,7 +506,7 @@ exports.topupDriver = async (req, res) => {
             return { txn, newBalance };
         });
 
-        console.log(`💰 [PARTNER] ${parsedAmount} XAF → driver ${driver.uuid} by partner ${partnerUuid}`);
+        console.log(`💰 [FLEET] ${parsedAmount} XAF → driver ${driver.uuid} by fleet owner ${ownerUuid}`);
 
         return res.json({
             success: true,
@@ -519,20 +519,20 @@ exports.topupDriver = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('❌ [PARTNER] topupDriver error:', error.message);
+        console.error('❌ [FLEET] topupDriver error:', error.message);
         return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Unable to top up this driver.', code: 'TOPUP_FAILED' });
     }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GET /api/partner/dashboard — fleet KPIs
+// GET /api/fleet/dashboard — fleet KPIs
 // ═══════════════════════════════════════════════════════════════════════════
 exports.dashboard = async (req, res) => {
     try {
-        const partnerUuid = req.user.uuid;
+        const ownerUuid = req.user.uuid;
 
         const fleet = await Account.findAll({
-            where:      { partner_id: partnerUuid, user_type: 'DRIVER', status: { [Op.ne]: 'DELETED' } },
+            where:      { fleet_owner_id: ownerUuid, user_type: 'DRIVER', status: { [Op.ne]: 'DELETED' } },
             attributes: ['uuid', 'status', 'first_name', 'last_name'],
         });
         const driverIds = fleet.map(d => d.uuid);
@@ -612,7 +612,7 @@ exports.dashboard = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('❌ [PARTNER] dashboard error:', error.message);
+        console.error('❌ [FLEET] dashboard error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to load your dashboard.', code: 'DASHBOARD_FAILED' });
     }
 };

@@ -14,6 +14,7 @@ const VerificationCode = require('./VerificationCode');
 const DriverDocument   = require('./DriverDocument');
 const PendingSignup    = require('./PendingSignup');
 const PartnerProfile   = require('./PartnerProfile');
+const FleetOwnerProfile = require('./FleetOwnerProfile');
 const Coupon           = require('./Coupon');
 const SupportTicket    = require('./SupportTicket');
 
@@ -95,7 +96,7 @@ const DeliveryWalletTopUp       = require('./DeliveryWalletTopUp')(sequelize);
 
 const _allModels = {
     Account, PassengerProfile, DriverProfile, VerificationCode, DriverDocument,
-    PendingSignup, PartnerProfile, Coupon, SupportTicket, Employee, RefreshToken,
+    PendingSignup, PartnerProfile, FleetOwnerProfile, Coupon, SupportTicket, Employee, RefreshToken,
     WegoPayment,
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
@@ -153,6 +154,10 @@ Employee.belongsTo(Account, { foreignKey: 'accountId', as: 'account' });
 
 Account.hasOne(PartnerProfile,    { foreignKey: 'accountId', sourceKey: 'uuid', as: 'partner_profile', onDelete: 'CASCADE' });
 PartnerProfile.belongsTo(Account, { foreignKey: 'accountId', targetKey: 'uuid', as: 'account' });
+
+// Ride-hailing fleet owner (distinct from rental partner)
+Account.hasOne(FleetOwnerProfile,    { foreignKey: 'accountId', sourceKey: 'uuid', as: 'fleet_owner_profile', onDelete: 'CASCADE' });
+FleetOwnerProfile.belongsTo(Account, { foreignKey: 'accountId', targetKey: 'uuid', as: 'account' });
 
 Account.hasMany(RefreshToken,   { foreignKey: 'account_uuid', sourceKey: 'uuid', as: 'refresh_tokens', onDelete: 'CASCADE' });
 RefreshToken.belongsTo(Account, { foreignKey: 'account_uuid', targetKey: 'uuid', as: 'account' });
@@ -508,6 +513,7 @@ module.exports = {
     Employee,
     Coupon,
     PartnerProfile,
+    FleetOwnerProfile,
 
     // ── Authentication ───────────────────────────────────────────────────────
     RefreshToken,

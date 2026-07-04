@@ -88,15 +88,16 @@ Account.init(
         },
 
         // ─────────────────────────────────────────────────────────────
-        // PARTNER FLEET OWNERSHIP
-        // The PARTNER account (accounts.uuid) that created/owns this
+        // FLEET OWNERSHIP (ride-hailing)
+        // The FLEET_OWNER account (accounts.uuid) that created/owns this
         // driver. NULL for independent drivers and non-driver accounts.
+        // Distinct from the vehicle-rental "Partner" concept.
         // ─────────────────────────────────────────────────────────────
-        partner_id: {
+        fleet_owner_id: {
             type: DataTypes.CHAR(36),
             allowNull: true,
             defaultValue: null,
-            comment: 'PARTNER account uuid that owns this driver — NULL for independents',
+            comment: 'FLEET_OWNER account uuid that owns this driver — NULL for independents',
         },
 
         // ─────────────────────────────────────────────────────────────
