@@ -33,6 +33,7 @@ const activityRoutes              = require('./routes/activity/activity.routes')
 
 // ─── Ride Hailing (public) ────────────────────────────────────────────────────
 const driverPublicRoutes          = require('./routes/driver.routes');
+const partnerFleetRoutes          = require('./routes/partner.routes');
 const tripsPublicViewRoutes       = require('./routes/public/trips.routes');
 const fareRoutes                  = require('./routes/fareRoutes');
 const tripPublicRoutes            = require('./routes/trip.routes');
@@ -178,6 +179,7 @@ app.use('/api/payments', paymentRoutes);
 
 // ─── Ride Hailing ─────────────────────────────────────────────────────────────
 app.use('/api/driver',                driverPublicRoutes);
+app.use('/api/partner',               partnerFleetRoutes);          // partner fleet management
 app.use('/api/driver/wallet',         driverTopUpRoutes);           // ride-hailing driver wallet top-up
 app.use('/api/earnings/driver',       driverEarningsRoutes);
 

@@ -88,6 +88,18 @@ Account.init(
         },
 
         // ─────────────────────────────────────────────────────────────
+        // PARTNER FLEET OWNERSHIP
+        // The PARTNER account (accounts.uuid) that created/owns this
+        // driver. NULL for independent drivers and non-driver accounts.
+        // ─────────────────────────────────────────────────────────────
+        partner_id: {
+            type: DataTypes.CHAR(36),
+            allowNull: true,
+            defaultValue: null,
+            comment: 'PARTNER account uuid that owns this driver — NULL for independents',
+        },
+
+        // ─────────────────────────────────────────────────────────────
         // GOOGLE OAUTH
         // ─────────────────────────────────────────────────────────────
         //
