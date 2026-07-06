@@ -56,7 +56,7 @@ module.exports = (sequelize) => {
             },
             listing_id: {
                 type:      DataTypes.INTEGER,
-                allowNull: false,
+                allowNull: true,  // NULL = provider-level subscription (not tied to one listing)
             },
             paid_by: {
                 type:      DataTypes.CHAR(36),

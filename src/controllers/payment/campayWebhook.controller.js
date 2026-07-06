@@ -273,6 +273,29 @@ async function _finalizeListingFee(payment, payload, io) {
         return;
     }
 
+    // ── PROVIDER-LEVEL SUBSCRIPTION (listing_id = null) ──────────────────────
+    // A paid subscription grants the provider a posting quota; there is no
+    // single listing to activate. Just mark the subscription active + set its
+    // validity window, then notify the provider.
+    if (adPayment.listing_id == null) {
+        const now  = new Date();
+        const exp  = new Date(now.getTime() + adPayment.duration_days_snapshot * 24 * 60 * 60 * 1000);
+        await adPayment.update({
+            status:          'active',
+            wego_payment_id: payment.id,
+            plan_starts_at:  now,
+            plan_expires_at: exp,
+        });
+        _emitToUser(io, adPayment.paid_by, 'subscription:activated', {
+            ad_payment_id:   adPayment.id,
+            plan_key:        adPayment.plan_key_snapshot,
+            listing_quota:   adPayment.plan?.listing_quota ?? null,
+            plan_expires_at: exp,
+        });
+        console.log(`✅ [WEBHOOK][SUBSCRIPTION] Subscription #${adPayment.id} activated for provider ${adPayment.paid_by} until ${exp.toISOString()}`);
+        return;
+    }
+
     const listing = await ServiceListing.findByPk(adPayment.listing_id);
     if (!listing) {
         console.error(`❌ [WEBHOOK][LISTING_FEE] ServiceListing ${adPayment.listing_id} not found`);

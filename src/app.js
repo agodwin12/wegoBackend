@@ -57,6 +57,7 @@ const serviceCategoryRoutes       = require('./routes/serviceCategory.routes');
 const serviceListingRoutes        = require('./routes/serviceListing.routes');
 const serviceRatingRoutes         = require('./routes/serviceRating.routes');
 const serviceAdPaymentRoutes      = require('./routes/serviceAdPayment.routes');
+const serviceSubscriptionRoutes   = require('./routes/serviceSubscription.routes');
 
 // ─── CamPay Payments ──────────────────────────────────────────────────────────
 // webhookRoutes MUST be imported before express.json() — raw body needed for
@@ -202,8 +203,9 @@ app.use('/api/deliveries/agent',         agentHistoryRoutes);         // agent d
 app.use('/api/deliveries',               deliveryRoutes);             // main delivery routes (catch-all last)
 
 // ─── Services Marketplace ─────────────────────────────────────────────────────
-app.use('/api/services/categories', serviceCategoryRoutes);
-app.use('/api/services/listings',   serviceListingRoutes);
+app.use('/api/services/categories',   serviceCategoryRoutes);
+app.use('/api/services/subscription', serviceSubscriptionRoutes);   // provider-level "buy plan then post"
+app.use('/api/services/listings',     serviceListingRoutes);
 app.use('/api/services/ratings',    serviceRatingRoutes);
 app.use('/api/services',            serviceAdPaymentRoutes);          // ad payment (broad path — after specific ones)
 app.use('/api/services/admin/plans', serviceListingPlanRoutes);
