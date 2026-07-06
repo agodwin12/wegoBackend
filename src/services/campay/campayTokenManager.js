@@ -30,10 +30,18 @@ class CamPayTokenManager {
 
         // ── Shortcut: permanent token configured ──────────────────────────────
         // Set CAMPAY_PERMANENT_TOKEN in .env to skip the token exchange entirely.
-        // Trim first: a blank-with-whitespace value (e.g. "   ") is truthy and
-        // would otherwise be sent as the token, breaking every CamPay call.
+        // Only use it if it looks like a REAL token: real CamPay tokens are long
+        // and contain no whitespace. This guards against a leaked placeholder /
+        // inline comment (e.g. "# leave blank to use ...") being parsed as the
+        // value — which CamPay rejects ("Token string should not contain spaces")
+        // and breaks every payment. When invalid, fall through to the working
+        // username/password exchange.
         const permanent = (process.env.CAMPAY_PERMANENT_TOKEN || '').trim();
-        if (permanent) {
+        const looksReal = permanent.length >= 40 && !/\s/.test(permanent) && !permanent.startsWith('#');
+        if (permanent && !looksReal) {
+            console.warn('⚠️  [CAMPAY TOKEN] CAMPAY_PERMANENT_TOKEN looks invalid (placeholder/comment/whitespace) — ignoring and using username/password exchange.');
+        }
+        if (looksReal) {
             return permanent;
         }
 
