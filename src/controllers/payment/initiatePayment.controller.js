@@ -229,8 +229,8 @@ exports.checkStatus = async (req, res) => {
                 console.log(`🔄 [STATUS POLL] Payment ${campayRef} synced from CamPay: ${newStatus}`);
 
                 // ── Run vertical finalizer (webhook may never arrive in sandbox) ──
+                const webhookCtrl = require('../payment/campayWebhook.controller');
                 if (newStatus === 'SUCCESSFUL') {
-                    const webhookCtrl = require('../payment/campayWebhook.controller');
                     if (webhookCtrl._finalizeFromPoll) {
                         webhookCtrl._finalizeFromPoll(
                             freshPayment,
@@ -240,6 +240,16 @@ exports.checkStatus = async (req, res) => {
                             console.error('❌ [STATUS POLL] _finalizeFromPoll error:', err.message);
                         });
                     }
+                } else if (webhookCtrl._finalizeFailedFromPoll) {
+                    // FAILED / EXPIRED detected via polling — close out the vertical
+                    // record too (e.g. mark a pending fleet TOP_UP transaction FAILED).
+                    webhookCtrl._finalizeFailedFromPoll(
+                        freshPayment,
+                        { reason: 'Payment failed or was cancelled (detected via polling).' },
+                        req.app.get('io')
+                    ).catch(err => {
+                        console.error('❌ [STATUS POLL] _finalizeFailedFromPoll error:', err.message);
+                    });
                 }
             }
         }

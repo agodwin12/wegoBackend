@@ -32,6 +32,7 @@ const {
     ServiceAdPayment,
     VehicleRental,
     DeliveryWalletTopUp,
+    DriverWalletTransaction,
 } = require('../../models');
 
 // ── Vertical identifiers ──────────────────────────────────────────────────────
@@ -42,6 +43,7 @@ const VERTICALS = {
     RENTAL:           'rental',
     LISTING_FEE:      'listing_fee',      // alias — resolves from ServiceAdPayment
     DELIVERY_TOPUP:   'delivery_topup',   // agent wallet reload via MoMo/Orange
+    FLEET_TOPUP:      'fleet_topup',      // fleet owner reloads a driver's wallet via MoMo/Orange
 };
 
 // Disbursements (withdrawals) are intentionally NOT supported — WeGo is
@@ -237,7 +239,7 @@ function _normalisePhone(phone) {
  *
  * service_request / listing_fee:
  *   verticalId = ServiceAdPayment.id
- *   Amount = ServiceAdPayment.amount_paid_xaf (from the plan price at creation time)
+ *   Amount = ServiceAdPayment.amount_snapshot (from the plan price at creation time)
  */
 async function _resolveAmountAndDescription(vertical, verticalId) {
     switch (vertical) {
@@ -256,7 +258,7 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
             const amount = parseFloat(delivery.total_price);
             if (!amount || amount <= 0) throw new Error(`[CAMPAY SERVICE] Delivery #${verticalId} has no price set`);
             return {
-                amount:      Math.floor(amount),
+                amount:      _demoCap(Math.floor(amount)),
                 description: `WeGo delivery payment (${delivery.delivery_code})`,
             };
         }
@@ -267,7 +269,7 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
         case VERTICALS.SERVICE_REQUEST:
         case VERTICALS.LISTING_FEE: {
             const adPayment = await ServiceAdPayment.findByPk(verticalId, {
-                attributes: ['id', 'amount_paid_xaf', 'status', 'plan_key_snapshot', 'listing_id'],
+                attributes: ['id', 'amount_snapshot', 'status', 'plan_key_snapshot', 'listing_id'],
             });
             if (!adPayment) {
                 throw new Error(`[CAMPAY SERVICE] ServiceAdPayment #${verticalId} not found`);
@@ -278,7 +280,7 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
                     `(status: ${adPayment.status}). Payment may have already been processed.`
                 );
             }
-            const amount = adPayment.amount_paid_xaf;
+            const amount = parseFloat(adPayment.amount_snapshot);
             if (!amount || amount <= 0) {
                 throw new Error(
                     `[CAMPAY SERVICE] ServiceAdPayment #${verticalId} has no payable amount. ` +
@@ -286,7 +288,7 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
                 );
             }
             return {
-                amount,
+                amount:      _demoCap(amount),
                 description: `WeGo listing ad — plan: ${adPayment.plan_key_snapshot} (listing #${adPayment.listing_id})`,
             };
         }
@@ -302,7 +304,7 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
             const amount = parseFloat(rental.totalPrice);
             if (!amount || amount <= 0) throw new Error(`[CAMPAY SERVICE] VehicleRental #${verticalId} has no price set`);
             return {
-                amount:      Math.floor(amount),
+                amount:      _demoCap(Math.floor(amount)),
                 description: 'WeGo car rental payment',
             };
         }
@@ -334,11 +336,55 @@ async function _resolveAmountAndDescription(vertical, verticalId) {
             };
         }
 
+        case VERTICALS.FLEET_TOPUP: {
+            // verticalId = DriverWalletTransaction.id (CHAR 36 UUID)
+            // The transaction row was created by fleetOwner.controller.topupDriver
+            // with type='TOP_UP' and topUpStatus='PENDING' BEFORE this function is
+            // called, so the amount is already locked in the DB.
+            const txn = await DriverWalletTransaction.findByPk(verticalId, {
+                attributes: ['id', 'amount', 'type', 'topUpStatus', 'driverId'],
+            });
+            if (!txn) {
+                throw new Error(`[CAMPAY SERVICE] DriverWalletTransaction #${verticalId} not found`);
+            }
+            if (txn.type !== 'TOP_UP' || txn.topUpStatus !== 'PENDING') {
+                throw new Error(
+                    `[CAMPAY SERVICE] DriverWalletTransaction #${verticalId} is not a pending top-up ` +
+                    `(type: ${txn.type}, topUpStatus: ${txn.topUpStatus}). It may already have been processed.`
+                );
+            }
+            const amount = parseInt(txn.amount, 10);
+            if (!amount || amount <= 0) {
+                throw new Error(`[CAMPAY SERVICE] DriverWalletTransaction #${verticalId} has no amount set`);
+            }
+            return {
+                amount,
+                description: `WeGo fleet driver wallet top-up (${amount.toLocaleString()} XAF)`,
+            };
+        }
+
         default:
             throw new Error(
                 `[CAMPAY SERVICE] _resolveAmountAndDescription: unknown vertical "${vertical}"`
             );
     }
+}
+
+/**
+ * DEMO/sandbox amount cap. The CamPay demo rejects any amount above 25 XAF.
+ * When CAMPAY_DEMO_MAX_XAF is set (e.g. 25), clamp pay-for-item charges so the
+ * whole app is testable end-to-end on the sandbox. Applied ONLY to pay-for-item
+ * verticals (delivery, rental, service) — NEVER to wallet top-ups, where the
+ * amount charged must equal the amount credited (the user simply enters ≤25).
+ * Leave CAMPAY_DEMO_MAX_XAF unset/0 in production to charge real amounts.
+ */
+function _demoCap(amount) {
+    const cap = parseInt(process.env.CAMPAY_DEMO_MAX_XAF || '0', 10);
+    if (cap > 0 && amount > cap) {
+        console.log(`🧪 [CAMPAY DEMO] Capping amount ${amount} → ${cap} XAF (CAMPAY_DEMO_MAX_XAF)`);
+        return cap;
+    }
+    return amount;
 }
 
 /**
@@ -352,6 +398,7 @@ function _verticalCode(vertical) {
         rental:          'RNT',
         listing_fee:     'LST',
         delivery_topup:  'DTUP',
+        fleet_topup:     'FTUP',
     };
     return codes[vertical] || 'UNK';
 }

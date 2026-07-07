@@ -200,7 +200,7 @@ exports.activateFreePlan = async (req, res) => {
             wego_payment_id:             null, // no CamPay call for free plan
             paid_by:                     providerUuid,
             plan_key_snapshot:           freePlan.plan_key,
-            amount_paid_xaf:             0,
+            amount_snapshot:             0,
             duration_days_snapshot:      freePlan.duration_days,
             is_hero_placement_snapshot:  false,
             plan_starts_at:              now,
@@ -353,7 +353,7 @@ exports.initiateAdPayment = async (req, res) => {
             wego_payment_id:            null, // filled by webhook after success
             paid_by:                    providerUuid,
             plan_key_snapshot:          plan.plan_key,
-            amount_paid_xaf:            plan.price_xaf,
+            amount_snapshot:            plan.price_xaf,
             duration_days_snapshot:     plan.duration_days,
             is_hero_placement_snapshot: plan.is_hero_placement,
             status:                     'pending_payment',
@@ -483,7 +483,7 @@ exports.getAdStatus = async (req, res) => {
                     id:              latestAdPayment.id,
                     status:          latestAdPayment.status,
                     plan_key:        latestAdPayment.plan_key_snapshot,
-                    amount_paid_xaf: latestAdPayment.amount_paid_xaf,
+                    amount_paid_xaf: latestAdPayment.amount_snapshot,
                     plan_starts_at:  latestAdPayment.plan_starts_at,
                     plan_expires_at: latestAdPayment.plan_expires_at,
                     plan:            latestAdPayment.plan,

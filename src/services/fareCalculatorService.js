@@ -10,12 +10,13 @@ const VEHICLE_TYPES = ['economy', 'comfort', 'luxury'];
 
 class FareCalculatorService {
     constructor() {
-        this.mapboxToken  = process.env.MAPBOX_ACCESS_TOKEN;
-        this.defaultCity  = process.env.DEFAULT_CITY || 'Douala';
+        // Maps stack: LocationIQ (OpenStreetMap) for routing + reverse geocoding.
+        this.locationIqKey = process.env.LOCATIONIQ_KEY;
+        this.defaultCity   = process.env.DEFAULT_CITY || 'Douala';
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🔹 Get route details from Mapbox Directions API
+    // 🔹 Get route details from the LocationIQ Directions API (OSRM)
     // ═══════════════════════════════════════════════════════════════
     async getRouteDetails(pickupLat, pickupLng, dropoffLat, dropoffLng) {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -24,22 +25,26 @@ class FareCalculatorService {
         console.log(`🏁 Destination: [${dropoffLat}, ${dropoffLng}]`);
 
         try {
-            // Mapbox expects lng,lat order (GeoJSON)
-            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/` +
+            // LocationIQ (OSRM) expects lng,lat order, coords in the path.
+            const url = `https://us1.locationiq.com/v1/directions/driving/` +
                 `${pickupLng},${pickupLat};${dropoffLng},${dropoffLat}`;
 
             const response = await axios.get(url, {
                 params: {
-                    access_token: this.mapboxToken,
-                    geometries:   'polyline',   // same encoding as Google (factor 1e5)
-                    overview:     'full',
-                    steps:        false,
-                    language:     'fr',
+                    key:        this.locationIqKey,
+                    geometries: 'polyline',   // encoded polyline, factor 1e5 (same as before)
+                    overview:   'full',
+                    steps:      false,
                 },
                 timeout: 8000,
             });
 
             const routes = response.data.routes;
+            if (response.data.code && response.data.code !== 'Ok') {
+                const err  = new Error('No driving route found between these locations.');
+                err.status = 400;
+                throw err;
+            }
             if (!routes || routes.length === 0) {
                 const err    = new Error('No driving route found between these locations.');
                 err.status   = 400;
@@ -66,12 +71,12 @@ class FareCalculatorService {
 
             const status = error.response?.status;
             if (status === 401 || status === 403) {
-                const err    = new Error('Mapbox access token invalid or unauthorized.');
+                const err    = new Error('LocationIQ key invalid or unauthorized.');
                 err.status   = 403;
                 throw err;
             }
             if (status === 429) {
-                const err    = new Error('Mapbox rate limit exceeded. Please try again later.');
+                const err    = new Error('LocationIQ rate limit exceeded. Please try again later.');
                 err.status   = 429;
                 throw err;
             }
@@ -82,36 +87,34 @@ class FareCalculatorService {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 🔹 Reverse geocode coordinates → city name via Mapbox
+    // 🔹 Reverse geocode coordinates → city name via LocationIQ
     // ═══════════════════════════════════════════════════════════════
     async detectCityFromCoords(lat, lng) {
         console.log(`🏙️  [FARE] detectCityFromCoords(${lat}, ${lng})`);
         try {
-            // Mapbox Geocoding: lng,lat order
-            const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json`;
-
-            const response = await axios.get(url, {
+            const response = await axios.get('https://us1.locationiq.com/v1/reverse', {
                 params: {
-                    access_token: this.mapboxToken,
-                    types:        'place,locality,district',
-                    language:     'fr',
-                    limit:        1,
+                    key:               this.locationIqKey,
+                    lat,
+                    lon:               lng,
+                    format:            'json',
+                    normalizeaddress:  1,
+                    'accept-language': 'fr',
                 },
                 timeout: 5000,
             });
 
-            const features = response.data.features || [];
-            if (!features.length) {
-                console.warn(`⚠️  [FARE] Reverse geocode empty — using DEFAULT_CITY`);
-                return this.defaultCity;
-            }
+            const addr = response.data.address || {};
+            // Prefer the most city-like field available.
+            let city = addr.city || addr.town || addr.village || addr.municipality ||
+                       addr.county || addr.state || this.defaultCity;
 
-            // Try to find a "place" type feature (city level) first
-            const feature = features[0];
-            const city    = feature.text || feature.place_name?.split(',')[0]?.trim() || this.defaultCity;
+            // Cameroon cities come back as arrondissements ("Douala V", "Yaoundé III").
+            // Strip a trailing Roman-numeral so it matches the PriceRule city ("Douala").
+            city = String(city).replace(/\s+[IVX]+$/i, '').trim();
 
             console.log(`✅ [FARE] Detected city: "${city}"`);
-            return city;
+            return city || this.defaultCity;
 
         } catch (error) {
             console.warn(`⚠️  [FARE] detectCityFromCoords() failed: ${error.message} — using DEFAULT_CITY`);

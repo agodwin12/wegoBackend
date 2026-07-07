@@ -6,6 +6,7 @@ const cors    = require('cors');
 const helmet  = require('helmet');
 const morgan  = require('morgan');
 const path    = require('path');
+const Sentry  = require('@sentry/node');
 
 const { corsOptions, globalLimiter, authLimiter } = require('./config/security');
 
@@ -161,6 +162,18 @@ app.get('/health', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SENTRY VERIFICATION (opt-in)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Enable with SENTRY_DEBUG_ROUTE=true, hit GET /debug-sentry once to confirm the
+// error lands in Sentry, then remove the env var. Off by default so it is never
+// reachable in normal production.
+if (process.env.SENTRY_DEBUG_ROUTE === 'true') {
+    app.get('/debug-sentry', () => {
+        throw new Error('WeGo backend Sentry test error (debug-sentry)');
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PUBLIC ROUTES  —  Mobile / Web
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -180,9 +193,13 @@ app.use('/api/activity',       activityRoutes);
 app.use('/api/payments', paymentRoutes);
 
 // ─── Ride Hailing ─────────────────────────────────────────────────────────────
+// ORDER MATTERS: /api/driver/wallet MUST be mounted BEFORE /api/driver.
+// driver.routes.js ends with a catch-all 404 ("The requested driver endpoint
+// does not exist"), so if /api/driver is matched first it swallows every
+// /api/driver/wallet/* request (e.g. POST /topup) before the wallet router runs.
+app.use('/api/driver/wallet',         driverTopUpRoutes);           // ride-hailing driver wallet top-up
 app.use('/api/driver',                driverPublicRoutes);
 app.use('/api/fleet',                 fleetOwnerRoutes);            // ride-hailing fleet-owner management
-app.use('/api/driver/wallet',         driverTopUpRoutes);           // ride-hailing driver wallet top-up
 app.use('/api/earnings/driver',       driverEarningsRoutes);
 
 // Trips — most specific sub-paths first, catch-all last
@@ -284,6 +301,11 @@ app.use((req, res) => {
         message: `Cannot ${req.method} ${req.originalUrl}`,
     });
 });
+
+// Sentry error handler — registered after all controllers and before our own
+// error-formatting middleware. It reports the error to Sentry, then the handler
+// below shapes the client response.
+Sentry.setupExpressErrorHandler(app);
 
 // Global error handler
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars

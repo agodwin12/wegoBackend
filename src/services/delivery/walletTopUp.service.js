@@ -62,7 +62,9 @@ const campayService = require('../campay/campayService');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MIN_TOPUP_AMOUNT = 500;      // XAF
+// Min is 25 XAF so the CamPay DEMO sandbox (caps at 25 XAF) can be tested
+// end-to-end. Raise back to 500 for production (or set MIN_TOPUP_XAF env).
+const MIN_TOPUP_AMOUNT = parseInt(process.env.MIN_TOPUP_XAF || '25', 10);  // XAF
 const MAX_TOPUP_AMOUNT = 500_000;  // XAF
 
 // Channels that go through the manual backoffice review flow
@@ -154,8 +156,6 @@ async function getOrCreateWallet(driverId, options = {}) {
         defaults: {
             driver_id:             driverId,
             balance:               0.00,
-            reserved_balance:      0.00,
-            total_topped_up:       0.00,
             total_earned:          0.00,
             total_cash_collected:  0.00,
             total_commission_paid: 0.00,
@@ -499,7 +499,7 @@ async function creditWalletAutomatically(topUpId) {
 
         // ── Update wallet ─────────────────────────────────────────────────────
         await wallet.increment(
-            { balance: creditAmount, total_topped_up: creditAmount },
+            { balance: creditAmount },
             { transaction: t }
         );
 
@@ -849,7 +849,7 @@ async function creditWallet(topUpId, employeeId = null) {
         const balanceAfter  = balanceBefore + creditAmount;
 
         await wallet.increment(
-            { balance: creditAmount, total_topped_up: creditAmount },
+            { balance: creditAmount },
             { transaction: t }
         );
 

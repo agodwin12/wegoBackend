@@ -131,8 +131,15 @@ exports.createListing = async (req, res) => {
         // POSTING GATE — active plan required
         // ─────────────────────────────────────────────────────────────────
 
+        // Only a plan whose period is still running counts as "active". A plan
+        // whose plan_expires_at has passed is treated as expired even if the row
+        // hasn't been flipped yet by the expiry job.
         const activePlan = await ServiceAdPayment.findOne({
-            where: { paid_by: provider_id, status: 'active' },
+            where: {
+                paid_by:         provider_id,
+                status:          'active',
+                plan_expires_at: { [Op.gt]: new Date() },
+            },
             include: [{ model: ServiceListingPlan, as: 'plan' }],
             order: [['plan_expires_at', 'DESC']],
         });
@@ -144,14 +151,27 @@ exports.createListing = async (req, res) => {
             });
         }
 
+        // QUOTA = posting credits for the CURRENT plan period. We count listings
+        // CREATED since this plan started (not the total live count), so the
+        // allowance resets each period: free = 1 post / 30 days, paid = N posts /
+        // period. Deleting a post does NOT refund the credit; rejected posts do
+        // not consume one.
         if (activePlan.plan?.listing_quota != null) {
             const listingCount = await ServiceListing.count({
-                where: { provider_id, status: { [Op.ne]: 'deleted' } },
+                where: {
+                    provider_id,
+                    created_at: { [Op.gte]: activePlan.plan_starts_at },
+                    status:     { [Op.ne]: 'rejected' },
+                },
             });
             if (listingCount >= activePlan.plan.listing_quota) {
+                const isFree = (activePlan.plan.price_xaf || 0) <= 0;
                 return res.status(403).json({
                     success: false,
-                    message: `You have reached your listing quota (${activePlan.plan.listing_quota}) for your current plan. Please upgrade to post more listings.`,
+                    code:    'QUOTA_REACHED',
+                    message: isFree
+                        ? `Free accounts can post 1 listing per month. You've used your free post for this period — upgrade to a paid plan to post more.`
+                        : `You've reached your plan's limit of ${activePlan.plan.listing_quota} posts for this period. Upgrade or wait for the next period to post more.`,
                 });
             }
         }

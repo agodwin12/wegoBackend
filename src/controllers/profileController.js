@@ -80,9 +80,27 @@ exports.updateProfile = async (req, res) => {
     try {
         const user = req.user;
         const userUuid = user.uuid;
-        const { firstName, lastName, civility, birthDate } = req.body;
+        const { firstName, lastName, civility, birthDate, email } = req.body;
 
         console.log('📱 [PROFILE CONTROLLER] Updating profile for user:', userUuid);
+
+        // ── Email change (self-service) ────────────────────────────────────
+        // Email is a login identifier, so validate format + uniqueness before
+        // applying. Only touched when a new, different address is supplied.
+        if (email !== undefined && email !== null && String(email).trim() !== '') {
+            const normalized = String(email).trim().toLowerCase();
+            if (normalized !== (user.email || '').toLowerCase()) {
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+                    return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
+                }
+                const { Op } = require('sequelize');
+                const taken = await Account.findOne({ where: { email: normalized, uuid: { [Op.ne]: userUuid } } });
+                if (taken) {
+                    return res.status(409).json({ success: false, message: 'This email is already in use by another account.', code: 'EMAIL_EXISTS' });
+                }
+                user.email = normalized;
+            }
+        }
 
         // Update fields (only if provided)
         if (firstName) user.first_name = firstName;
@@ -324,6 +342,17 @@ exports.changePassword = async (req, res) => {
         await user.save();
 
         console.log('✅ [PROFILE] Password changed for user:', userUuid);
+
+        // ── 🔔 SECURITY NOTIFICATION: password changed ────────────────────
+        try {
+            require('../services/NotificationService').send({
+                accountUuid: userUuid,
+                type:        'ACCOUNT_PASSWORD_CHANGED',
+                title:       'Mot de passe modifié',
+                body:        "Votre mot de passe vient d'être changé. Si ce n'est pas vous, contactez le support immédiatement.",
+                data:        { screen: 'security' },
+            });
+        } catch (_) { /* notification must never block the response */ }
 
         res.status(200).json({
             success: true,

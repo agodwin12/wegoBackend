@@ -16,6 +16,10 @@ const {
     ServiceAdPayment,
     ServiceListing,
     ServiceListingPlan,
+    DriverWallet,
+    DriverWalletTransaction,
+    Account,
+    sequelize,
 } = require('../../models');
 
 // ── Notification service (lazy — avoids circular dep at startup) ──────────────
@@ -66,12 +70,25 @@ exports._finalizeFromPoll = async (payment, payload, io) => {
             case 'rental':         await _finalizeRental(payment, payload, io);        break;
             case 'listing_fee':    await _finalizeListingFee(payment, payload, io);    break;
             case 'delivery_topup': await _finalizeDeliveryTopUp(payment, payload, io); break;
+            case 'fleet_topup':    await _finalizeFleetTopUp(payment, payload, io);    break;
             default:
                 console.log(`ℹ️  [POLL FINALIZER] No finalizer for vertical "${payment.vertical}"`);
         }
     } catch (err) {
         console.error(`❌ [POLL FINALIZER] Failed for ${payment.vertical} #${payment.vertical_id}:`, err.message);
         await _recordReconciliation(payment, err);
+    }
+};
+
+// Same as _finalizeFromPoll but for a FAILED/EXPIRED outcome detected by polling.
+// Without this, a poll-detected failure updates only the WegoPayment and leaves
+// the vertical's pending record (e.g. a fleet TOP_UP transaction) stuck PENDING.
+exports._finalizeFailedFromPoll = async (payment, payload, io) => {
+    console.log(`🔄 [POLL FINALIZER] FAILED vertical: ${payment.vertical}, id: ${payment.vertical_id}`);
+    try {
+        await _finalizeFailed(payment, payload, io);
+    } catch (err) {
+        console.error(`❌ [POLL FINALIZER] Failure handler failed for ${payment.vertical} #${payment.vertical_id}:`, err.message);
     }
 };
 
@@ -184,6 +201,7 @@ async function _finalizeSuccessful(payment, payload, io) {
             case 'rental':         await _finalizeRental(payment, payload, io);        break;
             case 'listing_fee':    await _finalizeListingFee(payment, payload, io);    break;
             case 'delivery_topup': await _finalizeDeliveryTopUp(payment, payload, io); break;
+            case 'fleet_topup':    await _finalizeFleetTopUp(payment, payload, io);    break;
             default:
                 console.log(`ℹ️  [WEBHOOK] vertical "${vertical}" has no finalizer — likely a disbursement.`);
         }
@@ -456,6 +474,114 @@ async function _finalizeDeliveryTopUp(payment, payload, io) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FLEET_TOPUP — a fleet owner topped up a driver's wallet via CamPay.
+// vertical_id = DriverWalletTransaction.id (the PENDING TOP_UP row).
+// This is the ONLY path that credits a fleet driver's wallet. Fully ACID and
+// idempotent: a duplicate webhook / poll finalisation is a no-op.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _finalizeFleetTopUp(payment, payload, io) {
+    const txnId = payment.vertical_id;
+    console.log(`💰 [WEBHOOK][FLEET_TOPUP] Processing top-up transaction ${txnId}`);
+
+    const t = await sequelize.transaction();
+    try {
+        // ── Lock the pending transaction row ──────────────────────────────────
+        const txn = await DriverWalletTransaction.findOne({
+            where: { id: txnId },
+            lock:  t.LOCK.UPDATE,
+            transaction: t,
+        });
+
+        if (!txn) {
+            await t.rollback();
+            console.error(`❌ [WEBHOOK][FLEET_TOPUP] Transaction ${txnId} not found`);
+            return;
+        }
+
+        // Idempotency: already credited → no-op.
+        if (txn.topUpStatus === 'COMPLETED') {
+            await t.rollback();
+            console.log(`ℹ️  [WEBHOOK][FLEET_TOPUP] Transaction ${txnId} already COMPLETED — skipping duplicate`);
+            return;
+        }
+        if (txn.topUpStatus !== 'PENDING') {
+            await t.rollback();
+            console.log(`ℹ️  [WEBHOOK][FLEET_TOPUP] Transaction ${txnId} is '${txn.topUpStatus}', not PENDING — skipping`);
+            return;
+        }
+
+        // ── Lock the wallet + apply the credit ────────────────────────────────
+        const wallet = await DriverWallet.findOne({
+            where: { id: txn.walletId },
+            lock:  t.LOCK.UPDATE,
+            transaction: t,
+        });
+        if (!wallet) {
+            await t.rollback();
+            console.error(`❌ [WEBHOOK][FLEET_TOPUP] Wallet ${txn.walletId} not found for transaction ${txnId}`);
+            return;
+        }
+
+        const amount        = parseInt(txn.amount, 10);
+        const balanceBefore  = parseInt(wallet.balance, 10) || 0;
+        const balanceAfter   = balanceBefore + amount;
+
+        await DriverWallet.update(
+            {
+                balance:     require('sequelize').literal(`balance + ${amount}`),
+                totalTopUps: require('sequelize').literal(`totalTopUps + ${amount}`),
+                lastTopUpAt: new Date(),
+            },
+            { where: { id: wallet.id }, transaction: t }
+        );
+
+        // Finalise the ledger row: mark COMPLETED and snapshot the real balance.
+        const operator = payload.operator || null;
+        const method   = operator === 'ORANGE' ? 'ORANGE_MONEY' : (operator === 'MTN' ? 'MTN_MOMO' : txn.topUpMethod);
+        await txn.update({
+            topUpStatus:  'COMPLETED',
+            balanceAfter,
+            ...(method ? { topUpMethod: method } : {}),
+        }, { transaction: t });
+
+        await t.commit();
+
+        console.log(
+            `✅ [WEBHOOK][FLEET_TOPUP] Transaction ${txnId} credited — ` +
+            `${amount.toLocaleString()} XAF | balance: ${balanceBefore.toLocaleString()} → ${balanceAfter.toLocaleString()}`
+        );
+
+        // ── Notify the driver + the fleet owner ───────────────────────────────
+        if (io) {
+            _emitToUser(io, txn.driverId, 'wallet:credited', {
+                transaction_id: txn.id, amount, new_balance: balanceAfter, source: 'fleet_topup',
+            });
+            const partnerId = txn.metadata?.partnerId || payment.initiated_by;
+            if (partnerId) {
+                _emitToUser(io, partnerId, 'fleet:topup_succeeded', {
+                    transaction_id: txn.id, driver_uuid: txn.driverId, amount, new_balance: balanceAfter,
+                });
+            }
+        }
+
+        try {
+            getNotificationService().send({
+                accountUuid: txn.driverId,
+                type:        'WALLET_TOPUP_SUCCESS',
+                title:       'Wallet topped up',
+                body:        `Your wallet was credited with ${amount.toLocaleString()} XAF by your fleet.`,
+                data:        { screen: 'wallet' },
+            }).catch(() => {});
+        } catch (_) { /* non-critical */ }
+
+    } catch (err) {
+        try { await t.rollback(); } catch (_) {}
+        console.error(`❌ [WEBHOOK][FLEET_TOPUP] Failed to credit transaction ${txnId}:`, err.message);
+        throw err;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FAILURE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -512,6 +638,28 @@ async function _finalizeFailed(payment, payload, io) {
                     body:        'Your wallet top-up was declined or cancelled. Please try again.',
                     data:        { screen: 'wallet' },
                 }).catch(() => {});
+            }
+            break;
+        }
+
+        case 'fleet_topup': {
+            // Mark the pending TOP_UP transaction FAILED. The wallet was never
+            // touched, so there is nothing to reverse — just close the record.
+            const txn = await DriverWalletTransaction.findByPk(vertical_id).catch(() => null);
+            if (txn && txn.topUpStatus === 'PENDING') {
+                await txn.update({ topUpStatus: 'FAILED' }).catch(() => {});
+                console.log(`ℹ️  [WEBHOOK][FLEET_TOPUP] Transaction ${vertical_id} marked FAILED — nothing credited`);
+                if (io && txn.driverId) {
+                    _emitToUser(io, txn.driverId, 'wallet:topup_failed', {
+                        transaction_id: txn.id, amount: parseInt(txn.amount, 10),
+                    });
+                }
+            }
+            if (initiated_by) {
+                _emitToUser(io, initiated_by, 'fleet:topup_failed', {
+                    transaction_id: vertical_id,
+                    message: 'The mobile money payment was declined or cancelled. The driver was not credited.',
+                });
             }
             break;
         }

@@ -441,6 +441,16 @@ async function handleTripComplete(socket, data, io) {
         io.to(`passenger:${trip.passengerId}`).emit('trip:status_changed', completedPayload);
         io.to(`passenger:${trip.passengerId}`).emit('trip:completed', completedPayload);
 
+        // ── 🔔 NOTIFICATION: Trip completed → passenger ───────────────────
+        // Push (not just socket) so a backgrounded/closed app still gets it.
+        getNotificationService().send({
+            accountUuid: trip.passengerId,
+            type:        'RIDE_PAYMENT_RECEIVED',
+            title:       'Course terminée',
+            body:        `Votre course est terminée${trip.fareFinal ? ` — ${Number(trip.fareFinal).toLocaleString('fr-FR')} XAF` : ''}. Merci d'avoir voyagé avec WeGo !`,
+            data:        { screen: 'trip', tripId: String(trip.id), status: 'COMPLETED' },
+        }).catch(() => {});
+
         socket.emit('trip:status:success', {
             tripId:  trip.id,
             status:  'COMPLETED',

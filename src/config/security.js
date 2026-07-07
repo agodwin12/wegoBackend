@@ -2,6 +2,7 @@
 'use strict';
 
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 
 // ═══════════════════════════════════════════════════════════════════════
 // CORS
@@ -47,12 +48,40 @@ const corsOptions = {
 // ═══════════════════════════════════════════════════════════════════════
 
 const WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
-const GLOBAL_MAX = Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 100;
-const AUTH_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX) || 10;
+// Generous per-KEY budget. The key is the authenticated user (see below), not
+// the IP, so a whole neighbourhood behind one carrier NAT no longer shares a
+// single bucket. ~3000 req / 15 min ≈ 3.3 req/s sustained per user — far above
+// what an active app session needs, while still stopping a runaway client.
+const GLOBAL_MAX = Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 3000;
+// Brute-force guard on credentials — keyed by account, so one person's bad
+// attempts never lock out other users on the same NAT.
+const AUTH_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX) || 30;
+
+// Key by authenticated user id when a Bearer token is present, else by IP.
+// The token is only *decoded* (not verified) to derive a stable bucket key —
+// forging it can't grant more quota, it just changes which bucket you land in.
+function userOrIpKey(req) {
+    const auth = req.headers.authorization || '';
+    if (auth.startsWith('Bearer ')) {
+        try {
+            const payload = jwt.decode(auth.slice(7));
+            if (payload && payload.uuid) return `u:${payload.uuid}`;
+        } catch (_) { /* fall through to IP */ }
+    }
+    return `ip:${req.ip}`;
+}
+
+// Auth limiter key: IP + the identifier being tried, so brute-force protection
+// is per-account and shared-NAT users don't throttle each other.
+function authKey(req) {
+    const id = (req.body && (req.body.identifier || req.body.email || req.body.phone_e164)) || '';
+    return `auth:${req.ip}:${String(id).toLowerCase()}`;
+}
 
 const globalLimiter = rateLimit({
     windowMs: WINDOW_MS,
     max: GLOBAL_MAX,
+    keyGenerator: userOrIpKey,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, error: 'Too many requests, please try again later.' },
@@ -64,6 +93,7 @@ const globalLimiter = rateLimit({
 const authLimiter = rateLimit({
     windowMs: WINDOW_MS,
     max: AUTH_MAX,
+    keyGenerator: authKey,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, error: 'Too many attempts, please try again later.' },

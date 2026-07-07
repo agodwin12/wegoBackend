@@ -1,5 +1,9 @@
 // server.js (in root directory - wegobackend/server.js)
 
+// Sentry must be initialised before anything else is required so its
+// OpenTelemetry auto-instrumentation can patch http/express/mysql2 at load time.
+require('./instrument');
+
 const path = require('path');
 require('dotenv').config({
     path:     path.resolve(__dirname, '.env'),

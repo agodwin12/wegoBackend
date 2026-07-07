@@ -34,9 +34,13 @@ const {
     DriverWalletTransaction,
     Trip,
 } = require('../../models');
+const campayService = require('../../services/campay/campayService');
+const { uploadFileToR2 } = require('../../middleware/upload');
 
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
-const MIN_TOPUP_XAF = 500;
+// Min is 25 XAF so the CamPay DEMO sandbox (which caps transactions at 25 XAF)
+// can be exercised end-to-end. Raise back to 500 for production.
+const MIN_TOPUP_XAF = parseInt(process.env.MIN_TOPUP_XAF || '25', 10);
 const MAX_TOPUP_XAF = 500000;
 
 const RIDE_TIERS = { economy: 'Economy', comfort: 'Comfort', luxury: 'Luxury' };
@@ -338,6 +342,83 @@ exports.getDriver = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// GET /api/fleet/drivers/:uuid/trips — paginated trip history for one driver
+// Scoped to the owner's driver; the fleet owner sees every trip + its details.
+// ═══════════════════════════════════════════════════════════════════════════
+exports.getDriverTrips = async (req, res) => {
+    try {
+        const driver = await loadOwnedDriver(req.user.uuid, req.params.uuid);
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found in your fleet.', code: 'DRIVER_NOT_FOUND' });
+
+        const page   = Math.max(1, parseInt(req.query.page)  || 1);
+        const limit  = Math.min(50, parseInt(req.query.limit) || 20);
+        const offset = (page - 1) * limit;
+
+        const where = { driverId: driver.uuid };
+        if (req.query.status) where.status = String(req.query.status).toUpperCase();
+
+        const { count, rows } = await Trip.findAndCountAll({
+            where,
+            order:      [['createdAt', 'DESC']],
+            limit,
+            offset,
+            attributes: [
+                'id', 'status', 'pickupAddress', 'dropoffAddress',
+                'fareFinal', 'paymentMethod', 'vehicleType',
+                'distanceM', 'canceledBy', 'tripCompletedAt', 'createdAt',
+            ],
+        });
+
+        return res.json({
+            success: true,
+            data: {
+                trips: rows.map(t => ({
+                    id:             t.id,
+                    status:         t.status,
+                    pickup:         t.pickupAddress,
+                    dropoff:        t.dropoffAddress,
+                    fare:           t.fareFinal != null ? parseInt(t.fareFinal, 10) : null,
+                    payment_method: t.paymentMethod || null,
+                    vehicle_type:   t.vehicleType || null,
+                    distance_km:    t.distanceM != null ? Math.round(parseFloat(t.distanceM) / 100) / 10 : null,
+                    canceled_by:    t.canceledBy || null,
+                    completed_at:   t.tripCompletedAt,
+                    created_at:     t.createdAt,
+                })),
+            },
+            meta: { total: count, page, limit, totalPages: Math.ceil(count / limit) },
+        });
+    } catch (error) {
+        console.error('❌ [FLEET] getDriverTrips error:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to load trips for this driver.', code: 'DRIVER_TRIPS_FAILED' });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /api/fleet/drivers/:uuid/avatar — upload a photo for a fleet driver
+// multipart/form-data, field name "avatar". Stored in R2, set on accounts.avatar_url.
+// ═══════════════════════════════════════════════════════════════════════════
+exports.uploadDriverAvatar = async (req, res) => {
+    try {
+        const driver = await loadOwnedDriver(req.user.uuid, req.params.uuid);
+        if (!driver) return res.status(404).json({ success: false, message: 'Driver not found in your fleet.', code: 'DRIVER_NOT_FOUND' });
+
+        if (!req.file || !req.file.buffer) {
+            return res.status(400).json({ success: false, message: 'An image file is required (field "avatar").', code: 'NO_FILE' });
+        }
+
+        const url = await uploadFileToR2(req.file, 'profiles');
+        await Account.update({ avatar_url: url }, { where: { uuid: driver.uuid } });
+
+        console.log(`🖼️  [FLEET] avatar updated for driver ${driver.uuid} by fleet owner ${req.user.uuid}`);
+        return res.json({ success: true, message: 'Driver photo updated.', data: { avatar_url: url } });
+    } catch (error) {
+        console.error('❌ [FLEET] uploadDriverAvatar error:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to upload the photo. Please try again.', code: 'AVATAR_UPLOAD_FAILED' });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PATCH /api/fleet/drivers/:uuid/suspend | /reactivate
 // Suspended accounts are rejected by the login flow — driver cannot log in.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -430,16 +511,40 @@ exports.deleteDriver = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// POST /api/fleet/drivers/:uuid/topup — credit the driver's wallet
-// Same direct-credit flow drivers use themselves; ledger marks the fleet owner.
+// POST /api/fleet/drivers/:uuid/topup — top up a driver's wallet via CamPay
+//
+// REAL MONEY FLOW. The fleet owner pays with their own MTN MoMo / Orange Money
+// number; CamPay collects from that number, and the driver's wallet is credited
+// ONLY when CamPay confirms the collection SUCCESSFUL (via webhook or status
+// poll). If the collection fails or is cancelled, nothing is credited.
+//
+//   1. Validate amount + payer phone
+//   2. Create a PENDING DriverWalletTransaction (type=TOP_UP, topUpStatus=PENDING).
+//      The wallet balance is NOT touched yet.
+//   3. Call campayService.initiateCollection(vertical='fleet_topup', verticalId=txn.id).
+//   4. Return { pending, campayRef, ussdCode } — the UI polls the payment status.
+//   5. _finalizeFleetTopUp (webhook/poll) credits the wallet on SUCCESSFUL,
+//      or marks the transaction topUpStatus=FAILED on FAILED.
 // ═══════════════════════════════════════════════════════════════════════════
 exports.topupDriver = async (req, res) => {
+    let pendingTxn = null;
     try {
         const ownerUuid = req.user.uuid;
         const driver = await loadOwnedDriver(ownerUuid, req.params.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver not found in your fleet.', code: 'DRIVER_NOT_FOUND' });
 
-        const { amount, method, reference: externalRef, note } = req.body;
+        const { amount, method, phone, note } = req.body;
+
+        // ── Payer phone (the MoMo/OM number CamPay will charge) ────────────────
+        if (!phone || !String(phone).trim()) {
+            return res.status(400).json({ success: false, message: 'A mobile money phone number to charge is required.', code: 'MISSING_PHONE' });
+        }
+
+        // topUpMethod records the channel for audit only. CamPay auto-detects the
+        // operator from the number; we only accept the mobile-money channels here.
+        const VALID_TOPUP_METHODS = ['MTN_MOMO', 'ORANGE_MONEY'];
+        const topUpMethod = VALID_TOPUP_METHODS.includes(method) ? method : null;
+
         const parsedAmount = parseInt(amount, 10);
         if (!parsedAmount || parsedAmount <= 0) {
             return res.status(400).json({ success: false, message: 'amount is required and must be a positive integer.', code: 'INVALID_AMOUNT' });
@@ -447,80 +552,103 @@ exports.topupDriver = async (req, res) => {
         if (parsedAmount < MIN_TOPUP_XAF) return res.status(400).json({ success: false, message: `Minimum top-up is ${MIN_TOPUP_XAF} XAF.`, code: 'AMOUNT_TOO_LOW' });
         if (parsedAmount > MAX_TOPUP_XAF) return res.status(400).json({ success: false, message: `Maximum top-up is ${MAX_TOPUP_XAF} XAF.`, code: 'AMOUNT_TOO_HIGH' });
 
-        const reference = externalRef
-            ? `TOP_UP:PARTNER:${externalRef}`
-            : `TOP_UP:PARTNER:${uuidv4()}`;
-
-        // Idempotency on fleet owner-supplied references
-        if (externalRef) {
-            const dup = await DriverWalletTransaction.findOne({ where: { reference } });
-            if (dup) {
-                return res.status(200).json({ success: true, duplicate: true, message: 'This top-up was already processed.' });
-            }
+        // ── Ensure the driver's wallet exists and is active ────────────────────
+        const [wallet] = await DriverWallet.findOrCreate({
+            where:    { driverId: driver.uuid },
+            defaults: { driverId: driver.uuid, balance: 0, status: 'ACTIVE', currency: 'XAF' },
+        });
+        if (wallet.status !== 'ACTIVE') {
+            return res.status(403).json({ success: false, message: 'This driver\'s wallet is not active. Contact support.', code: 'WALLET_INACTIVE' });
         }
 
-        const result = await sequelize.transaction(async (t) => {
-            const [wallet] = await DriverWallet.findOrCreate({
-                where:    { driverId: driver.uuid },
-                defaults: { driverId: driver.uuid, balance: 0, status: 'ACTIVE', currency: 'XAF' },
-                transaction: t,
-                lock: true,
+        // ── Idempotency: reuse an existing pending fleet top-up for the same
+        //    driver + amount created in the last 10 minutes (double-tap guard). ─
+        const recentCutoff = new Date(Date.now() - 10 * 60 * 1000);
+        const existing = await DriverWalletTransaction.findOne({
+            where: {
+                driverId:    driver.uuid,
+                type:        'TOP_UP',
+                topUpStatus: 'PENDING',
+                amount:      parsedAmount,
+                createdAt:   { [Op.gte]: recentCutoff },
+            },
+            order: [['createdAt', 'DESC']],
+        });
+        if (existing && existing.topUpRef) {
+            return res.status(200).json({
+                success: true,
+                pending: true,
+                resumed: true,
+                message: 'A top-up is already awaiting confirmation for this driver. Check the phone.',
+                data: { driver_uuid: driver.uuid, amount: parsedAmount, campay_ref: existing.topUpRef, transaction_id: existing.id },
             });
-            if (wallet.status !== 'ACTIVE') {
-                const err = new Error('This driver\'s wallet is not active. Contact support.');
-                err.status = 403;
-                throw err;
-            }
+        }
 
-            const newBalance = parseFloat(wallet.balance) + parsedAmount;
-
-            const txn = await DriverWalletTransaction.create({
-                id:           uuidv4(),
-                driverId:     driver.uuid,
-                walletId:     wallet.id,
-                type:         'TOP_UP',
-                amount:       parsedAmount,
-                balanceAfter: newBalance,
-                description:  `Fleet top-up by fleet owner — ${parsedAmount.toLocaleString()} XAF${note ? ` (${note})` : ''}`,
-                reference,
-                topUpMethod:  method || 'PARTNER',
-                topUpRef:     externalRef || null,
-                metadata: {
-                    initiatedBy: 'fleet_owner',
-                    partnerId:   ownerUuid,
-                    driverId:    driver.uuid,
-                    note:        note || null,
-                },
-                createdAt: new Date(),
-            }, { transaction: t });
-
-            await DriverWallet.update(
-                {
-                    balance:     literal(`balance + ${parsedAmount}`),
-                    totalTopUps: literal(`totalTopUps + ${parsedAmount}`),
-                    lastTopUpAt: new Date(),
-                },
-                { where: { id: wallet.id }, transaction: t }
-            );
-
-            return { txn, newBalance };
+        // ── Step 1: create the PENDING ledger row BEFORE calling CamPay ────────
+        // balanceAfter is a placeholder (current balance); it is finalised to the
+        // real post-credit balance only when the collection succeeds.
+        const currentBalance = parseInt(wallet.balance, 10) || 0;
+        pendingTxn = await DriverWalletTransaction.create({
+            id:           uuidv4(),
+            driverId:     driver.uuid,
+            walletId:     wallet.id,
+            type:         'TOP_UP',
+            amount:       parsedAmount,
+            balanceAfter: currentBalance,           // placeholder until credited
+            description:  `Fleet top-up via CamPay — ${parsedAmount.toLocaleString()} XAF${note ? ` (${note})` : ''}`,
+            reference:    `TOP_UP:FLEET:${uuidv4()}`,
+            topUpMethod,
+            topUpRef:     null,                     // set to campay_ref after initiation
+            topUpStatus:  'PENDING',
+            metadata: {
+                initiatedBy: 'fleet_owner',
+                partnerId:   ownerUuid,
+                driverId:    driver.uuid,
+                phone:       String(phone),
+                note:        note || null,
+            },
+            createdAt: new Date(),
         });
 
-        console.log(`💰 [FLEET] ${parsedAmount} XAF → driver ${driver.uuid} by fleet owner ${ownerUuid}`);
+        // ── Step 2: initiate the CamPay collection from the partner's number ───
+        let campayResult;
+        try {
+            campayResult = await campayService.initiateCollection({
+                vertical:    'fleet_topup',
+                verticalId:  pendingTxn.id,
+                phone,
+                initiatedBy: ownerUuid,
+            });
+        } catch (campayErr) {
+            // Collection could not even be started — mark FAILED, credit nothing.
+            await pendingTxn.update({ topUpStatus: 'FAILED', description: `${pendingTxn.description} — CamPay init failed` }).catch(() => {});
+            console.error('❌ [FLEET] topupDriver CamPay init failed:', campayErr.message);
+            const clean = campayErr.message?.replace('[CAMPAY SERVICE] ', '') || 'Could not start the mobile money payment.';
+            return res.status(502).json({ success: false, message: clean, code: 'CAMPAY_INIT_FAILED' });
+        }
 
-        return res.json({
+        // ── Step 3: store the campay_ref for webhook/poll correlation ──────────
+        await pendingTxn.update({ topUpRef: campayResult.campayRef });
+
+        console.log(`💳 [FLEET] Top-up initiated — ${parsedAmount} XAF for driver ${driver.uuid} by ${ownerUuid} | campay_ref ${campayResult.campayRef}`);
+
+        return res.status(200).json({
             success: true,
-            message: `Wallet credited with ${parsedAmount.toLocaleString()} XAF.`,
+            pending: true,
+            message: 'Payment initiated. Approve the prompt on the phone to complete the top-up.',
             data: {
-                driver_uuid: driver.uuid,
-                amount:      parsedAmount,
-                new_balance: result.newBalance,
-                reference,
+                driver_uuid:    driver.uuid,
+                amount:         parsedAmount,
+                campay_ref:     campayResult.campayRef,
+                ussd_code:      campayResult.ussdCode || null,
+                operator:       campayResult.operator || null,
+                transaction_id: pendingTxn.id,
             },
         });
     } catch (error) {
         console.error('❌ [FLEET] topupDriver error:', error.message);
-        return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Unable to top up this driver.', code: 'TOPUP_FAILED' });
+        if (pendingTxn) { await pendingTxn.update({ topUpStatus: 'FAILED' }).catch(() => {}); }
+        return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Unable to start the top-up.', code: 'TOPUP_FAILED' });
     }
 };
 
@@ -546,6 +674,7 @@ exports.dashboard = async (req, res) => {
                     earnings: { gross_all_time: 0, gross_this_month: 0, commission_paid: 0 },
                     wallets: { total_balance: 0 },
                     top_driver: null,
+                    series: [],
                 },
             });
         }
@@ -557,7 +686,10 @@ exports.dashboard = async (req, res) => {
 
         const completed = (extra = {}) => ({ driverId: { [Op.in]: driverIds }, status: 'COMPLETED', ...extra });
 
-        const [profiles, wallets, allAgg, monthAgg, tToday, tWeek, commissionAgg, topAgg] = await Promise.all([
+        // 14-day window for the trend charts.
+        const seriesStart = new Date(now); seriesStart.setHours(0, 0, 0, 0); seriesStart.setDate(seriesStart.getDate() - 13);
+
+        const [profiles, wallets, allAgg, monthAgg, tToday, tWeek, commissionAgg, topAgg, tripsByDay, topupsByDay] = await Promise.all([
             DriverProfile.findAll({ where: { account_id: { [Op.in]: driverIds } }, attributes: ['account_id', 'status'] }),
             DriverWallet.findAll({ where: { driverId: { [Op.in]: driverIds } }, attributes: [[fn('SUM', col('balance')), 'total']], raw: true }),
             Trip.findAll({ where: completed(), attributes: [[fn('COUNT', col('id')), 'n'], [fn('SUM', col('fareFinal')), 'gross']], raw: true }),
@@ -577,11 +709,43 @@ exports.dashboard = async (req, res) => {
                 limit:      1,
                 raw:        true,
             }),
+            // Trips per day (last 14 days)
+            Trip.findAll({
+                where:      completed({ tripCompletedAt: { [Op.gte]: seriesStart } }),
+                attributes: [[fn('DATE', col('tripCompletedAt')), 'd'], [fn('COUNT', col('id')), 'n'], [fn('SUM', col('fareFinal')), 'gross']],
+                group:      [literal('d')],
+                raw:        true,
+            }),
+            // Top-ups credited per day (last 14 days)
+            DriverWalletTransaction.findAll({
+                where:      { driverId: { [Op.in]: driverIds }, type: 'TOP_UP', topUpStatus: 'COMPLETED', createdAt: { [Op.gte]: seriesStart } },
+                attributes: [[fn('DATE', col('createdAt')), 'd'], [fn('SUM', col('amount')), 'amt']],
+                group:      [literal('d')],
+                raw:        true,
+            }),
         ]);
 
         const onlineCount = profiles.filter(p => p.status === 'online').length;
         const nameByUuid  = new Map(fleet.map(d => [d.uuid, `${d.first_name} ${d.last_name}`.trim()]));
         const top         = topAgg[0] || null;
+
+        // Build a contiguous 14-day series (zero-filled) for the charts.
+        // Use LOCAL date components (not toISOString/UTC) so the keys line up with
+        // MySQL DATE(createdAt) of DATETIME values and today's data isn't shifted.
+        const fmt = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        const tripsMap = new Map(tripsByDay.map(r => [String(r.d).slice(0, 10), r]));
+        const topupMap = new Map(topupsByDay.map(r => [String(r.d).slice(0, 10), r]));
+        const series = [];
+        for (let i = 0; i < 14; i++) {
+            const dt = new Date(seriesStart); dt.setDate(seriesStart.getDate() + i);
+            const key = fmt(dt);
+            series.push({
+                date:     key,
+                trips:    parseInt(tripsMap.get(key)?.n || 0, 10),
+                gross:    parseInt(tripsMap.get(key)?.gross || 0, 10),
+                topups:   parseInt(topupMap.get(key)?.amt || 0, 10),
+            });
+        }
 
         return res.json({
             success: true,
@@ -609,10 +773,139 @@ exports.dashboard = async (req, res) => {
                     name:  nameByUuid.get(top.driverId) || 'Driver',
                     trips_this_month: parseInt(top.trips, 10),
                 } : null,
+                series,
             },
         });
     } catch (error) {
         console.error('❌ [FLEET] dashboard error:', error.message);
         return res.status(500).json({ success: false, message: 'Unable to load your dashboard.', code: 'DASHBOARD_FAILED' });
+    }
+};
+
+// Helper: resolve the fleet owner's driver uuids + a name/avatar lookup map.
+async function loadFleetIndex(ownerUuid) {
+    const fleet = await Account.findAll({
+        where:      { fleet_owner_id: ownerUuid, user_type: 'DRIVER', status: { [Op.ne]: 'DELETED' } },
+        attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+    });
+    const ids     = fleet.map(d => d.uuid);
+    const byUuid  = new Map(fleet.map(d => [d.uuid, { name: `${d.first_name} ${d.last_name}`.trim(), avatar_url: d.avatar_url }]));
+    return { fleet, ids, byUuid };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET /api/fleet/trips — every trip across the whole fleet, with filters
+// Query: driver_uuid, status, from (YYYY-MM-DD), to, page, limit
+// ═══════════════════════════════════════════════════════════════════════════
+exports.getFleetTrips = async (req, res) => {
+    try {
+        const { ids, byUuid } = await loadFleetIndex(req.user.uuid);
+        if (ids.length === 0) return res.json({ success: true, data: { trips: [], drivers: [] }, meta: { total: 0, page: 1, limit: 20, totalPages: 0 } });
+
+        const page   = Math.max(1, parseInt(req.query.page)  || 1);
+        const limit  = Math.min(50, parseInt(req.query.limit) || 20);
+
+        const where = { driverId: { [Op.in]: ids } };
+        if (req.query.driver_uuid && byUuid.has(req.query.driver_uuid)) where.driverId = req.query.driver_uuid;
+        if (req.query.status) where.status = String(req.query.status).toUpperCase();
+        const dateFilter = {};
+        if (req.query.from) dateFilter[Op.gte] = new Date(req.query.from);
+        if (req.query.to)   { const t = new Date(req.query.to); t.setHours(23, 59, 59, 999); dateFilter[Op.lte] = t; }
+        if (Object.getOwnPropertySymbols(dateFilter).length) where.createdAt = dateFilter;
+
+        const { count, rows } = await Trip.findAndCountAll({
+            where,
+            order:      [['createdAt', 'DESC']],
+            limit,
+            offset:     (page - 1) * limit,
+            attributes: ['id', 'driverId', 'status', 'pickupAddress', 'dropoffAddress', 'fareFinal', 'paymentMethod', 'vehicleType', 'distanceM', 'canceledBy', 'tripCompletedAt', 'createdAt'],
+        });
+
+        return res.json({
+            success: true,
+            data: {
+                trips: rows.map(t => ({
+                    id:             t.id,
+                    driver_uuid:    t.driverId,
+                    driver_name:    byUuid.get(t.driverId)?.name || 'Driver',
+                    status:         t.status,
+                    pickup:         t.pickupAddress,
+                    dropoff:        t.dropoffAddress,
+                    fare:           t.fareFinal != null ? parseInt(t.fareFinal, 10) : null,
+                    payment_method: t.paymentMethod || null,
+                    vehicle_type:   t.vehicleType || null,
+                    distance_km:    t.distanceM != null ? Math.round(parseFloat(t.distanceM) / 100) / 10 : null,
+                    completed_at:   t.tripCompletedAt,
+                    created_at:     t.createdAt,
+                })),
+                // Driver list for the filter dropdown
+                drivers: [...byUuid.entries()].map(([uuid, d]) => ({ uuid, name: d.name })),
+            },
+            meta: { total: count, page, limit, totalPages: Math.ceil(count / limit) },
+        });
+    } catch (error) {
+        console.error('❌ [FLEET] getFleetTrips error:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to load trips.', code: 'FLEET_TRIPS_FAILED' });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET /api/fleet/topups — every wallet top-up the fleet owner made, per driver
+// Query: driver_uuid, status (PENDING|COMPLETED|FAILED), page, limit
+// ═══════════════════════════════════════════════════════════════════════════
+exports.getFleetTopups = async (req, res) => {
+    try {
+        const { ids, byUuid } = await loadFleetIndex(req.user.uuid);
+        if (ids.length === 0) return res.json({ success: true, data: { topups: [], drivers: [], summary: { total_credited: 0, count: 0 } }, meta: { total: 0, page: 1, limit: 20, totalPages: 0 } });
+
+        const page  = Math.max(1, parseInt(req.query.page)  || 1);
+        const limit = Math.min(50, parseInt(req.query.limit) || 20);
+
+        // Only top-ups initiated by the fleet owner (reference marks the source).
+        const where = {
+            driverId:  { [Op.in]: ids },
+            type:      'TOP_UP',
+            reference: { [Op.or]: [{ [Op.like]: 'TOP_UP:FLEET:%' }, { [Op.like]: 'TOP_UP:PARTNER:%' }] },
+        };
+        if (req.query.driver_uuid && byUuid.has(req.query.driver_uuid)) where.driverId = req.query.driver_uuid;
+        if (req.query.status) where.topUpStatus = String(req.query.status).toUpperCase();
+
+        const { count, rows } = await DriverWalletTransaction.findAndCountAll({
+            where,
+            order:      [['createdAt', 'DESC']],
+            limit,
+            offset:     (page - 1) * limit,
+            attributes: ['id', 'driverId', 'amount', 'topUpMethod', 'topUpStatus', 'topUpRef', 'metadata', 'description', 'createdAt'],
+        });
+
+        // Summary: total successfully credited (all-time, this owner).
+        const [summaryRow] = await DriverWalletTransaction.findAll({
+            where:      { driverId: (where.driverId), type: 'TOP_UP', topUpStatus: 'COMPLETED', reference: where.reference },
+            attributes: [[fn('SUM', col('amount')), 'total'], [fn('COUNT', col('id')), 'n']],
+            raw: true,
+        });
+
+        return res.json({
+            success: true,
+            data: {
+                topups: rows.map(t => ({
+                    id:          t.id,
+                    driver_uuid: t.driverId,
+                    driver_name: byUuid.get(t.driverId)?.name || 'Driver',
+                    amount:      parseInt(t.amount, 10),
+                    method:      t.topUpMethod || null,
+                    status:      t.topUpStatus || 'COMPLETED',
+                    phone:       t.metadata?.phone || null,
+                    campay_ref:  t.topUpRef || null,
+                    created_at:  t.createdAt,
+                })),
+                drivers: [...byUuid.entries()].map(([uuid, d]) => ({ uuid, name: d.name })),
+                summary: { total_credited: parseInt(summaryRow?.total || 0, 10), count: parseInt(summaryRow?.n || 0, 10) },
+            },
+            meta: { total: count, page, limit, totalPages: Math.ceil(count / limit) },
+        });
+    } catch (error) {
+        console.error('❌ [FLEET] getFleetTopups error:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to load top-ups.', code: 'FLEET_TOPUPS_FAILED' });
     }
 };

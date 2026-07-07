@@ -96,7 +96,8 @@ module.exports = (sequelize) => {
                     'service_request',
                     'rental',
                     'listing_fee',      // service listing ad plan payment
-                    'delivery_topup'    // delivery agent wallet reload
+                    'delivery_topup',   // delivery agent wallet reload
+                    'fleet_topup'       // fleet owner tops up a driver's wallet via CamPay
                 ),
                 allowNull: true,
                 comment:   'Which WeGo vertical triggered this payment. NULL for disbursements.',

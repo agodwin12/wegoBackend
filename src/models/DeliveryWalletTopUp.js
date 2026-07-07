@@ -204,7 +204,8 @@ module.exports = (sequelize) => {
                 type:      DataTypes.DECIMAL(12, 2),
                 allowNull: false,
                 validate: {
-                    min: { args: [500],    msg: 'Minimum top-up amount is 500 XAF' },
+                    // Min mirrors MIN_TOPUP_XAF (25 on the CamPay demo, 500 in prod).
+                    min: { args: [parseInt(process.env.MIN_TOPUP_XAF || '25', 10)], msg: 'Top-up amount is below the minimum.' },
                     max: { args: [500000], msg: 'Maximum single top-up is 500,000 XAF' },
                 },
                 get() {

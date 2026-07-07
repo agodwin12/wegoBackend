@@ -2,7 +2,15 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/auth.controller');
+const passwordReset = require('../controllers/passwordReset.controller');
 const { authenticate } = require('../middleware/auth.middleware');
+
+// ═══════════════════════════════════════════════════════════════════════
+// FORGOT / RESET PASSWORD (public — protected by the auth rate limiter)
+// ═══════════════════════════════════════════════════════════════════════
+router.post('/forgot-password',       passwordReset.forgotPassword);
+router.post('/reset-password/verify', passwordReset.verifyResetOtp);
+router.post('/reset-password',        passwordReset.resetPassword);
 
 // ═══════════════════════════════════════════════════════════════════════
 // REGISTRATION ROUTES
