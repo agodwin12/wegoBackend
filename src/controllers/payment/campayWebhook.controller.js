@@ -552,13 +552,18 @@ async function _finalizeFleetTopUp(payment, payload, io) {
             `${amount.toLocaleString()} XAF | balance: ${balanceBefore.toLocaleString()} → ${balanceAfter.toLocaleString()}`
         );
 
-        // ── Notify the driver + the fleet owner ───────────────────────────────
+        // Self-service driver top-up vs fleet-owner-initiated: word the
+        // notifications accordingly (both reuse the fleet_topup vertical).
+        const isSelfTopUp = txn.metadata?.initiatedBy === 'driver';
+
+        // ── Notify the driver (+ the fleet owner when applicable) ──────────────
         if (io) {
             _emitToUser(io, txn.driverId, 'wallet:credited', {
-                transaction_id: txn.id, amount, new_balance: balanceAfter, source: 'fleet_topup',
+                transaction_id: txn.id, amount, new_balance: balanceAfter,
+                source: isSelfTopUp ? 'driver_topup' : 'fleet_topup',
             });
             const partnerId = txn.metadata?.partnerId || payment.initiated_by;
-            if (partnerId) {
+            if (!isSelfTopUp && partnerId && partnerId !== txn.driverId) {
                 _emitToUser(io, partnerId, 'fleet:topup_succeeded', {
                     transaction_id: txn.id, driver_uuid: txn.driverId, amount, new_balance: balanceAfter,
                 });
@@ -569,8 +574,10 @@ async function _finalizeFleetTopUp(payment, payload, io) {
             getNotificationService().send({
                 accountUuid: txn.driverId,
                 type:        'WALLET_TOPUP_SUCCESS',
-                title:       'Wallet topped up',
-                body:        `Your wallet was credited with ${amount.toLocaleString()} XAF by your fleet.`,
+                title:       '💰 Wallet topped up!',
+                body:        isSelfTopUp
+                    ? `${amount.toLocaleString()} XAF added to your wallet. New balance: ${balanceAfter.toLocaleString()} XAF.`
+                    : `Your wallet was credited with ${amount.toLocaleString()} XAF by your fleet.`,
                 data:        { screen: 'wallet' },
             }).catch(() => {});
         } catch (_) { /* non-critical */ }

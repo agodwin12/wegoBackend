@@ -36,6 +36,7 @@
 const { v4: uuidv4 }  = require('uuid');
 const { Op, literal } = require('sequelize');
 const { sequelize, DriverWallet, DriverWalletTransaction, Account } = require('../models');
+const campayService = require('../services/campay/campayService');
 
 // ── Minimum and maximum top-up amounts ────────────────────────────────
 const MIN_TOPUP_XAF = parseInt(process.env.MIN_TOPUP_XAF || '500',    10);
@@ -64,12 +65,13 @@ const MAX_TOPUP_XAF = parseInt(process.env.MAX_TOPUP_XAF || '500000', 10);
 
 exports.driverTopUp = async (req, res, next) => {
     const driverId = req.user.uuid;
+    let pendingTxn = null;
 
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('💳 [TOP-UP] driverTopUp — Driver:', driverId);
 
     try {
-        const { amount, method, phone, reference: externalRef } = req.body;
+        const { amount, method, phone } = req.body;
 
         // ── Validation ─────────────────────────────────────────────────
         const parsedAmount = parseInt(amount, 10);
@@ -100,16 +102,16 @@ exports.driverTopUp = async (req, res, next) => {
             });
         }
 
-        const VALID_METHODS = ['MTN_MOMO', 'ORANGE_MONEY', 'CASH'];
+        const VALID_METHODS = ['MTN_MOMO', 'ORANGE_MONEY'];
         if (!method || !VALID_METHODS.includes(method)) {
             return res.status(400).json({
                 success: false,
-                message: `method must be one of: ${VALID_METHODS.join(', ')}.`,
+                message: 'method must be MTN_MOMO or ORANGE_MONEY. Cash top-ups are handled at an agency.',
                 code:    'INVALID_METHOD',
             });
         }
 
-        if (['MTN_MOMO', 'ORANGE_MONEY'].includes(method) && !phone) {
+        if (!phone) {
             return res.status(400).json({
                 success: false,
                 message: 'phone is required for mobile money top-ups.',
@@ -117,124 +119,106 @@ exports.driverTopUp = async (req, res, next) => {
             });
         }
 
-        // ── Build idempotency reference ─────────────────────────────────
-        // If the driver passes their own external ref (e.g. MoMo TxnID),
-        // use it directly. Otherwise generate a UUID-based one.
-        const reference = externalRef
-            ? `TOP_UP:DRIVER:${externalRef}`
-            : `TOP_UP:DRIVER:${uuidv4()}`;
-
-        // ── Check for duplicate ─────────────────────────────────────────
-        if (externalRef) {
-            const existing = await DriverWalletTransaction.findOne({
-                where: { reference },
-            });
-            if (existing) {
-                console.log(`⚠️  [TOP-UP] Duplicate reference ${reference} — returning existing`);
-                const wallet = await DriverWallet.findOne({ where: { driverId } });
-                return res.status(200).json({
-                    success:   true,
-                    duplicate: true,
-                    message:   'This top-up was already processed.',
-                    data: {
-                        transaction: _formatTransaction(existing),
-                        wallet:      _formatWallet(wallet),
-                    },
-                });
-            }
-        }
-
-        // ── Execute inside a DB transaction ─────────────────────────────
-        const result = await sequelize.transaction(async (t) => {
-
-            // Ensure wallet exists (findOrCreate is atomic)
-            const [wallet] = await DriverWallet.findOrCreate({
-                where:    { driverId },
-                defaults: {
-                    id:              uuidv4(),
-                    driverId,
-                    balance:         0,
-                    totalTopUps:     0,
-                    totalEarned:     0,
-                    totalCommission: 0,
-                    totalBonuses:    0,
-                    totalPayouts:    0,
-                    status:          'ACTIVE',
-                    currency:        'XAF',
-                },
-                transaction: t,
-                lock:        true,   // SELECT FOR UPDATE — prevents race conditions
-            });
-
-            if (wallet.status !== 'ACTIVE') {
-                const err = new Error(
-                    wallet.status === 'FROZEN'
-                        ? 'Your wallet is currently frozen. Please contact support.'
-                        : 'Your wallet is suspended. Please contact support.'
-                );
-                err.status = 403;
-                err.code   = `WALLET_${wallet.status}`;
-                throw err;
-            }
-
-            const newBalance = wallet.balance + parsedAmount;
-
-            // Write the ledger entry
-            const transaction = await DriverWalletTransaction.create({
-                id:           uuidv4(),
+        // ── Ensure the wallet exists and is active ──────────────────────
+        // We do NOT credit here — the wallet is credited only by the CamPay
+        // webhook/reconciliation finalizer once the mobile-money charge SUCCEEDS.
+        const [wallet] = await DriverWallet.findOrCreate({
+            where:    { driverId },
+            defaults: {
+                id:              uuidv4(),
                 driverId,
-                walletId:     wallet.id,
-                type:         'TOP_UP',
-                amount:       parsedAmount,
-                balanceAfter: newBalance,
-                description:  `Wallet top-up via ${_methodLabel(method)} — ${parsedAmount.toLocaleString()} XAF`,
-                reference,
-                topUpMethod:  method,
-                topUpRef:     externalRef || null,
-                metadata: {
-                    method,
-                    phone:       phone || null,
-                    initiatedBy: 'driver',
-                    driverId,
-                },
-                createdAt: new Date(),
-            }, { transaction: t });
-
-            // Update wallet balance + lifetime totalTopUps atomically
-            await DriverWallet.update(
-                {
-                    balance:     literal(`balance + ${parsedAmount}`),
-                    totalTopUps: literal(`totalTopUps + ${parsedAmount}`),
-                    lastTopUpAt: new Date(),
-                },
-                {
-                    where:       { id: wallet.id },
-                    transaction: t,
-                }
-            );
-
-            // Re-fetch updated wallet for response
-            const updatedWallet = await DriverWallet.findOne({
-                where:       { id: wallet.id },
-                transaction: t,
-            });
-
-            return { transaction, wallet: updatedWallet };
+                balance:         0,
+                totalTopUps:     0,
+                totalEarned:     0,
+                totalCommission: 0,
+                totalBonuses:    0,
+                totalPayouts:    0,
+                status:          'ACTIVE',
+                currency:        'XAF',
+            },
         });
 
-        console.log(`✅ [TOP-UP] Success — Driver: ${driverId} | +${parsedAmount} XAF | New balance: ${result.wallet.balance} XAF`);
+        if (wallet.status !== 'ACTIVE') {
+            return res.status(403).json({
+                success: false,
+                message: wallet.status === 'FROZEN'
+                    ? 'Your wallet is currently frozen. Please contact support.'
+                    : 'Your wallet is suspended. Please contact support.',
+                code:    `WALLET_${wallet.status}`,
+            });
+        }
+
+        // ── Step 1: create a PENDING ledger row BEFORE calling CamPay ────
+        // balanceAfter is a placeholder (current balance); it is finalised to
+        // the real post-credit balance only when the collection SUCCEEDS.
+        const currentBalance = parseInt(wallet.balance, 10) || 0;
+        pendingTxn = await DriverWalletTransaction.create({
+            id:           uuidv4(),
+            driverId,
+            walletId:     wallet.id,
+            type:         'TOP_UP',
+            amount:       parsedAmount,
+            balanceAfter: currentBalance,               // placeholder until credited
+            description:  `Wallet top-up via ${_methodLabel(method)} — ${parsedAmount.toLocaleString()} XAF`,
+            reference:    `TOP_UP:DRIVER:${uuidv4()}`,
+            topUpMethod:  method,
+            topUpRef:     null,                         // set to campay_ref after initiation
+            topUpStatus:  'PENDING',
+            metadata: {
+                method,
+                phone,
+                initiatedBy: 'driver',
+                driverId,
+            },
+            createdAt: new Date(),
+        });
+
+        // ── Step 2: initiate the CamPay collection (charge the driver's phone) ──
+        // Reuses the fleet_topup vertical: the finalizer credits a PENDING
+        // DriverWalletTransaction by id regardless of who initiated it.
+        let campayResult;
+        try {
+            campayResult = await campayService.initiateCollection({
+                vertical:    'fleet_topup',
+                verticalId:  pendingTxn.id,
+                phone,
+                initiatedBy: driverId,
+            });
+        } catch (campayErr) {
+            await pendingTxn.update({
+                topUpStatus: 'FAILED',
+                description: `${pendingTxn.description} — CamPay init failed`,
+            }).catch(() => {});
+            console.error('❌ [TOP-UP] driverTopUp CamPay init failed:', campayErr.message);
+            const clean = campayErr.message?.replace('[CAMPAY SERVICE] ', '')
+                || 'Could not start the mobile money payment. Please try again.';
+            return res.status(502).json({ success: false, message: clean, code: 'CAMPAY_INIT_FAILED' });
+        }
+
+        // Store the CamPay ref on the ledger row for traceability.
+        await pendingTxn.update({ topUpRef: campayResult.campayRef }).catch(() => {});
+
+        console.log(`✅ [TOP-UP] CamPay collection initiated — Driver: ${driverId} | ${parsedAmount} XAF | ref: ${campayResult.campayRef}`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         return res.status(201).json({
             success: true,
-            message: `Wallet topped up successfully. New balance: ${result.wallet.balance.toLocaleString()} XAF`,
+            pending: true,
+            message: 'Check your phone and enter your Mobile Money PIN to confirm the top-up.',
             data: {
-                transaction: _formatTransaction(result.transaction),
-                wallet:      _formatWallet(result.wallet),
+                transactionId: pendingTxn.id,
+                paymentId:     campayResult.paymentId,
+                campayRef:     campayResult.campayRef,
+                ussdCode:      campayResult.ussdCode,
+                operator:      campayResult.operator,
+                amount:        parsedAmount,
+                status:        'PENDING',
             },
         });
 
     } catch (error) {
+        if (pendingTxn) { await pendingTxn.update({ topUpStatus: 'FAILED' }).catch(() => {}); }
+
         // Re-throw business errors (wallet frozen/suspended) with their status
         if (error.status) return res.status(error.status).json({
             success: false,

@@ -6,6 +6,7 @@
 const cron           = require('node-cron');
 const { Op }         = require('sequelize');
 const { WegoPayment, Delivery } = require('../models');
+const campayService  = require('../services/campay/campayService');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 const EXPIRY_MINUTES = 15;
@@ -115,6 +116,80 @@ async function _resetVerticalState(vertical, verticalId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RECONCILIATION — poll CamPay for still-PENDING payments and finalize
+//
+// Resolution normally happens via the webhook (if CamPay can reach us) or the
+// app polling GET /payments/:ref/status. Neither is guaranteed: the webhook
+// needs a public HTTPS URL, and the app may be backgrounded/closed. Without a
+// server-side poll, a payment the customer actually completed would be force-
+// EXPIRED after the window (money in, service not delivered). This closes that
+// hole: every minute we ask CamPay for the authoritative status of each pending
+// payment and run the SAME finalizers the webhook uses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runReconciliation() {
+    const pending = await WegoPayment.findAll({
+        where:      { status: 'PENDING', campay_ref: { [Op.ne]: null } },
+        attributes: ['id', 'vertical', 'vertical_id', 'campay_ref', 'amount', 'operator', 'initiated_by', 'external_ref'],
+    });
+
+    if (pending.length === 0) return { checked: 0, resolved: 0 };
+
+    // io may not be ready at process start; the finalizers tolerate a null io
+    // (they skip the socket emit — the DB state is still updated).
+    let io = null;
+    try { io = require('../sockets').getIO(); } catch (_) { /* not initialised yet */ }
+
+    const webhookCtrl = require('../controllers/payment/campayWebhook.controller');
+    let resolved = 0;
+
+    for (const p of pending) {
+        try {
+            const s = await campayService.checkStatus(p.campay_ref);
+            if (!s || s.status === 'PENDING') continue;
+
+            let newStatus = s.status === 'SUCCESSFUL' ? 'SUCCESSFUL' : 'FAILED';
+
+            // Never credit on an amount mismatch — treat as FAILED.
+            if (newStatus === 'SUCCESSFUL') {
+                const paid = Math.round(Number(s.amount));
+                if (!Number.isFinite(paid) || paid !== p.amount) {
+                    console.error(`🚨 [RECONCILE] amount mismatch ${p.external_ref}: expected ${p.amount}, CamPay ${s.amount} — failing.`);
+                    newStatus = 'FAILED';
+                }
+            }
+
+            // Atomic transition — only one of {webhook, app-poll, reconcile} wins.
+            const [affected] = await WegoPayment.update(
+                {
+                    status:      newStatus,
+                    operator:    s.operator || p.operator,
+                    resolved_at: new Date(),
+                    ...(newStatus === 'FAILED' && { failure_reason: 'Resolved via reconciliation poll' }),
+                },
+                { where: { id: p.id, status: 'PENDING' } }
+            );
+            if (affected === 0) continue; // already resolved concurrently
+
+            await p.reload();
+            if (newStatus === 'SUCCESSFUL') {
+                await webhookCtrl._finalizeFromPoll(p, { operator: s.operator || p.operator }, io);
+            } else {
+                await webhookCtrl._finalizeFailedFromPoll(p, { reason: 'Payment failed or cancelled.' }, io);
+            }
+            resolved++;
+            console.log(`🔁 [RECONCILE] ${p.external_ref} (${p.vertical}) → ${newStatus}`);
+        } catch (err) {
+            // CamPay unreachable for this ref — leave PENDING, retry next tick.
+            console.warn(`⚠️  [RECONCILE] ${p.external_ref}: ${err.message}`);
+        }
+    }
+
+    if (resolved > 0) console.log(`✅ [RECONCILE] Resolved ${resolved}/${pending.length} pending payment(s)`);
+    return { checked: pending.length, resolved };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CRON SCHEDULE
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -126,14 +201,20 @@ async function _resetVerticalState(vertical, verticalId) {
  * or prevent the next tick from running.
  */
 function start() {
-    console.log(`⏰ [PAYMENT EXPIRY JOB] Started — checking every minute, expiry threshold: ${EXPIRY_MINUTES} minutes`);
+    console.log(`⏰ [PAYMENT JOB] Started — reconcile + expiry every minute, expiry threshold: ${EXPIRY_MINUTES} minutes`);
 
     cron.schedule(CRON_SCHEDULE, async () => {
+        // 1. Reconcile: poll CamPay for still-PENDING payments and finalize any
+        //    that resolved — payments never hang on a missed webhook / closed app.
+        try {
+            await runReconciliation();
+        } catch (err) {
+            console.error('❌ [PAYMENT RECONCILE] Unhandled error in cron run:', err.message);
+        }
+        // 2. Expire: only payments CamPay still reports as unresolved past the window.
         try {
             await runExpiryCheck();
         } catch (err) {
-            // Top-level catch — should never happen since runExpiryCheck handles
-            // its own errors, but belt-and-suspenders for unexpected DB failures.
             console.error('❌ [PAYMENT EXPIRY JOB] Unhandled error in cron run:', err.message);
         }
     });
@@ -145,6 +226,7 @@ function start() {
 
 module.exports = {
     start,
-    runExpiryCheck, // exported for manual runs and unit testing
-    EXPIRY_MINUTES, // exported so tests can reference the constant
+    runExpiryCheck,     // exported for manual runs and unit testing
+    runReconciliation,  // exported for manual runs and unit testing
+    EXPIRY_MINUTES,     // exported so tests can reference the constant
 };
