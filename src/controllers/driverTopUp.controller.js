@@ -39,7 +39,9 @@ const { sequelize, DriverWallet, DriverWalletTransaction, Account } = require('.
 const campayService = require('../services/campay/campayService');
 
 // ── Minimum and maximum top-up amounts ────────────────────────────────
-const MIN_TOPUP_XAF = parseInt(process.env.MIN_TOPUP_XAF || '500',    10);
+// Default 25 to stay testable against the CamPay demo (max 25 XAF) and to match
+// the delivery-agent + fleet top-up minimums. Raise for production via env.
+const MIN_TOPUP_XAF = parseInt(process.env.MIN_TOPUP_XAF || '25',     10);
 const MAX_TOPUP_XAF = parseInt(process.env.MAX_TOPUP_XAF || '500000', 10);
 
 // ═══════════════════════════════════════════════════════════════════════
