@@ -18,8 +18,13 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { sequelize, ServiceAdPayment, ServiceListingPlan, ServiceListing } = require('../models');
+const { sequelize, ServiceAdPayment, ServiceListingPlan, ServiceListing, WegoPayment } = require('../models');
 const campayService = require('../services/campay/campayService');
+
+// A pending subscription payment only blocks a new attempt while its CamPay
+// collection is still genuinely in progress (see the helper). Older/resolved
+// attempts are stale and get released so the provider can retry.
+const { isPaymentStillInProgress } = require('../utils/paymentFreshness');
 
 // The provider's current active subscription (not expired), or null.
 async function findActiveSubscription(providerUuid) {
@@ -143,12 +148,36 @@ exports.initiateSubscription = async (req, res) => {
             return res.status(400).json({ success: false, message: 'This is a free plan — use activate-free instead.' });
         }
 
+        // A previous subscription attempt may have left a pending_payment record.
+        // Only block if it is a GENUINELY in-progress CamPay collection (its
+        // WegoPayment is still PENDING and recent). Otherwise the record is stale
+        // (payment failed/expired, or CamPay was never reached) — cancel it and let
+        // the provider retry, instead of dead-locking them behind a permanent 409.
         const pending = await ServiceAdPayment.findOne({
             where: { paid_by: providerUuid, listing_id: null, status: 'pending_payment' },
+            order: [['created_at', 'DESC']],
         });
         if (pending) {
-            await t.rollback();
-            return res.status(409).json({ success: false, message: 'A subscription payment is already in progress. Please complete or cancel it first.', code: 'PAYMENT_IN_PROGRESS' });
+            const wp = await WegoPayment.findOne({
+                where: { vertical: 'listing_fee', vertical_id: String(pending.id) },
+                order: [['initiated_at', 'DESC']],
+            });
+            if (isPaymentStillInProgress(wp)) {
+                await t.rollback();
+                return res.status(409).json({
+                    success: false,
+                    message: 'A subscription payment is already in progress. Check your phone to complete it, or wait a few minutes and try again.',
+                    code:    'PAYMENT_IN_PROGRESS',
+                });
+            }
+
+            // Stale — release it so the provider can start a fresh payment.
+            await pending.update({
+                status:              'cancelled',
+                cancelled_at:        new Date(),
+                cancellation_reason: 'Superseded by a new payment attempt (previous attempt was not completed).',
+            }, { transaction: t });
+            console.log(`ℹ️  [SUBSCRIPTION] Released stale pending_payment #${pending.id} for provider ${providerUuid}`);
         }
 
         const now = new Date();
