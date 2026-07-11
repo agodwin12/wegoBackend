@@ -45,4 +45,16 @@ router.post(
     serviceListingAdminController.rejectListing
 );
 
+// @route   PATCH /api/services/admin/listings/:id
+// @desc    Edit a listing: hero toggle, boost, status, expiry, content fields
+// @access  Employee (admin, super_admin)
+// @body    { is_hero?, hero_expires_at?, boost_priority?, status?, plan_expires_at?,
+//            title?, description?, city?, pricing_type?, hourly_rate?,
+//            minimum_charge?, fixed_price?, emergency_service?, years_experience? }
+router.patch(
+    '/:id',
+    requireEmployeeRole('super_admin', 'admin'),
+    serviceListingAdminController.updateListing
+);
+
 module.exports = router;

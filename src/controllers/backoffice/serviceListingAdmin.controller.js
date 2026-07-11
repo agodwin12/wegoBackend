@@ -135,6 +135,10 @@ exports.getAllListings = async (req, res) => {
                     is_verified: providerData.user_type === 'driver',
                     is_driver: providerData.user_type === 'driver',
                     member_since: providerData.created_at,
+                    // Compatibility keys the backoffice detail modal reads directly:
+                    phone_e164: providerData.phone_e164 || '',
+                    avatar_url: providerData.avatar_url || null,
+                    user_type:  providerData.user_type || '',
                 };
             } else {
                 // Fallback if provider not found
@@ -368,6 +372,176 @@ exports.rejectListing = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Unable to reject listing. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// UPDATE / EDIT LISTING (Admin)
+// PATCH /api/services/admin/listings/:id
+// ───────────────────────────────────────────────────────────────────────
+// Lets an admin edit a listing directly: toggle hero placement, override
+// boost priority, change status (suspend / reactivate / etc.), adjust the
+// plan/hero expiry, and fix content (title, description, pricing, city…).
+// Only whitelisted fields are accepted; everything else is ignored.
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.updateListing = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const employee_id = req.user.id;
+
+        if (!id || isNaN(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid listing ID. Please provide a valid numeric ID.',
+            });
+        }
+
+        const listing = await ServiceListing.findByPk(id);
+        if (!listing) {
+            return res.status(404).json({ success: false, message: 'Listing not found.' });
+        }
+
+        const b = req.body || {};
+        const updates = {};
+
+        // ── Content fields ─────────────────────────────────────────────────
+        if (typeof b.title === 'string') {
+            const t = b.title.trim();
+            if (t.length < 3) {
+                return res.status(400).json({ success: false, message: 'Title must be at least 3 characters.' });
+            }
+            updates.title = t;
+        }
+        if (typeof b.description === 'string') updates.description = b.description;
+        if (typeof b.city === 'string')        updates.city = b.city.trim();
+        if (typeof b.certifications === 'string') updates.certifications = b.certifications;
+
+        if (b.pricing_type !== undefined) {
+            if (!['hourly', 'fixed', 'negotiable'].includes(b.pricing_type)) {
+                return res.status(400).json({ success: false, message: 'Invalid pricing_type.' });
+            }
+            updates.pricing_type = b.pricing_type;
+        }
+
+        const numOrNull = (v) => (v === null || v === '' || v === undefined ? null : Number(v));
+        for (const f of ['hourly_rate', 'minimum_charge', 'fixed_price']) {
+            if (b[f] !== undefined) {
+                const n = numOrNull(b[f]);
+                if (n !== null && (Number.isNaN(n) || n < 0)) {
+                    return res.status(400).json({ success: false, message: `Invalid ${f}.` });
+                }
+                updates[f] = n;
+            }
+        }
+
+        if (b.emergency_service !== undefined) updates.emergency_service = !!b.emergency_service;
+        if (b.years_experience !== undefined) {
+            updates.years_experience =
+                b.years_experience === null || b.years_experience === '' ? null : parseInt(b.years_experience);
+        }
+
+        // ── Admin controls: status ─────────────────────────────────────────
+        const ALLOWED_STATUS = [
+            'draft', 'pending_review', 'active', 'expired',
+            'rejected', 'inactive', 'hero_pending', 'suspended',
+        ];
+        if (b.status !== undefined) {
+            if (!ALLOWED_STATUS.includes(b.status)) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Invalid status. Allowed: ${ALLOWED_STATUS.join(', ')}.`,
+                });
+            }
+            updates.status = b.status;
+        }
+
+        // ── Admin controls: boost priority ─────────────────────────────────
+        if (b.boost_priority !== undefined) {
+            const bp = parseInt(b.boost_priority);
+            if (Number.isNaN(bp) || bp < 0) {
+                return res.status(400).json({ success: false, message: 'boost_priority must be a non-negative integer.' });
+            }
+            updates.boost_priority = bp;
+        }
+
+        // ── Admin controls: plan expiry ────────────────────────────────────
+        if (b.plan_expires_at !== undefined) {
+            updates.plan_expires_at = b.plan_expires_at ? new Date(b.plan_expires_at) : null;
+        }
+
+        // ── Admin controls: hero placement ─────────────────────────────────
+        let heroTurnedOn = false;
+        if (b.is_hero !== undefined) {
+            const nextHero = !!b.is_hero;
+            if (nextHero && !listing.is_hero) {
+                heroTurnedOn = true;
+                updates.is_hero          = true;
+                updates.hero_approved_at = new Date();
+                // Default a 30-day hero window if none supplied and none set.
+                if (b.hero_expires_at === undefined && !listing.hero_expires_at) {
+                    updates.hero_expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+                }
+            } else if (!nextHero) {
+                updates.is_hero          = false;
+                updates.hero_approved_at = null;
+                updates.hero_expires_at  = null;
+            }
+        }
+        // Explicit hero expiry override (only meaningful when hero is/stays on)
+        if (b.hero_expires_at !== undefined && updates.is_hero !== false) {
+            updates.hero_expires_at = b.hero_expires_at ? new Date(b.hero_expires_at) : null;
+        }
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({ success: false, message: 'No valid fields provided to update.' });
+        }
+
+        await listing.update(updates);
+
+        console.log(
+            `✏️ [LISTING_ADMIN] Listing ${listing.listing_id} updated by employee ${employee_id}:`,
+            Object.keys(updates).join(', ')
+        );
+
+        // Notify the provider when we put their listing on the hero carousel.
+        if (heroTurnedOn) {
+            NotificationService.send({
+                accountUuid: listing.provider_id,
+                type:        'SERVICE_LISTING_FEATURED',
+                title:       'Your listing is now featured! ⭐',
+                body:        `"${listing.title}" is now showcased in the hero carousel.`,
+                data:        { screen: 'my_listings', listing_id: String(listing.id) },
+            }).catch(err => console.warn('⚠️ [NOTIF] hero push failed:', err.message));
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Listing updated successfully.',
+            listing: {
+                id:              listing.id,
+                listing_id:      listing.listing_id,
+                title:           listing.title,
+                status:          listing.status,
+                is_hero:         listing.is_hero,
+                hero_expires_at: listing.hero_expires_at,
+                boost_priority:  listing.boost_priority,
+                plan_expires_at: listing.plan_expires_at,
+                pricing_type:    listing.pricing_type,
+                hourly_rate:     listing.hourly_rate,
+                minimum_charge:  listing.minimum_charge,
+                fixed_price:     listing.fixed_price,
+                city:            listing.city,
+            },
+        });
+
+    } catch (error) {
+        console.error('❌ [LISTING_ADMIN] Error in updateListing:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to update listing. Please try again later.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined,
         });
     }
