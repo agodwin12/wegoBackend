@@ -36,7 +36,10 @@ const corsOptions = {
     },
     credentials: String(process.env.CORS_CREDENTIALS || 'true') === 'true',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key'],
+    // NB: 'Cache-Control' and 'Pragma' are required because the backoffice
+    // sends `Cache-Control: no-cache` on GETs to bust caching. Without them the
+    // browser's CORS preflight rejects the request and the fetch fails.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'Cache-Control', 'Pragma'],
 };
 
 // ═══════════════════════════════════════════════════════════════════════
