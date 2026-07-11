@@ -60,16 +60,58 @@ exports.getMySubscription = async (req, res) => {
             data: {
                 active:             true,
                 plan_key:           sub.plan_key_snapshot,
+                plan_label:         sub.plan?.label_fr || sub.plan?.label_en || sub.plan_key_snapshot,
+                amount:             parseFloat(sub.amount_snapshot || 0),
                 listing_quota:      quota,
                 listings_used:      used,
                 listings_remaining: quota != null ? Math.max(0, quota - used) : null,
+                can_post:           quota == null ? true : used < quota,
                 boost_priority:     sub.plan?.boost_priority ?? 0,
+                plan_starts_at:     sub.plan_starts_at,
                 plan_expires_at:    sub.plan_expires_at,
             },
         });
     } catch (err) {
         console.error('❌ [SUBSCRIPTION] getMySubscription:', err.message);
         return res.status(500).json({ success: false, message: 'Unable to load your subscription.' });
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/services/subscription/history — the provider's subscription payments
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getSubscriptionHistory = async (req, res) => {
+    try {
+        const providerUuid = req.user.uuid;
+        const page  = Math.max(1, parseInt(req.query.page)  || 1);
+        const limit = Math.min(50, parseInt(req.query.limit) || 20);
+
+        const { rows, count } = await ServiceAdPayment.findAndCountAll({
+            where:   { paid_by: providerUuid, listing_id: null },
+            include: [{ model: ServiceListingPlan, as: 'plan', attributes: ['label_fr', 'label_en', 'plan_key'] }],
+            order:   [['created_at', 'DESC']],
+            limit,
+            offset:  (page - 1) * limit,
+            attributes: ['id', 'plan_key_snapshot', 'amount_snapshot', 'status', 'plan_starts_at', 'plan_expires_at', 'created_at'],
+        });
+
+        return res.json({
+            success: true,
+            data: rows.map(r => ({
+                id:         r.id,
+                plan_key:   r.plan_key_snapshot,
+                plan_label: r.plan?.label_fr || r.plan?.label_en || r.plan_key_snapshot,
+                amount:     parseFloat(r.amount_snapshot || 0),
+                status:     r.status,               // active | pending_payment | cancelled | expired
+                starts_at:  r.plan_starts_at,
+                expires_at: r.plan_expires_at,
+                created_at: r.created_at,
+            })),
+            meta: { total: count, page, limit, totalPages: Math.ceil(count / limit) },
+        });
+    } catch (err) {
+        console.error('❌ [SUBSCRIPTION] getSubscriptionHistory:', err.message);
+        return res.status(500).json({ success: false, message: 'Unable to load subscription history.' });
     }
 };
 

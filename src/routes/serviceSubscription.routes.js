@@ -9,6 +9,7 @@ const { authenticateToken } = require('../middleware/auth.middleware');
 router.use(authenticateToken);
 
 router.get('/mine',              ctrl.getMySubscription);
+router.get('/history',           ctrl.getSubscriptionHistory);
 router.post('/activate-free',    ctrl.activateFreeSubscription);
 router.post('/initiate-payment', ctrl.initiateSubscription);
 

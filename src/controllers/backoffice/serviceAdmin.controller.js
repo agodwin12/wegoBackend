@@ -219,3 +219,171 @@ exports.getAdminAdPayments = async (req, res) => {
         return res.status(500).json({ success: false, message: 'Failed to load plan sales', error: err.message });
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /api/services/admin/subscriptions
+// Provider-level subscriptions (ServiceAdPayment where listing_id = null),
+// with subscriber KPIs + combined services-ad revenue.
+// ═══════════════════════════════════════════════════════════════════════
+exports.getSubscriptions = async (req, res) => {
+    try {
+        const { status, plan, page = 1, limit = 50 } = req.query;
+        const where = { listing_id: null };
+        if (status && status !== 'all') where.status = status;
+        if (plan   && plan   !== 'all') where.plan_key_snapshot = plan;
+
+        const offset = (parseInt(page) - 1) * parseInt(limit);
+
+        const { count, rows } = await ServiceAdPayment.findAndCountAll({
+            where,
+            include: [
+                { model: ServiceListingPlan, as: 'plan',  attributes: ['label_fr', 'label_en', 'plan_key', 'listing_quota', 'boost_priority'], required: false },
+                { model: Account,            as: 'payer', attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'email'], required: false },
+            ],
+            order:  [['created_at', 'DESC']],
+            limit:  parseInt(limit),
+            offset,
+        });
+
+        // listings-used per provider — one grouped query (no N+1)
+        const providerIds = [...new Set(rows.map(r => r.paid_by))];
+        let usedByProvider = {};
+        if (providerIds.length) {
+            const usedRows = await ServiceListing.findAll({
+                where:      { provider_id: { [Op.in]: providerIds }, status: { [Op.ne]: 'deleted' } },
+                attributes: ['provider_id', [fn('COUNT', col('id')), 'cnt']],
+                group:      ['provider_id'],
+                raw:        true,
+            });
+            usedByProvider = Object.fromEntries(usedRows.map(u => [u.provider_id, parseInt(u.cnt, 10)]));
+        }
+
+        // KPIs
+        const now = new Date();
+        const in7 = new Date(now.getTime() + 7 * 86400000);
+        const [activeSubscribers, expiringSoon] = await Promise.all([
+            ServiceAdPayment.count({ where: { listing_id: null, status: 'active', plan_expires_at: { [Op.gt]: now } } }),
+            ServiceAdPayment.count({ where: { listing_id: null, status: 'active', plan_expires_at: { [Op.gt]: now, [Op.lte]: in7 } } }),
+        ]);
+
+        // Combined services-ad revenue (subscriptions + per-listing ads).
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const monthAgo   = new Date(Date.now() - 30 * 86400000);
+        const revWhere   = { status: { [Op.in]: ['active', 'expired'] } };
+        const sumAmount  = (extra = {}) => ServiceAdPayment.findAll({
+            attributes: [[fn('SUM', col('amount_snapshot')), 't']],
+            where:      { ...revWhere, ...extra },
+            raw:        true,
+        }).then(r => parseFloat(r[0]?.t ?? 0));
+        const [revTotal, rev30d, revToday] = await Promise.all([
+            sumAmount(),
+            sumAmount({ created_at: { [Op.gte]: monthAgo } }),
+            sumAmount({ created_at: { [Op.gte]: todayStart } }),
+        ]);
+
+        const subscriptions = rows.map(r => ({
+            id:             r.id,
+            provider_uuid:  r.paid_by,
+            provider_name:  `${r.payer?.first_name ?? ''} ${r.payer?.last_name ?? ''}`.trim() || '—',
+            provider_phone: r.payer?.phone_e164 ?? '',
+            provider_email: r.payer?.email ?? '',
+            plan_key:       r.plan_key_snapshot,
+            plan_label:     r.plan?.label_fr || r.plan?.label_en || r.plan_key_snapshot,
+            amount:         parseFloat(r.amount_snapshot ?? 0),
+            status:         r.status,
+            started_at:     r.plan_starts_at,
+            expires_at:     r.plan_expires_at,
+            listings_used:  usedByProvider[r.paid_by] ?? 0,
+            listing_quota:  r.plan?.listing_quota ?? null,
+            notes:          r.notes ?? null,
+            created_at:     r.createdAt,
+        }));
+
+        return res.json({
+            success: true,
+            data: {
+                subscriptions,
+                pagination: { total: count, page: parseInt(page), limit: parseInt(limit) },
+                stats: {
+                    active_subscribers: activeSubscribers,
+                    expiring_7d:        expiringSoon,
+                    revenue_total:      revTotal,
+                    revenue_30d:        rev30d,
+                    revenue_today:      revToday,
+                },
+            },
+        });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] getSubscriptions:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch subscriptions', error: err.message });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST /api/services/admin/subscriptions/:id/cancel   body: { reason? }
+// ═══════════════════════════════════════════════════════════════════════
+exports.cancelSubscription = async (req, res) => {
+    try {
+        const { id }     = req.params;
+        const { reason } = req.body || {};
+        const empId   = req.employee?.id;
+        const empName = `${req.employee?.first_name || ''} ${req.employee?.last_name || ''}`.trim()
+            || req.employee?.name || 'Admin';
+
+        const sub = await ServiceAdPayment.findOne({ where: { id, listing_id: null } });
+        if (!sub) return res.status(404).json({ success: false, message: 'Subscription not found.' });
+        if (sub.status === 'cancelled') {
+            return res.json({ success: true, message: 'Already cancelled.', data: { id: sub.id, status: 'cancelled' } });
+        }
+
+        await sub.update({
+            status: 'cancelled',
+            notes:  `Cancelled by ${empName} (#${empId})${reason ? `: ${reason}` : ''} on ${new Date().toISOString()}`.slice(0, 300),
+        });
+        console.log(`🧾 [SERVICE_ADMIN] Subscription #${id} cancelled by employee #${empId}${reason ? ` (${reason})` : ''}`);
+        return res.json({ success: true, message: 'Subscription cancelled.', data: { id: sub.id, status: 'cancelled' } });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] cancelSubscription:', err);
+        return res.status(500).json({ success: false, message: 'Failed to cancel subscription.' });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST /api/services/admin/subscriptions/:id/extend   body: { days }
+// ═══════════════════════════════════════════════════════════════════════
+exports.extendSubscription = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const days   = parseInt(req.body?.days, 10);
+        const empId   = req.employee?.id;
+        const empName = `${req.employee?.first_name || ''} ${req.employee?.last_name || ''}`.trim()
+            || req.employee?.name || 'Admin';
+
+        if (!days || days <= 0 || days > 3650) {
+            return res.status(400).json({ success: false, message: 'days must be a positive number (max 3650).' });
+        }
+
+        const sub = await ServiceAdPayment.findOne({ where: { id, listing_id: null } });
+        if (!sub) return res.status(404).json({ success: false, message: 'Subscription not found.' });
+        if (sub.status === 'cancelled' || sub.status === 'refunded') {
+            return res.status(409).json({ success: false, message: `Cannot extend a ${sub.status} subscription.` });
+        }
+
+        // Extend from the later of now / current expiry, so an expired plan revives cleanly.
+        const base = sub.plan_expires_at && new Date(sub.plan_expires_at) > new Date()
+            ? new Date(sub.plan_expires_at)
+            : new Date();
+        const newExpiry = new Date(base.getTime() + days * 86400000);
+
+        await sub.update({
+            plan_expires_at: newExpiry,
+            status:          'active',
+            notes:           `Extended +${days}d by ${empName} (#${empId}) on ${new Date().toISOString()}`.slice(0, 300),
+        });
+        console.log(`🧾 [SERVICE_ADMIN] Subscription #${id} extended +${days}d by employee #${empId} → ${newExpiry.toISOString()}`);
+        return res.json({ success: true, message: `Extended by ${days} day(s).`, data: { id: sub.id, status: 'active', plan_expires_at: newExpiry } });
+    } catch (err) {
+        console.error('❌ [SERVICE_ADMIN] extendSubscription:', err);
+        return res.status(500).json({ success: false, message: 'Failed to extend subscription.' });
+    }
+};

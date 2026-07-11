@@ -43,4 +43,30 @@ router.get(
     serviceAdminController.getAdminAdPayments
 );
 
+// ═══════════════════════════════════════════════════════════════════════
+// PROVIDER SUBSCRIPTIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+// @route   GET /api/services/admin/subscriptions
+// @desc    List provider subscriptions + KPIs + combined ad revenue
+router.get(
+    '/subscriptions',
+    requireEmployeeRole('super_admin', 'admin', 'manager', 'accountant'),
+    serviceAdminController.getSubscriptions
+);
+
+// @route   POST /api/services/admin/subscriptions/:id/cancel
+router.post(
+    '/subscriptions/:id/cancel',
+    requireEmployeeRole('super_admin', 'admin', 'manager'),
+    serviceAdminController.cancelSubscription
+);
+
+// @route   POST /api/services/admin/subscriptions/:id/extend
+router.post(
+    '/subscriptions/:id/extend',
+    requireEmployeeRole('super_admin', 'admin', 'manager'),
+    serviceAdminController.extendSubscription
+);
+
 module.exports = router;
