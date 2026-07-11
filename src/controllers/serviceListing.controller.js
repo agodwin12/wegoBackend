@@ -310,9 +310,13 @@ exports.getAllListings = async (req, res) => {
             max_price,
             min_rating,
             search,
+            hero,
             sort_by = 'created_at',
             sort_order = 'desc',
         } = req.query;
+
+        // Hero carousel request: only currently-featured, non-expired listings.
+        const heroOnly = hero === 'true' || hero === '1' || hero === true;
 
         // ─────────────────────────────────────────────────────────────────
         // BUILD WHERE CLAUSE
@@ -330,6 +334,19 @@ exports.getAllListings = async (req, res) => {
         ];
 
         const where = { status: 'active' };
+
+        // Hero carousel: only listings currently featured (is_hero) whose hero
+        // window hasn't lapsed. This makes hero self-expiring at query time even
+        // if no cron has flipped the flag yet.
+        if (heroOnly) {
+            where.is_hero = true;
+            andConditions.push({
+                [Op.or]: [
+                    { hero_expires_at: null },
+                    { hero_expires_at: { [Op.gt]: new Date() } },
+                ],
+            });
+        }
 
         // FULLTEXT search — scales to millions of rows (vs a LIKE '%term%' scan).
         if (search) {
@@ -450,6 +467,8 @@ exports.getAllListings = async (req, res) => {
                 updatedAt: listingData.updatedAt,
                 boost_priority: listingData.boost_priority,
                 plan_expires_at: listingData.plan_expires_at,
+                is_hero: listingData.is_hero,
+                hero_expires_at: listingData.hero_expires_at,
                 category: listingData.category,
                 provider: listingData.provider,
                 provider_phone: listingData.provider?.phone_e164 || null,
