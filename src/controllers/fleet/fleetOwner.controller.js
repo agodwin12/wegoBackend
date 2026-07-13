@@ -818,8 +818,33 @@ exports.getFleetTrips = async (req, res) => {
             order:      [['createdAt', 'DESC']],
             limit,
             offset:     (page - 1) * limit,
-            attributes: ['id', 'driverId', 'status', 'pickupAddress', 'dropoffAddress', 'fareFinal', 'paymentMethod', 'vehicleType', 'distanceM', 'canceledBy', 'tripCompletedAt', 'createdAt'],
+            attributes: ['id', 'driverId', 'passengerId', 'status', 'pickupAddress', 'dropoffAddress', 'fareFinal', 'paymentMethod', 'vehicleType', 'distanceM', 'canceledBy', 'tripCompletedAt', 'createdAt'],
         });
+
+        // ── Enrich each trip with the passenger carried + the exact WeGo
+        //    commission taken from the driver's wallet for that trip.
+        const tripIds      = rows.map(t => t.id);
+        const passengerIds = [...new Set(rows.map(t => t.passengerId).filter(Boolean))];
+
+        const [passengers, commissionRows] = await Promise.all([
+            passengerIds.length
+                ? Account.findAll({
+                    where:      { uuid: { [Op.in]: passengerIds } },
+                    attributes: ['uuid', 'first_name', 'last_name'],
+                    raw:        true,
+                })
+                : [],
+            tripIds.length
+                ? DriverWalletTransaction.findAll({
+                    where:      { tripId: { [Op.in]: tripIds }, type: 'COMMISSION' },
+                    attributes: ['tripId', [fn('SUM', fn('ABS', col('amount'))), 'commission']],
+                    group:      ['tripId'],
+                    raw:        true,
+                })
+                : [],
+        ]);
+        const passengerName    = new Map(passengers.map(p => [p.uuid, `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Passenger']));
+        const commissionByTrip = new Map(commissionRows.map(c => [c.tripId, Math.round(parseFloat(c.commission || 0))]));
 
         return res.json({
             success: true,
@@ -828,10 +853,12 @@ exports.getFleetTrips = async (req, res) => {
                     id:             t.id,
                     driver_uuid:    t.driverId,
                     driver_name:    byUuid.get(t.driverId)?.name || 'Driver',
+                    passenger_name: t.passengerId ? (passengerName.get(t.passengerId) || 'Passenger') : null,
                     status:         t.status,
                     pickup:         t.pickupAddress,
                     dropoff:        t.dropoffAddress,
                     fare:           t.fareFinal != null ? parseInt(t.fareFinal, 10) : null,
+                    commission:     commissionByTrip.has(t.id) ? commissionByTrip.get(t.id) : null,
                     payment_method: t.paymentMethod || null,
                     vehicle_type:   t.vehicleType || null,
                     distance_km:    t.distanceM != null ? Math.round(parseFloat(t.distanceM) / 100) / 10 : null,
