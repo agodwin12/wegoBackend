@@ -14,7 +14,9 @@ const {
 const { verifyGoogleIdToken } = require('./googleAuth.service');
 const { generateTokens } = require('./login.service');
 
-const ALLOWED_GOOGLE_USER_TYPES = ['PASSENGER', 'DRIVER'];
+// Google sign-in is restricted to passengers only. Drivers must use
+// phone + password (accounts are created by the backoffice).
+const ALLOWED_GOOGLE_USER_TYPES = ['PASSENGER'];
 
 function makeGoogleAccountError(message, status = 400, code = 'GOOGLE_ACCOUNT_ERROR') {
     const err = new Error(message);
@@ -32,7 +34,7 @@ function normalizeRequestedUserType(userType) {
 
     if (!ALLOWED_GOOGLE_USER_TYPES.includes(normalized)) {
         throw makeGoogleAccountError(
-            'Google authentication is only available for passengers and drivers.',
+            'Google sign-in is only available for passengers. Drivers must sign in with their phone and password.',
             403,
             'GOOGLE_SIGNUP_NOT_ALLOWED_FOR_USER_TYPE'
         );
@@ -349,21 +351,31 @@ async function googleAuth({ idToken, userType, tokenOptions = {} }) {
     } else if (!requestedUserType) {
         // Role-agnostic login but no account yet → tell the app to sign up.
         throw makeGoogleAccountError(
-            'No WeGo account is linked to this Google account yet. Please sign up and choose passenger or driver.',
+            'No WeGo account is linked to this Google account yet. Please sign up as a passenger.',
             404,
             'GOOGLE_ACCOUNT_NOT_FOUND'
         );
     } else if (requestedUserType === 'PASSENGER') {
         account = await createGooglePassengerAccount(googleProfile);
-    } else if (requestedUserType === 'DRIVER') {
-        account = await createGoogleDriverAccount(googleProfile);
     }
+    // NOTE: DRIVER signup via Google is intentionally not supported —
+    // Google sign-in is passengers only.
 
     if (!account) {
         throw makeGoogleAccountError(
             'Failed to create or retrieve Google account.',
             500,
             'GOOGLE_ACCOUNT_CREATE_FAILED'
+        );
+    }
+
+    // Passengers only: block any non-passenger (driver, delivery agent, fleet
+    // owner) from signing in with Google, even if the account is Google-linked.
+    if (account.user_type !== 'PASSENGER') {
+        throw makeGoogleAccountError(
+            'Google sign-in is only available for passengers. Please sign in with your phone and password.',
+            403,
+            'GOOGLE_LOGIN_NOT_ALLOWED_FOR_USER_TYPE'
         );
     }
 

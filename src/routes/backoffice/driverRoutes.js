@@ -32,6 +32,17 @@ router.get('/stats', driverController.getDriverStats);
 router.get('/', driverController.getAllDrivers);
 
 /**
+ * @route   POST /api/backoffice/drivers
+ * @desc    Create (onboard) a ride-hailing driver
+ * @access  Private (super_admin, admin, manager)
+ */
+router.post(
+    '/',
+    requireEmployeeRole('super_admin', 'admin', 'manager'),
+    driverController.createDriver
+);
+
+/**
  * @route   GET /api/backoffice/drivers/:id
  * @desc    Get single driver by UUID with complete profile
  * @access  Private (super_admin, admin, support, operations)

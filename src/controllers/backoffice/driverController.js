@@ -4,11 +4,130 @@
 const Account       = require('../../models/Account');
 const DriverProfile = require('../../models/DriverProfile');
 const Trip          = require('../../models/Trip');
+const { DriverWallet } = require('../../models');
 const { Op }        = require('sequelize');
 const sequelize     = require('../../config/database');
+const bcrypt        = require('bcrypt');
+const { v4: uuidv4 } = require('uuid');
+
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
+const RIDE_TIERS = { economy: 'Economy', comfort: 'Comfort', luxury: 'Luxury' };
+function normalizeTier(raw) {
+    return RIDE_TIERS[String(raw || '').toLowerCase()] || 'Economy';
+}
 
 // ── Notification service (lazy — avoids circular dep at startup) ──────────────
 const getNotificationService = () => require('../../services/NotificationService');
+
+// ═══════════════════════════════════════════════════════════════════════
+// CREATE DRIVER — backoffice onboards a ride-hailing driver directly
+// POST /api/backoffice/drivers
+// ═══════════════════════════════════════════════════════════════════════
+exports.createDriver = async (req, res) => {
+    try {
+        const {
+            first_name, last_name, email, phone_e164, password,
+            civility, birth_date,
+            cni_number, license_number, license_expiry,
+            insurance_number, insurance_expiry,
+            vehicle_type, vehicle_make_model, vehicle_color, vehicle_year, vehicle_plate,
+            fleet_owner_id,
+        } = req.body || {};
+
+        // ── Required fields ──────────────────────────────────────────────
+        const required = { first_name, last_name, email, phone_e164, password, vehicle_plate };
+        for (const [k, v] of Object.entries(required)) {
+            if (!v || !String(v).trim()) {
+                return res.status(400).json({ success: false, message: `${k.replace(/_/g, ' ')} is required`, code: 'MISSING_FIELD' });
+            }
+        }
+        if (String(password).length < 8) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 8 characters', code: 'WEAK_PASSWORD' });
+        }
+
+        // ── Uniqueness ───────────────────────────────────────────────────
+        if (await Account.findOne({ where: { email } }))            return res.status(409).json({ success: false, message: 'This email is already registered', code: 'EMAIL_EXISTS' });
+        if (await Account.findOne({ where: { phone_e164 } }))       return res.status(409).json({ success: false, message: 'This phone number is already registered', code: 'PHONE_EXISTS' });
+        if (await DriverProfile.findOne({ where: { vehicle_plate } })) return res.status(409).json({ success: false, message: 'This vehicle plate is already registered', code: 'PLATE_EXISTS' });
+
+        // ── Optional fleet-owner assignment ──────────────────────────────
+        let ownerId = null;
+        if (fleet_owner_id) {
+            const owner = await Account.findOne({ where: { uuid: fleet_owner_id, user_type: 'FLEET_OWNER' } });
+            if (!owner) return res.status(400).json({ success: false, message: 'Selected fleet owner not found', code: 'FLEET_OWNER_NOT_FOUND' });
+            ownerId = owner.uuid;
+        }
+
+        const password_hash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
+        const driverUuid    = uuidv4();
+
+        // ── Account + profile + wallet, atomically (mirrors the signup path) ─
+        const t = await sequelize.transaction();
+        try {
+            await Account.create({
+                uuid:           driverUuid,
+                user_type:      'DRIVER',
+                email,
+                phone_e164,
+                password_hash,
+                password_algo:  'bcrypt',
+                first_name,
+                last_name,
+                civility:       civility   || null,
+                birth_date:     birth_date || null,
+                status:         'ACTIVE',       // backoffice-vetted → active immediately
+                email_verified: true,
+                phone_verified: true,
+                fleet_owner_id: ownerId,
+            }, { transaction: t });
+
+            await DriverProfile.create({
+                account_id:         driverUuid,
+                cni_number:         cni_number       || null,
+                license_number:     license_number   || null,
+                license_expiry:     license_expiry   || null,
+                insurance_number:   insurance_number || null,
+                insurance_expiry:   insurance_expiry || null,
+                vehicle_type:       normalizeTier(vehicle_type),
+                vehicle_make_model: vehicle_make_model || null,
+                vehicle_color:      vehicle_color      || null,
+                vehicle_year:       vehicle_year ? parseInt(vehicle_year, 10) : null,
+                vehicle_plate,
+                verification_state: 'VERIFIED',   // created by an admin → vetted
+                status:             'offline',
+                rating_avg:         0.0,
+                rating_count:       0,
+            }, { transaction: t });
+
+            await DriverWallet.create({
+                driverId:        driverUuid,
+                balance:         0,
+                totalEarned:     0,
+                totalCommission: 0,
+                totalBonuses:    0,
+                totalPayouts:    0,
+                status:          'ACTIVE',
+                currency:        'XAF',
+            }, { transaction: t });
+
+            await t.commit();
+        } catch (e) {
+            await t.rollback();
+            throw e;
+        }
+
+        console.log(`✅ [DRIVER_ADMIN] Driver created: ${driverUuid} by employee ${req.user?.id}`);
+        return res.status(201).json({
+            success: true,
+            message: 'Driver created. Share the login credentials — the driver can change the password in the app.',
+            data: { driver: { uuid: driverUuid, first_name, last_name, email, phone_e164, status: 'ACTIVE' } },
+        });
+
+    } catch (error) {
+        console.error('❌ [DRIVER_ADMIN] createDriver:', error);
+        return res.status(500).json({ success: false, message: 'Unable to create driver. Please try again.', code: 'DRIVER_CREATE_FAILED' });
+    }
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET ALL DRIVERS
