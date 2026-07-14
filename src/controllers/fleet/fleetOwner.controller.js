@@ -33,6 +33,7 @@ const {
     DriverWallet,
     DriverWalletTransaction,
     Trip,
+    WegoPayment,
 } = require('../../models');
 const campayService = require('../../services/campay/campayService');
 const { uploadFileToR2 } = require('../../middleware/upload');
@@ -912,6 +913,15 @@ exports.getFleetTopups = async (req, res) => {
             raw: true,
         });
 
+        // The charged MoMo/OM number lives on the CamPay payment record. Join it
+        // by campay_ref so the fleet owner sees the exact number that was charged
+        // (metadata.phone is only present on newer top-ups).
+        const refs = rows.map(t => t.topUpRef).filter(Boolean);
+        const payments = refs.length
+            ? await WegoPayment.findAll({ where: { campay_ref: { [Op.in]: refs } }, attributes: ['campay_ref', 'phone'], raw: true })
+            : [];
+        const phoneByRef = new Map(payments.map(p => [p.campay_ref, p.phone]));
+
         return res.json({
             success: true,
             data: {
@@ -922,7 +932,7 @@ exports.getFleetTopups = async (req, res) => {
                     amount:      parseInt(t.amount, 10),
                     method:      t.topUpMethod || null,
                     status:      t.topUpStatus || 'COMPLETED',
-                    phone:       t.metadata?.phone || null,
+                    phone:       t.metadata?.phone || (t.topUpRef ? phoneByRef.get(t.topUpRef) : null) || null,
                     campay_ref:  t.topUpRef || null,
                     created_at:  t.createdAt,
                 })),
