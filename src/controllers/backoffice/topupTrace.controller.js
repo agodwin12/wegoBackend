@@ -1,10 +1,13 @@
 // backend/src/controllers/backoffice/topupTrace.controller.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Platform-wide TOP-UP TRACE (backoffice)
+// Platform-wide PAYMENT / TOP-UP TRACE (backoffice)
 //
-// A single audit trail of EVERY wallet top-up ever done on the platform —
-// ride-hailing drivers (DriverWalletTransaction type=TOP_UP) AND delivery
-// agents (DeliveryWalletTopUp) — normalized into one list.
+// A single audit trail of every money-in event on the platform, normalized
+// into one list:
+//   • wallet top-ups — ride drivers (DriverWalletTransaction type=TOP_UP)
+//                      and delivery agents (DeliveryWalletTopUp)
+//   • purchases      — services listing/ad plans (WegoPayment listing_fee)
+//                      and car rentals           (WegoPayment rental)
 //
 // For each top-up we surface: who did it, their role, the amount, the method,
 // the number that was charged, the CamPay reference, the operator, the status
@@ -39,6 +42,17 @@ function deliveryStatusGroup(s) {
     if (v === 'rejected' || v === 'campay_failed') return 'failed';
     return 'pending';
 }
+function wegoStatusGroup(s) {
+    const v = String(s || '').toUpperCase();
+    if (v === 'SUCCESSFUL') return 'success';
+    if (v === 'FAILED' || v === 'EXPIRED') return 'failed';
+    return 'pending';
+}
+// CamPay ledger verticals we surface here as "purchases" (not wallet top-ups).
+const PURCHASE_VERTICALS = {
+    listing_fee: { source: 'services', label: 'Services purchase' },
+    rental:      { source: 'rental',   label: 'Car rental' },
+};
 
 function fullName(a) {
     if (!a) return 'Unknown';
@@ -65,8 +79,13 @@ exports.getAllTopups = async (req, res) => {
         // UNION view if top-ups ever reach the millions.)
         const RAW_CAP = 5000;
 
+        const wantDriver   = !source || source === 'driver';
+        const wantDelivery = !source || source === 'delivery';
+        const wantServices = !source || source === 'services';
+        const wantRental   = !source || source === 'rental';
+
         // ── 1. Ride-hailing driver top-ups ──────────────────────────────────
-        const driverRows = source === 'delivery' ? [] : await DriverWalletTransaction.findAll({
+        const driverRows = !wantDriver ? [] : await DriverWalletTransaction.findAll({
             where:      { type: 'TOP_UP' },
             attributes: ['id', 'driverId', 'amount', 'topUpMethod', 'topUpStatus', 'topUpRef', 'metadata', 'reference', 'createdAt'],
             order:      [['createdAt', 'DESC']],
@@ -75,12 +94,24 @@ exports.getAllTopups = async (req, res) => {
         });
 
         // ── 2. Delivery-agent top-ups ───────────────────────────────────────
-        const delRows = source === 'driver' ? [] : await DeliveryWalletTopUp.findAll({
+        const delRows = !wantDelivery ? [] : await DeliveryWalletTopUp.findAll({
             attributes: ['id', 'driver_id', 'amount', 'payment_channel', 'status', 'campay_ref', 'topup_code', 'sender_phone', 'created_at'],
             order:      [['created_at', 'DESC']],
             limit:      RAW_CAP,
             raw:        true,
         });
+
+        // ── 3. Services purchases + car rentals (from the CamPay ledger) ─────
+        const wpVerticals = [];
+        if (wantServices) wpVerticals.push('listing_fee');
+        if (wantRental)   wpVerticals.push('rental');
+        const wpRows = wpVerticals.length ? await WegoPayment.findAll({
+            where:      { vertical: { [Op.in]: wpVerticals } },
+            attributes: ['id', 'vertical', 'amount', 'phone', 'operator', 'campay_ref', 'status', 'initiated_by', 'createdAt'],
+            order:      [['createdAt', 'DESC']],
+            limit:      RAW_CAP,
+            raw:        true,
+        }) : [];
 
         // ── Resolve "who": ride drivers are Accounts (driverId = Account.uuid);
         //    delivery agents are Drivers whose userId → Account. ────────────
@@ -93,6 +124,7 @@ exports.getAllTopups = async (req, res) => {
         const acctIds = [...new Set([
             ...driverRows.map(r => r.driverId),
             ...delDrivers.map(d => d.userId),
+            ...wpRows.map(r => r.initiated_by),
         ].filter(Boolean))];
         const accts = acctIds.length
             ? await Account.findAll({ where: { uuid: { [Op.in]: acctIds } }, attributes: ['uuid', 'first_name', 'last_name', 'email', 'user_type'], raw: true })
@@ -159,11 +191,36 @@ exports.getAllTopups = async (req, res) => {
             });
         }
 
+        for (const r of wpRows) {
+            const meta = PURCHASE_VERTICALS[r.vertical] || { source: 'other', label: r.vertical };
+            const a    = acctByUuid.get(r.initiated_by);
+            rows.push({
+                id:           `P-${r.id}`,
+                source:       meta.source,
+                source_label: meta.label,
+                who_name:     fullName(a),
+                who_email:    a?.email || null,
+                who_role:     a?.user_type || '—',
+                initiated_by: 'Self',
+                amount:       parseInt(r.amount, 10),
+                method:       r.operator === 'MTN' ? 'MTN_MOMO' : r.operator === 'ORANGE' ? 'ORANGE_MONEY' : 'Mobile Money',
+                phone:        r.phone || null,
+                operator:     r.operator || null,
+                reference:    r.campay_ref || null,
+                code:         null,
+                status:       r.status || 'PENDING',
+                status_group: wegoStatusGroup(r.status),
+                created_at:   r.createdAt,
+            });
+        }
+
         // ── Summary over the FULL (unfiltered) set ──────────────────────────
         const summary = {
-            total_topups:   rows.length,
+            total_topups:   rows.length,   // total transactions in view
             driver_count:   rows.filter(t => t.source === 'driver').length,
             delivery_count: rows.filter(t => t.source === 'delivery').length,
+            services_count: rows.filter(t => t.source === 'services').length,
+            rental_count:   rows.filter(t => t.source === 'rental').length,
             total_credited: rows.filter(t => t.status_group === 'success').reduce((s, t) => s + (t.amount || 0), 0),
         };
 
