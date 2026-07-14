@@ -12,6 +12,11 @@ const Trip             = require('../../models/Trip');
 const DriverProfile    = require('../../models/DriverProfile');
 const ServiceListing   = require('../../models/ServiceListing');
 const ServiceAdPayment = require('../../models/ServiceAdPayment');
+const { WegoPayment }  = require('../../models');
+
+// CamPay verticals that represent platform SALES (revenue) — excludes wallet
+// top-ups (fleet_topup / delivery_topup), which are deposits, not revenue.
+const REVENUE_VERTICALS = ['delivery', 'listing_fee', 'rental'];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -184,8 +189,17 @@ exports.getDashboardStats = async (req, res) => {
             }),
         ]);
 
+        // Platform SALES revenue collected via CamPay (services + rentals +
+        // delivery) — added to ride fares so "revenue" reflects the whole platform.
+        const [wpRevCurrent, wpRevPrevious] = await Promise.all([
+            WegoPayment.sum('amount', { where: { createdAt: { [Op.between]: [start, end] }, status: 'SUCCESSFUL', vertical: { [Op.in]: REVENUE_VERTICALS } } }),
+            WegoPayment.sum('amount', { where: { createdAt: { [Op.between]: [ps, pe] },     status: 'SUCCESSFUL', vertical: { [Op.in]: REVENUE_VERTICALS } } }),
+        ]);
+        const totalRevenue     = (currentRevenue  || 0) + (wpRevCurrent  || 0);
+        const totalPrevRevenue = (previousRevenue || 0) + (wpRevPrevious || 0);
+
         // Commission is 15% of revenue
-        const currentCommission = xaf((currentRevenue || 0) * 0.15);
+        const currentCommission = xaf(totalRevenue * 0.15);
 
         const kpis = {
             trips: {
@@ -194,9 +208,9 @@ exports.getDashboardStats = async (req, res) => {
                 change   : pctChange(currentTrips, previousTrips),
             },
             revenue: {
-                current    : xaf(currentRevenue),
-                previous   : xaf(previousRevenue),
-                change     : pctChange(currentRevenue, previousRevenue),
+                current    : xaf(totalRevenue),
+                previous   : xaf(totalPrevRevenue),
+                change     : pctChange(totalRevenue, totalPrevRevenue),
                 commission : currentCommission,
             },
             drivers: {
@@ -230,6 +244,30 @@ exports.getDashboardStats = async (req, res) => {
             order : [[fn('DATE', col('createdAt')), 'ASC']],
             raw   : true,
         });
+
+        // Merge in CamPay sales revenue per day (services + rentals + delivery)
+        // so the line reflects the whole platform, not just ride fares.
+        const wpRevByDay = await WegoPayment.findAll({
+            attributes: [
+                [fn('DATE', col('createdAt')), 'date'],
+                [fn('SUM', col('amount')),     'revenue'],
+            ],
+            where: { createdAt: { [Op.between]: [start, end] }, status: 'SUCCESSFUL', vertical: { [Op.in]: REVENUE_VERTICALS } },
+            group: [fn('DATE', col('createdAt'))],
+            raw:   true,
+        });
+        const revByDate = new Map();
+        for (const r of revenueOverTime) {
+            const k = String(r.date);
+            revByDate.set(k, { date: k, revenue: parseFloat(r.revenue || 0), trips: parseInt(r.trips || 0, 10) });
+        }
+        for (const r of wpRevByDay) {
+            const k   = String(r.date);
+            const cur = revByDate.get(k) || { date: k, revenue: 0, trips: 0 };
+            cur.revenue += parseFloat(r.revenue || 0);
+            revByDate.set(k, cur);
+        }
+        const revenueOverTimeMerged = [...revByDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
 
         // ════════════════════════════════════════════════════════════════
         // 3. DAILY TRIPS OVER TIME — bar chart
@@ -267,6 +305,34 @@ exports.getDashboardStats = async (req, res) => {
             group : ['paymentMethod'],
             raw   : true,
         });
+
+        // Merge in CamPay payments by operator (MTN / Orange) across ALL verticals
+        // (services, rentals, delivery, top-ups) so the pie shows how money really
+        // enters the platform — not just cash from rides.
+        const wpByOperator = await WegoPayment.findAll({
+            attributes: ['operator', [fn('COUNT', col('id')), 'count'], [fn('SUM', col('amount')), 'total']],
+            where: { createdAt: { [Op.between]: [start, end] }, status: 'SUCCESSFUL' },
+            group: ['operator'],
+            raw:   true,
+        });
+        // Emit method KEYS the frontend colour/label maps understand.
+        const RIDE_METHOD_KEY = { CASH: 'cash', MOMO: 'mtn_mobile_money', OM: 'orange_money', MTN_MOMO: 'mtn_mobile_money', ORANGE_MONEY: 'orange_money' };
+        const methodAgg = new Map();
+        const addMethod = (key, count, total) => {
+            const c = methodAgg.get(key) || { count: 0, total: 0 };
+            c.count += count;
+            c.total += total;
+            methodAgg.set(key, c);
+        };
+        for (const p of paymentBreakdown) {
+            const key = RIDE_METHOD_KEY[String(p.paymentMethod || '').toUpperCase()] || 'cash';
+            addMethod(key, parseInt(p.count || 0, 10), parseFloat(p.total || 0));
+        }
+        for (const p of wpByOperator) {
+            const key = p.operator === 'MTN' ? 'mtn_mobile_money' : p.operator === 'ORANGE' ? 'orange_money' : 'mobile_money';
+            addMethod(key, parseInt(p.count || 0, 10), parseFloat(p.total || 0));
+        }
+        const paymentBreakdownMerged = [...methodAgg.entries()].map(([method, v]) => ({ method, count: v.count, total: v.total }));
 
         // ════════════════════════════════════════════════════════════════
         // 5. TOP 5 DRIVERS BY EARNINGS
@@ -324,10 +390,10 @@ exports.getDashboardStats = async (req, res) => {
             },
             kpis,
             charts: {
-                revenueOverTime: revenueOverTime.map(r => ({
+                revenueOverTime: revenueOverTimeMerged.map(r => ({
                     date    : r.date,
                     revenue : xaf(r.revenue),
-                    trips   : parseInt(r.trips),
+                    trips   : r.trips,
                 })),
                 tripsOverTime: tripsOverTime.map(t => ({
                     date      : t.date,
@@ -335,9 +401,9 @@ exports.getDashboardStats = async (req, res) => {
                     completed : parseInt(t.completed),
                     cancelled : parseInt(t.cancelled),
                 })),
-                paymentBreakdown: paymentBreakdown.map(p => ({
-                    method : p.paymentMethod,
-                    count  : parseInt(p.count),
+                paymentBreakdown: paymentBreakdownMerged.map(p => ({
+                    method : p.method,
+                    count  : p.count,
                     total  : xaf(p.total),
                 })),
                 topDrivers: topDriversEnriched,
