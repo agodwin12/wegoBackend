@@ -4,6 +4,7 @@
 const express = require('express');
 const router = express.Router();
 const serviceAdminController = require('../../controllers/backoffice/serviceAdmin.controller');
+const topupTraceController = require('../../controllers/backoffice/topupTrace.controller');
 const { authenticateEmployee, requireEmployeeRole } = require('../../middleware/employeeAuth.middleware');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -67,6 +68,21 @@ router.post(
     '/subscriptions/:id/extend',
     requireEmployeeRole('super_admin', 'admin', 'manager'),
     serviceAdminController.extendSubscription
+);
+
+// ═══════════════════════════════════════════════════════════════════════
+// PLATFORM TOP-UP TRACE (drivers + delivery agents)
+// ═══════════════════════════════════════════════════════════════════════
+
+// @route   GET /api/services/admin/topups
+// @desc    Unified trace of every wallet top-up (ride drivers + delivery agents):
+//          who, role, amount, method, charged number, CamPay reference, operator,
+//          status, date. Filters: source, status, search, page, limit.
+// @access  Employee (super_admin, admin, manager, accountant)
+router.get(
+    '/topups',
+    requireEmployeeRole('super_admin', 'admin', 'manager', 'accountant'),
+    topupTraceController.getAllTopups
 );
 
 module.exports = router;
