@@ -34,8 +34,8 @@ exports.createDriver = async (req, res) => {
             fleet_owner_id,
         } = req.body || {};
 
-        // ── Required fields ──────────────────────────────────────────────
-        const required = { first_name, last_name, email, phone_e164, password, vehicle_plate };
+        // ── Required fields (DriverProfile requires cni + license) ───────
+        const required = { first_name, last_name, email, phone_e164, password, vehicle_plate, cni_number, license_number };
         for (const [k, v] of Object.entries(required)) {
             if (!v || !String(v).trim()) {
                 return res.status(400).json({ success: false, message: `${k.replace(/_/g, ' ')} is required`, code: 'MISSING_FIELD' });
