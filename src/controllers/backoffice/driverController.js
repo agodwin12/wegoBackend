@@ -9,6 +9,7 @@ const { Op }        = require('sequelize');
 const sequelize     = require('../../config/database');
 const bcrypt        = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
+const { uploadFileToR2 } = require('../../middleware/upload');
 
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 const RIDE_TIERS = { economy: 'Economy', comfort: 'Comfort', luxury: 'Luxury' };
@@ -58,6 +59,22 @@ exports.createDriver = async (req, res) => {
             ownerId = owner.uuid;
         }
 
+        // ── Optional images → R2 (same fields as the mobile driver signup:
+        //    avatar = profile picture, license, insurance, vehicle_photo) ─────
+        const files = req.files || {};
+        const pick  = (field) => (files[field] && files[field][0]) || null;
+        let avatarUrl = null, licenseUrl = null, insuranceUrl = null, vehicleUrl = null;
+        try {
+            [avatarUrl, licenseUrl, insuranceUrl, vehicleUrl] = await Promise.all([
+                pick('avatar')        ? uploadFileToR2(pick('avatar'),        'profiles')  : null,
+                pick('license')       ? uploadFileToR2(pick('license'),       'documents') : null,
+                pick('insurance')     ? uploadFileToR2(pick('insurance'),     'documents') : null,
+                pick('vehicle_photo') ? uploadFileToR2(pick('vehicle_photo'), 'vehicles')  : null,
+            ]);
+        } catch (e) {
+            return res.status(400).json({ success: false, message: `Image upload failed: ${e.message}`, code: 'UPLOAD_FAILED' });
+        }
+
         const password_hash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
         const driverUuid    = uuidv4();
 
@@ -75,6 +92,7 @@ exports.createDriver = async (req, res) => {
                 last_name,
                 civility:       civility   || null,
                 birth_date:     birth_date || null,
+                avatar_url:     avatarUrl,
                 status:         'ACTIVE',       // backoffice-vetted → active immediately
                 email_verified: true,
                 phone_verified: true,
@@ -82,21 +100,24 @@ exports.createDriver = async (req, res) => {
             }, { transaction: t });
 
             await DriverProfile.create({
-                account_id:         driverUuid,
-                cni_number:         cni_number       || null,
-                license_number:     license_number   || null,
-                license_expiry:     license_expiry   || null,
-                insurance_number:   insurance_number || null,
-                insurance_expiry:   insurance_expiry || null,
-                vehicle_type:       normalizeTier(vehicle_type),
-                vehicle_make_model: vehicle_make_model || null,
-                vehicle_color:      vehicle_color      || null,
-                vehicle_year:       vehicle_year ? parseInt(vehicle_year, 10) : null,
+                account_id:            driverUuid,
+                cni_number:            cni_number       || null,
+                license_number:        license_number   || null,
+                license_expiry:        license_expiry   || null,
+                insurance_number:      insurance_number || null,
+                insurance_expiry:      insurance_expiry || null,
+                license_document_url:  licenseUrl,
+                insurance_document_url: insuranceUrl,
+                vehicle_photo_url:     vehicleUrl,
+                vehicle_type:          normalizeTier(vehicle_type),
+                vehicle_make_model:    vehicle_make_model || null,
+                vehicle_color:         vehicle_color      || null,
+                vehicle_year:          vehicle_year ? parseInt(vehicle_year, 10) : null,
                 vehicle_plate,
-                verification_state: 'VERIFIED',   // created by an admin → vetted
-                status:             'offline',
-                rating_avg:         0.0,
-                rating_count:       0,
+                verification_state:    'VERIFIED',   // created by an admin → vetted
+                status:                'offline',
+                rating_avg:            0.0,
+                rating_count:          0,
             }, { transaction: t });
 
             await DriverWallet.create({

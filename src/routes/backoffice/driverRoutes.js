@@ -6,6 +6,7 @@ const {
     authenticateEmployee,
     requireEmployeeRole
 } = require('../../middleware/employeeAuth.middleware');
+const { uploadDocuments } = require('../../middleware/upload');
 
 // ═══════════════════════════════════════════════════════════════════════
 // MIDDLEWARE - All routes require employee authentication
@@ -39,6 +40,12 @@ router.get('/', driverController.getAllDrivers);
 router.post(
     '/',
     requireEmployeeRole('super_admin', 'admin', 'manager'),
+    uploadDocuments.fields([
+        { name: 'avatar',        maxCount: 1 },   // profile picture
+        { name: 'license',       maxCount: 1 },
+        { name: 'insurance',     maxCount: 1 },
+        { name: 'vehicle_photo', maxCount: 1 },
+    ]),
     driverController.createDriver
 );
 
