@@ -48,6 +48,7 @@ const DriverLocation  = require('./DriverLocation');
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const PriceRule      = require('./PriceRule');
+const RideSurgeRule  = require('./RideSurgeRule')(sequelize);
 const IdempotencyKey = require('./IdempotencyKey');
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -100,7 +101,7 @@ const _allModels = {
     WegoPayment,
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
-    PriceRule, IdempotencyKey,
+    PriceRule, RideSurgeRule, IdempotencyKey,
     ServiceCategory, ServiceListing, ServiceRating,
     ServiceListingPlan, ServiceAdPayment,
     TripReceipt, DriverWallet, DriverWalletTransaction, EarningRule, BonusProgram, BonusAward,
@@ -496,6 +497,9 @@ DeliveryWalletTransaction.associate(deliveryModels);
 DeliveryWalletTopUp.associate(deliveryModels);
 DeliveryCategory.associate(deliveryModels);
 
+// Ride surge rules only reference the Employee who created them.
+RideSurgeRule.associate({ Employee });
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXPORTS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -534,6 +538,7 @@ module.exports = {
 
     // ── Pricing / misc ───────────────────────────────────────────────────────
     PriceRule,
+    RideSurgeRule,
     SupportTicket,
     IdempotencyKey,
 

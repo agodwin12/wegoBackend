@@ -4,7 +4,10 @@
 
 const axios    = require('axios');
 const { Op }   = require('sequelize');
-const { PriceRule } = require('../models');
+const { PriceRule, RideSurgeRule } = require('../models');
+
+// Hard ceiling so no surge rule (or stacking) can multiply a fare beyond this.
+const MAX_SURGE_MULTIPLIER = 3.0;
 
 const VEHICLE_TYPES = ['economy', 'comfort', 'luxury'];
 
@@ -175,7 +178,11 @@ class FareCalculatorService {
     // ═══════════════════════════════════════════════════════════════
     // 🔹 Calculate fare for a single vehicle type
     // ═══════════════════════════════════════════════════════════════
-    _calculateFareFromRule(rule, distance_m, duration_s) {
+    // Resolve the surge that actually applies: the higher of the manual
+    // per-rule surge_mult and any scheduled RideSurgeRule firing right now,
+    // hard-capped at MAX_SURGE_MULTIPLIER.
+    // @param {{multiplier:number, ruleName?:string}|null} scheduled
+    _calculateFareFromRule(rule, distance_m, duration_s, scheduled = null) {
         const distance_km  = distance_m / 1000;
         const duration_min = duration_s / 60;
 
@@ -184,12 +191,26 @@ class FareCalculatorService {
         const timeFare     = duration_min * parseFloat(rule.per_min);
         const subtotal     = base + distanceFare + timeFare;
         const beforeSurge  = Math.max(subtotal, parseFloat(rule.min_fare));
-        const total        = Math.round(beforeSurge * parseFloat(rule.surge_mult));
+
+        // Effective surge = higher of manual and scheduled, capped.
+        const manualSurge    = parseFloat(rule.surge_mult) || 1.0;
+        const scheduledSurge = scheduled ? (parseFloat(scheduled.multiplier) || 1.0) : 1.0;
+        let effectiveSurge   = Math.max(manualSurge, scheduledSurge);
+        if (effectiveSurge > MAX_SURGE_MULTIPLIER) effectiveSurge = MAX_SURGE_MULTIPLIER;
+
+        let surgeReason = null;
+        if (effectiveSurge > 1.0) {
+            surgeReason = (scheduledSurge >= manualSurge && scheduled && scheduled.ruleName)
+                ? scheduled.ruleName
+                : 'Peak demand';
+        }
+
+        const total = Math.round(beforeSurge * effectiveSurge);
 
         console.log(
             `💰 [FARE] ${rule.vehicle_type}: ` +
             `base=${base} + dist=${Math.round(distanceFare)} + time=${Math.round(timeFare)} ` +
-            `→ subtotal=${Math.round(subtotal)} → final=${total} XAF`
+            `→ subtotal=${Math.round(subtotal)} → surge=${effectiveSurge}x → final=${total} XAF`
         );
 
         return {
@@ -199,12 +220,21 @@ class FareCalculatorService {
                 base_fare:        parseFloat(base.toFixed(2)),
                 distance_fare:    parseFloat(distanceFare.toFixed(2)),
                 time_fare:        parseFloat(timeFare.toFixed(2)),
-                surge_multiplier: parseFloat(rule.surge_mult),
+                surge_multiplier: parseFloat(effectiveSurge.toFixed(2)),
+                surge_active:     effectiveSurge > 1.0,
+                surge_reason:     surgeReason,
                 min_fare:         parseFloat(rule.min_fare),
                 distance_km:      parseFloat(distance_km.toFixed(2)),
                 duration_min:     parseFloat(duration_min.toFixed(2)),
             },
         };
+    }
+
+    // Look up the scheduled ride surge for a city + vehicle type. Returns a
+    // {multiplier, ruleName} object, or null when nothing is firing.
+    async _resolveScheduledSurge(city, vehicleType) {
+        const { rule, multiplier } = await RideSurgeRule.getActiveSurge(city, vehicleType);
+        return multiplier > 1.0 ? { multiplier, ruleName: rule?.name } : null;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -236,8 +266,9 @@ class FareCalculatorService {
             for (const type of VEHICLE_TYPES) {
                 const rule = rulesMap[type];
                 if (rule) {
+                    const scheduled = await this._resolveScheduledSurge(city, type);
                     estimates[type] = {
-                        ...this._calculateFareFromRule(rule, route.distance_m, route.duration_s),
+                        ...this._calculateFareFromRule(rule, route.distance_m, route.duration_s, scheduled),
                         distance_text: route.distance_text,
                         duration_text: route.duration_text,
                     };
@@ -298,7 +329,8 @@ class FareCalculatorService {
             }
 
             // Legacy returns economy fare only
-            const fareData = this._calculateFareFromRule(rulesMap['economy'], route.distance_m, route.duration_s);
+            const scheduled = await this._resolveScheduledSurge(city, 'economy');
+            const fareData = this._calculateFareFromRule(rulesMap['economy'], route.distance_m, route.duration_s, scheduled);
 
             return {
                 ...route,

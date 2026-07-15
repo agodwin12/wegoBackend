@@ -87,6 +87,7 @@ const tripRoutes                  = require('./routes/backoffice/tripRoutes');
 const vehicleRoutes               = require('./routes/backoffice/vehicleRoutes');
 const vehicleRentalRoutes         = require('./routes/backoffice/vehicleRentalRoutes');
 const pricingRoutes               = require('./routes/backoffice/pricingRoutes');
+const rideSurgeRoutes             = require('./routes/backoffice/rideSurgeRoutes');
 
 // ─── Backoffice — Delivery ────────────────────────────────────────────────────
 const deliveryAdminRoutes         = require('./routes/backoffice/Deliveryadmin.routes');     // pricing + surge
@@ -252,6 +253,7 @@ app.use('/api/backoffice/trips',           tripRoutes);
 app.use('/api/backoffice/vehicles',        vehicleRoutes);
 app.use('/api/backoffice/vehicle-rentals', vehicleRentalRoutes);
 app.use('/api/backoffice/pricing',         pricingRoutes);
+app.use('/api/backoffice/ride-surge',      rideSurgeRoutes);
 
 // ─── Delivery (backoffice) ────────────────────────────────────────────────────
 // CRITICAL ORDER: specific sub-paths MUST be registered before the
