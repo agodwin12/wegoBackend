@@ -185,8 +185,17 @@ async function _postDeliveryEarningsOnce(deliveryId, options = {}) {
 
         } else {
             // ── DIGITAL PAYMENT FLOW (MTN / Orange Money) ─────────────────────
-            const balanceAfter = balanceBefore + driverPayout;
-
+            // Money model: the agent collects the fare DIRECTLY from the
+            // customer (their own MoMo/OM) — exactly like cash, and like
+            // ride-hailing ("fares direct-to-driver"). WeGo never holds this
+            // money, so the spendable wallet balance is NOT credited the payout.
+            //
+            // The ONLY balance change for a completed delivery is the WeGo
+            // commission, taken from the pre-paid wallet by confirmCommission().
+            // Here we just record the earning for the agent's history — with
+            // balance unchanged — and update the lifetime gross-earnings stat.
+            // (We do NOT write a commission_deduction row here; confirmCommission
+            //  writes the authoritative, balance-changing one.)
             await DeliveryWalletTransaction.create({
                 wallet_id:      wallet.id,
                 delivery_id:    deliveryId,
@@ -194,27 +203,17 @@ async function _postDeliveryEarningsOnce(deliveryId, options = {}) {
                 payment_method: paymentMethod,
                 amount:         driverPayout,
                 balance_before: balanceBefore,
-                balance_after:  balanceAfter,
-                notes:          `Earning for delivery ${delivery.delivery_code}`,
+                balance_after:  balanceBefore,   // informational — paid directly, not via wallet
+                notes:          `Earning collected directly for delivery ${delivery.delivery_code}`,
             }, { transaction: t });
 
-            await DeliveryWalletTransaction.create({
-                wallet_id:      wallet.id,
-                delivery_id:    deliveryId,
-                type:           'commission_deduction',
-                payment_method: paymentMethod,
-                amount:         commissionAmount,
-                balance_before: balanceAfter,
-                balance_after:  balanceAfter,
-                notes:          `WEGO commission (${((commissionAmount / totalPrice) * 100).toFixed(1)}%) for ${delivery.delivery_code}`,
-            }, { transaction: t });
-
+            // Lifetime gross-earnings stat only — does NOT touch the spendable
+            // balance (that money is in the agent's own MoMo, not the wallet).
             await wallet.increment({
-                balance:      driverPayout,
                 total_earned: driverPayout,
             }, { transaction: t });
 
-            console.log(`💳 [DELIVERY EARNINGS] Digital delivery ${delivery.delivery_code}: +${driverPayout} XAF to wallet (commission: ${commissionAmount} XAF)`);
+            console.log(`💳 [DELIVERY EARNINGS] Digital delivery ${delivery.delivery_code}: agent collected ${driverPayout} XAF directly (WeGo commission ${commissionAmount} XAF taken from wallet)`);
         }
 
         if (ownTransaction) await t.commit();

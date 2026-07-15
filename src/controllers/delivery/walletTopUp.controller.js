@@ -73,9 +73,13 @@ exports.submitTopUp = async (req, res) => {
 
     } catch (error) {
         console.error('❌ [TOP-UP] submitTopUp error:', error.message);
+        // Only surface messages we deliberately threw (they carry a statusCode).
+        // Unexpected errors (DB, null refs) must NOT leak their raw text.
         return res.status(error.statusCode || 500).json({
             success: false,
-            message: error.message || 'Failed to submit top-up request.',
+            message: error.statusCode
+                ? error.message
+                : 'Something went wrong submitting your top-up. Please try again.',
         });
     }
 };
@@ -200,7 +204,9 @@ exports.initiateDigitalTopUp = async (req, res) => {
 
         return res.status(error.statusCode || 500).json({
             success: false,
-            message: error.message || 'Failed to initiate top-up payment.',
+            message: error.statusCode
+                ? error.message
+                : 'Could not start the mobile money payment. Please try again.',
             code:    'TOPUP_INITIATION_FAILED',
             data:    error.topUp ? formatTopUpForDriver(error.topUp) : null,
         });
@@ -277,7 +283,9 @@ exports.getTopUpDetail = async (req, res) => {
         console.error('❌ [TOP-UP] getTopUpDetail error:', error.message);
         return res.status(error.statusCode || 500).json({
             success: false,
-            message: error.message || 'Failed to load top-up detail.',
+            message: error.statusCode
+                ? error.message
+                : 'Could not load this top-up. Please try again.',
         });
     }
 };
