@@ -11,8 +11,11 @@ const Account          = require('../../models/Account');
 const Trip             = require('../../models/Trip');
 const DriverProfile    = require('../../models/DriverProfile');
 const ServiceListing   = require('../../models/ServiceListing');
-const ServiceAdPayment = require('../../models/ServiceAdPayment');
-const { WegoPayment }  = require('../../models');
+// ServiceAdPayment is a FACTORY model (module.exports = (sequelize) => …), so a
+// direct require returns the factory function, not the model — that's what broke
+// the activity feed with "ServiceAdPayment.findAll is not a function". Always
+// take factory models from the registry, which invokes them with sequelize.
+const { WegoPayment, ServiceAdPayment } = require('../../models');
 
 // CamPay verticals that represent platform SALES (revenue) — excludes wallet
 // top-ups (fleet_topup / delivery_topup), which are deposits, not revenue.
