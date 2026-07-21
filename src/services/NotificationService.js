@@ -85,6 +85,15 @@ async function _sendFcm({ fcmToken, title, body, type, data = {} }) {
             },
             apns: {
                 headers: { 'apns-priority': '10' },
+                // A data-only push is delivered silently. On iOS the app is
+                // only woken to render it when content-available is set —
+                // without this flag nothing is shown while the app is in the
+                // background, which is when a push matters most.
+                payload: {
+                    aps: {
+                        'content-available': 1,
+                    },
+                },
             },
         };
 
