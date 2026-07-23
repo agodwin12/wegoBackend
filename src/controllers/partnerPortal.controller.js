@@ -30,7 +30,13 @@ exports.getMyVehicles = async (req, res) => {
             });
         }
 
-        const profile = await PartnerProfile.findByAccountId(req.user.uuid);
+        // Direct lookup — NOT PartnerProfile.findByAccountId: that helper's
+        // account include selects account.role, a column the accounts table
+        // does not have, and 500s on every call.
+        const profile = await PartnerProfile.findOne({
+            where: { accountId: req.user.uuid },
+            attributes: ['id'],
+        });
         if (!profile) {
             return res.status(404).json({
                 success: false,
