@@ -79,6 +79,9 @@ const NOTIFICATION_TYPES = [
 
     // Backoffice Broadcast
     'BROADCAST',
+
+    // Safety — passenger/driver SOS during a ride
+    'TRIP_SOS',
 ];
 
 class Notification extends Model {
