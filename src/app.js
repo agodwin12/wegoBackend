@@ -121,6 +121,7 @@ const cron                 = require('node-cron');
 const { expireListings }   = require('./controllers/serviceAdPayment_controller');
 const deviceTokenRoutes = require('./routes/deviceToken_routes');
 const notificationRoutes = require('./routes/notification_routes');
+const partnerPortalRoutes = require('./routes/partnerPortalRoutes');
 const broadcastRoutes = require('./routes/backoffice/broadcast_routes');
 // ═══════════════════════════════════════════════════════════════════════════════
 // ⚠️  WEBHOOK — MUST BE MOUNTED BEFORE express.json()
@@ -283,6 +284,7 @@ app.use('/api/backoffice/upload',    uploadRoutes);
 app.use('/api/backoffice/dashboard', dashboardRoutes);
 app.use('/api/device-tokens', deviceTokenRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/partner', partnerPortalRoutes);   // rental partner self-service (no pricing)
 app.use('/api/backoffice/broadcasts', broadcastRoutes);
 
 // ─── Agent Profile ────────────────────────────────────────────────────────────

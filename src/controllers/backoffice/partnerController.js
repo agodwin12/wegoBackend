@@ -2,9 +2,84 @@
 
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const { Account, PartnerProfile, Vehicle, Employee, VehicleRental } = require('../../models');
 const { Op } = require('sequelize');
 const sequelize = require('../../config/database');
+const { sendSms } = require('../../services/comm/sms.service');
+const { sendEmail } = require('../../services/comm/email.service');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Temporary partner credentials
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Readable one-time password, e.g. "WG-K7KQ-9DF4". The alphabet drops the
+ * lookalikes (0/O, 1/I/L) because the partner retypes this from an SMS.
+ */
+function generateTempPassword() {
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    const pick = (n) =>
+        Array.from(crypto.randomBytes(n), (b) => alphabet[b % alphabet.length]).join('');
+    return `WG-${pick(4)}-${pick(4)}`;
+}
+
+/** Techsoft needs the full international number without '+'. */
+function toInternationalPhone(raw) {
+    const digits = String(raw || '').replace(/\D/g, '');
+    if (!digits) return null;
+    if (digits.startsWith('237')) return digits;
+    if (digits.length === 9) return `237${digits}`;
+    return digits;
+}
+
+/**
+ * Delivers the temporary credentials over both channels. Never throws — the
+ * partner account already exists at this point, so delivery problems are
+ * reported back to the backoffice instead of failing the creation.
+ */
+async function deliverTempPassword({ partnerName, email, phoneNumber, tempPassword }) {
+    const delivery = { sms_sent: false, email_sent: false };
+
+    const smsTo = toInternationalPhone(phoneNumber);
+    if (smsTo) {
+        try {
+            await sendSms(
+                smsTo,
+                `WEGO — Bienvenue ${partnerName}. Votre acces partenaire: ` +
+                `identifiant ${email}, mot de passe provisoire ${tempPassword}. ` +
+                `Il devra etre change a la premiere connexion.`
+            );
+            delivery.sms_sent = true;
+        } catch (err) {
+            console.error('⚠️ [PARTNER] SMS delivery failed:', err.message);
+        }
+    }
+
+    try {
+        await sendEmail(
+            email,
+            'Vos accès partenaire WEGO',
+            `Bienvenue ${partnerName},\n\n` +
+                `Votre compte partenaire WEGO a été créé.\n\n` +
+                `Identifiant : ${email}\n` +
+                `Mot de passe provisoire : ${tempPassword}\n\n` +
+                `Ce mot de passe devra être changé lors de votre première connexion ` +
+                `au portail partenaire.\n\n— L'équipe WEGO`,
+            `<p>Bienvenue <b>${partnerName}</b>,</p>` +
+                `<p>Votre compte partenaire WEGO a été créé.</p>` +
+                `<p>Identifiant : <b>${email}</b><br/>` +
+                `Mot de passe provisoire : <b style="font-size:16px">${tempPassword}</b></p>` +
+                `<p>Ce mot de passe devra être changé lors de votre première connexion ` +
+                `au portail partenaire.</p><p>— L'équipe WEGO</p>`
+        );
+        delivery.email_sent = true;
+    } catch (err) {
+        console.error('⚠️ [PARTNER] Email delivery failed:', err.message);
+    }
+
+    return delivery;
+}
 
 /**
  * 🎯 CREATE PARTNER
@@ -18,7 +93,6 @@ exports.createPartner = async (req, res) => {
             address,
             phoneNumber,
             email,
-            password,
             profilePhoto
         } = req.body;
 
@@ -26,13 +100,18 @@ exports.createPartner = async (req, res) => {
 
         console.log('🆕 Creating partner:', { partnerName, email, employeeId });
 
-        if (!partnerName || !phoneNumber || !email || !password) {
+        // The password is no longer chosen by the admin: it is generated here,
+        // delivered to the partner by SMS/email, and must be changed at first
+        // login (accounts.must_change_password).
+        if (!partnerName || !phoneNumber || !email) {
             await transaction.rollback();
             return res.status(400).json({
                 success: false,
-                message: 'Partner name, phone number, email, and password are required'
+                message: 'Partner name, phone number and email are required'
             });
         }
+
+        const tempPassword = generateTempPassword();
 
         const existingAccount = await Account.findOne({
             where: { email: email.toLowerCase() }
@@ -59,12 +138,13 @@ exports.createPartner = async (req, res) => {
         }
 
         const accountUuid = uuidv4();
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
         await Account.create({
             uuid: accountUuid,
             email: email.toLowerCase(),
             password_hash: hashedPassword,
+            must_change_password: true,
             user_type: 'PARTNER',
             phone_verified: true,
             status: 'ACTIVE'
@@ -88,6 +168,17 @@ exports.createPartner = async (req, res) => {
 
         await transaction.commit();
 
+        // Delivery happens AFTER the commit: the account exists either way,
+        // and a provider outage must not roll back the partner.
+        const delivery = await deliverTempPassword({
+            partnerName: partnerName.trim(),
+            email: email.toLowerCase(),
+            phoneNumber,
+            tempPassword,
+        });
+
+        console.log('📨 [PARTNER] Credential delivery:', delivery);
+
         const completePartner = await PartnerProfile.findByPk(partnerProfile.id, {
             include: [
                 {
@@ -101,7 +192,16 @@ exports.createPartner = async (req, res) => {
         return res.status(201).json({
             success: true,
             message: 'Partner created successfully',
-            data: completePartner
+            data: completePartner,
+            credential_delivery: {
+                ...delivery,
+                // Safety valve: when NEITHER channel reached the partner, the
+                // admin is the only remaining path — show the password once so
+                // it can be passed on by hand. Never returned otherwise.
+                ...(!delivery.sms_sent && !delivery.email_sent
+                    ? { temp_password: tempPassword }
+                    : {}),
+            },
         });
 
     } catch (error) {

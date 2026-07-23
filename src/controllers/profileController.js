@@ -337,8 +337,10 @@ exports.changePassword = async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-        // Update password
+        // Update password. A successful change also lifts the first-login
+        // constraint on backoffice-created accounts (rental partners).
         user.password_hash = hashedPassword;
+        user.must_change_password = false;
         await user.save();
 
         console.log('✅ [PROFILE] Password changed for user:', userUuid);
