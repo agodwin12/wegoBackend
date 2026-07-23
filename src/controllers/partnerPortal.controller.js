@@ -13,7 +13,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { PartnerProfile, Vehicle, VehicleRental } = require('../models');
+const { Account, PartnerProfile, Vehicle, VehicleRental } = require('../models');
 
 /**
  * @route  GET /api/partner/vehicles
@@ -55,9 +55,25 @@ exports.getMyVehicles = async (req, res) => {
                 vehicleId: { [Op.in]: vehicles.map((v) => v.id) },
                 status: { [Op.in]: ['CONFIRMED', 'COMPLETED'] },
             },
-            attributes: ['id', 'vehicleId', 'startDate', 'endDate', 'status'],
+            attributes: ['id', 'vehicleId', 'userId', 'startDate', 'endDate', 'status'],
             order: [['startDate', 'DESC']],
         });
+
+        // The partner may know WHO holds their car — name only, no contact
+        // details: WEGO stays the intermediary.
+        const renterIds = [...new Set(rentals.map((r) => r.userId).filter(Boolean))];
+        const renters = renterIds.length
+            ? await Account.findAll({
+                where: { uuid: { [Op.in]: renterIds } },
+                attributes: ['uuid', 'first_name', 'last_name'],
+            })
+            : [];
+        const renterName = new Map(
+            renters.map((a) => [
+                a.uuid,
+                `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
+            ])
+        );
 
         const now = new Date();
         const byVehicle = new Map();
@@ -65,6 +81,8 @@ exports.getMyVehicles = async (req, res) => {
             if (!byVehicle.has(r.vehicleId)) byVehicle.set(r.vehicleId, []);
             byVehicle.get(r.vehicleId).push(r);
         }
+
+        const DAY_MS = 24 * 60 * 60 * 1000;
 
         const data = vehicles.map((v) => {
             const list = byVehicle.get(v.id) || [];
@@ -86,11 +104,19 @@ exports.getMyVehicles = async (req, res) => {
                 image: images[0] || null,
                 is_blocked: !!v.isBlocked,
                 status: current ? 'RENTED_OUT' : 'AVAILABLE',
+                // How often this vehicle has gone out — feeds the partner's
+                // "most rented" ranking.
+                times_rented: list.length,
                 current_rental: current
                     ? {
                         start_date: current.startDate,
                         end_date: current.endDate,
+                        days_out: Math.max(
+                            0,
+                            Math.floor((now - new Date(current.startDate)) / DAY_MS)
+                        ),
                         overdue: new Date(current.endDate) < now,
+                        renter_name: renterName.get(current.userId) || null,
                     }
                     : null,
                 last_return: lastReturn ? lastReturn.endDate : null,
