@@ -415,8 +415,16 @@ async function handleTripComplete(socket, data, io) {
             return socket.emit('error', { message: 'Trip not found or not assigned to you' });
         }
 
-        if (finalFare) trip.fareFinal = finalFare;
-        await applyTransition(trip, 'COMPLETED', { actor: 'DRIVER', meta: { finalFare: trip.fareFinal } });
+        // SERVER AUTHORITATIVE: never trust the driver-supplied fare directly.
+        // Floor at the quoted estimate (no commission under-reporting), cap
+        // above it (no gouging). See fareCalculatorService.resolveFinalFare.
+        const fareCalc = require('../services/fareCalculatorService');
+        const resolved = fareCalc.resolveFinalFare(trip.fareEstimate, finalFare);
+        trip.fareFinal = resolved.fare;
+        if (resolved.adjusted) {
+            console.warn(`⚠️ [SOCKET-DRIVER] finalFare adjusted (${resolved.reason}): driver sent ${finalFare}, applied ${resolved.fare} (estimate ${trip.fareEstimate})`);
+        }
+        await applyTransition(trip, 'COMPLETED', { actor: 'DRIVER', meta: { finalFare: trip.fareFinal, fareResolution: resolved.reason } });
 
         await setDriverAvailable(socket.userId);
         await DriverLocation.update(

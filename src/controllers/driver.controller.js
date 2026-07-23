@@ -3,6 +3,7 @@
 const { Account, Driver, DriverProfile, Trip, TripEvent, Rating, DriverWallet, EarningRule, sequelize } = require('../models');
 const { Op }          = require('sequelize');
 const earningsEngine  = require('../services/earningsEngineService');
+const fareCalculatorService = require('../services/fareCalculatorService');
 const { applyTransition } = require('../services/tripState.service');
 const { v4: uuidv4 }  = require('uuid');
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
@@ -1099,11 +1100,17 @@ exports.completeTrip = async (req, res, next) => {
         }
 
         const result = await sequelize.transaction(async (t) => {
-            if (final_fare) trip.fareFinal = parseInt(final_fare, 10);
+            // SERVER AUTHORITATIVE final fare — floor at the quoted estimate,
+            // cap above it. Same rule as the socket completion path.
+            const resolved = fareCalculatorService.resolveFinalFare(trip.fareEstimate, final_fare);
+            trip.fareFinal = resolved.fare;
+            if (resolved.adjusted) {
+                console.warn(`⚠️ [DRIVER] finalFare adjusted (${resolved.reason}): driver sent ${final_fare}, applied ${resolved.fare} (estimate ${trip.fareEstimate})`);
+            }
             if (notes)      trip.notes     = notes;
             // Validated transition (IN_PROGRESS → COMPLETED) + audit log, in-tx.
             await applyTransition(trip, 'COMPLETED', {
-                actor: 'DRIVER', transaction: t, meta: { finalFare: trip.fareFinal },
+                actor: 'DRIVER', transaction: t, meta: { finalFare: trip.fareFinal, fareResolution: resolved.reason },
             });
 
             console.log('✅ [DRIVER] Trip status → COMPLETED');

@@ -442,6 +442,51 @@ class FareCalculatorService {
             return { error: true, message: error.message, status: error.status || 500 };
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔒 Resolve the final fare at trip completion — SERVER AUTHORITATIVE
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // The driver's app sends a `finalFare`, but it must never be trusted
+    // blindly: commission is derived from fareFinal, so a driver could
+    // under-report to pay less commission, or over-charge a cash passenger.
+    // The passenger was quoted `fareEstimate` at order time (server-computed,
+    // surge-capped) — that is the contract.
+    //
+    // Rule:
+    //   • Floor  = the quoted estimate. The final fare may never be lower,
+    //     so commission can never be under-reported.
+    //   • Ceiling = estimate × MAX_FINAL_FARE_MULTIPLIER, to allow legitimate
+    //     upward adjustment (waiting time, detour) without enabling gouging.
+    //   • Missing / invalid client value → the estimate itself.
+    //
+    // Returns { fare, adjusted, reason } — `adjusted` true when the client
+    // value was clamped or dropped, for audit visibility.
+    resolveFinalFare(fareEstimate, clientFinalFare) {
+        const MAX_FINAL_FARE_MULTIPLIER = 1.5;
+
+        const estimate = Math.round(Number(fareEstimate) || 0);
+        if (estimate <= 0) {
+            // No trustworthy estimate to anchor to — accept a sane client
+            // number if present, else 0 (settlement falls back to estimate).
+            const c = Math.round(Number(clientFinalFare) || 0);
+            return { fare: c > 0 ? c : 0, adjusted: false, reason: 'no_estimate_anchor' };
+        }
+
+        const ceiling = Math.round(estimate * MAX_FINAL_FARE_MULTIPLIER);
+        const client = Number(clientFinalFare);
+
+        if (!Number.isFinite(client) || client <= 0) {
+            return { fare: estimate, adjusted: false, reason: 'used_estimate' };
+        }
+        if (client < estimate) {
+            return { fare: estimate, adjusted: true, reason: 'below_estimate_floored' };
+        }
+        if (client > ceiling) {
+            return { fare: ceiling, adjusted: true, reason: 'above_ceiling_capped' };
+        }
+        return { fare: Math.round(client), adjusted: false, reason: 'within_band' };
+    }
 }
 
 module.exports = new FareCalculatorService();
