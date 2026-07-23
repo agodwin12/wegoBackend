@@ -13,7 +13,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Account, PartnerProfile, Vehicle, VehicleRental } = require('../models');
+const { Account, Vehicle, VehicleRental } = require('../models');
 
 /**
  * @route  GET /api/partner/vehicles
@@ -30,23 +30,12 @@ exports.getMyVehicles = async (req, res) => {
             });
         }
 
-        // Direct lookup — NOT PartnerProfile.findByAccountId: that helper's
-        // account include selects account.role, a column the accounts table
-        // does not have, and 500s on every call.
-        const profile = await PartnerProfile.findOne({
-            where: { accountId: req.user.uuid },
-            attributes: ['id'],
-        });
-        if (!profile) {
-            return res.status(404).json({
-                success: false,
-                message: 'Profil partenaire introuvable.',
-                code: 'PARTNER_PROFILE_NOT_FOUND',
-            });
-        }
-
+        // vehicles.partner_id is a foreign key onto accounts.uuid — NOT onto
+        // partner_profiles.id (checked against the live schema: constraint
+        // vehicles_ibfk_1 REFERENCES accounts(uuid)). The caller's account
+        // uuid IS the vehicle owner key, no profile lookup needed.
         const vehicles = await Vehicle.findAll({
-            where: { partnerId: profile.id },
+            where: { partnerId: req.user.uuid },
             order: [['createdAt', 'DESC']],
         });
 
