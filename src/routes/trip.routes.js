@@ -13,6 +13,8 @@ router.get('/history', authenticate, tripController.getTripHistory);
 router.get('/:tripId', authenticate, tripController.getTripDetails);
 router.get('/:tripId/events', authenticate, tripController.getTripEvents);
 router.put('/:tripId/cancel', authenticate, tripController.cancelTrip);
+router.post('/:tripId/sos', authenticate, tripController.raiseSos);
+router.post('/:tripId/share', authenticate, tripController.shareTrip);
 router.post('/', authenticate, tripController.createTrip);
 
 

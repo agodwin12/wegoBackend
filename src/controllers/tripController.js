@@ -789,3 +789,114 @@ exports.cancelTrip = async (req, res, next) => {
         next(error);
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🆘 SOS — panic button (passenger or driver)
+// ═══════════════════════════════════════════════════════════════════════════
+// The app dials the local emergency number itself; this records the alert with
+// the caller's live location, pushes it to the OTHER party and to ops in
+// realtime, and returns the number to dial so it is configurable server-side.
+// Must be dependable — never throws on a notify failure.
+exports.raiseSos = async (req, res, next) => {
+    try {
+        const { tripId }   = req.params;
+        const callerUuid   = req.user.uuid;
+        const { lat, lng } = req.body || {};
+
+        const trip = await Trip.findByPk(tripId);
+        if (!trip) {
+            return res.status(404).json({ success: false, message: 'Trip not found.' });
+        }
+        // Only a participant of THIS trip can raise its alarm.
+        const isPassenger = trip.passengerId === callerUuid;
+        const isDriver    = trip.driverId === callerUuid;
+        if (!isPassenger && !isDriver) {
+            return res.status(403).json({ success: false, message: 'Not a participant of this trip.' });
+        }
+
+        const role = isPassenger ? 'PASSENGER' : 'DRIVER';
+        const location = {
+            lat: Number(lat) || null,
+            lng: Number(lng) || null,
+        };
+
+        // Immutable audit trail.
+        await TripEvent.create({
+            id:      uuidv4(),
+            tripId,
+            type:    'SOS_RAISED',
+            payload: { by: role, callerUuid, location, at: new Date().toISOString() },
+        });
+        console.warn(`🆘 [SOS] Trip ${tripId} — raised by ${role} ${callerUuid} @ ${location.lat},${location.lng}`);
+
+        // Realtime fan-out: the other participant + an ops room. Never fatal.
+        try {
+            const io = getIO();
+            if (io) {
+                const otherId = isPassenger ? trip.driverId : trip.passengerId;
+                const alert = { tripId, by: role, location, at: new Date().toISOString() };
+                if (otherId) io.to(`user:${otherId}`).emit('trip:sos', alert);
+                io.to('ops:safety').emit('trip:sos', { ...alert, callerUuid });
+            }
+        } catch (e) {
+            console.error('⚠️ [SOS] realtime fan-out failed:', e.message);
+        }
+
+        // Push notification to the other party. Never fatal.
+        try {
+            const otherId = isPassenger ? trip.driverId : trip.passengerId;
+            if (otherId) {
+                getNotificationService().send({
+                    accountUuid: otherId,
+                    type:        'TRIP_SOS',
+                    title:       '🆘 Alerte de sécurité',
+                    body:        "Une alerte d'urgence a été déclenchée pendant votre course. Restez prudent.",
+                    data:        { tripId, screen: 'trip' },
+                });
+            }
+        } catch (_) { /* non-critical */ }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Alerte enregistrée.',
+            data: {
+                // Cameroon emergency numbers (police 117, gendarmerie 113).
+                emergency_number: process.env.EMERGENCY_PHONE || '117',
+            },
+        });
+    } catch (error) {
+        console.error('❌ [SOS] Error:', error.stack || error.message);
+        next(error);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🔗 Share trip — issue a tokenised tracking link for a live trip
+// ═══════════════════════════════════════════════════════════════════════════
+exports.shareTrip = async (req, res, next) => {
+    try {
+        const { tripId } = req.params;
+        const trip = await Trip.findByPk(tripId);
+        if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+        if (trip.passengerId !== req.user.uuid && trip.driverId !== req.user.uuid) {
+            return res.status(403).json({ success: false, message: 'Not a participant of this trip.' });
+        }
+
+        // A signed, expiring token keeps the public tracking page from being
+        // guessable or reusable after the ride.
+        const jwt = require('jsonwebtoken');
+        const token = jwt.sign(
+            { tripId, purpose: 'trip_share' },
+            process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET,
+            { expiresIn: '6h' }
+        );
+        const base = process.env.PUBLIC_WEB_URL || 'https://wego.cm';
+        return res.status(200).json({
+            success: true,
+            data: { url: `${base}/t/${token}` },
+        });
+    } catch (error) {
+        console.error('❌ [SHARE TRIP] Error:', error.stack || error.message);
+        next(error);
+    }
+};
