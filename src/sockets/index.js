@@ -110,8 +110,27 @@ function setupSocketIO(server) {
             const { verifyAccessToken } = require('../utils/jwt');
             const decoded = verifyAccessToken(token);
 
+            // A valid signature is NOT enough: the account may have been
+            // suspended or deleted since the token was issued. Verify it against
+            // the DB at handshake time (once per connection, not per event) so a
+            // revoked user can't keep a live socket with full driver powers.
+            const account = await Account.findOne({
+                where:      { uuid: decoded.uuid },
+                attributes: ['uuid', 'user_type', 'status'],
+            });
+            if (!account) {
+                console.log(`❌ [SOCKET] Rejected — account ${decoded.uuid} not found`);
+                return next(new Error('Authentication error: account not found'));
+            }
+            if (account.status === 'SUSPENDED' || account.status === 'DELETED') {
+                console.log(`❌ [SOCKET] Rejected — account ${decoded.uuid} is ${account.status}`);
+                return next(new Error('Authentication error: account ' + account.status.toLowerCase()));
+            }
+
             socket.userId     = decoded.uuid;
-            socket.userType   = decoded.user_type;
+            // user_type from the DB is authoritative over the (possibly stale)
+            // token claim; fall back to the token if the column is null.
+            socket.userType   = account.user_type || decoded.user_type;
             socket.activeMode = decoded.active_mode;
             socket.email      = decoded.email;
 

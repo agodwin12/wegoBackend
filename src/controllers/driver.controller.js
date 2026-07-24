@@ -668,6 +668,27 @@ exports.acceptTrip = async (req, res, next) => {
             });
         }
 
+        // ── STEP 4a: Offer membership ──────────────────────────────────
+        // A driver may only accept a trip they were actually offered. Without
+        // this, any authenticated driver could POST /accept for any SEARCHING
+        // trip id and steal it, bypassing the matching radius/tier/wallet
+        // filters. The current round's offered set lives in TRIP_OFFERS; if it's
+        // gone the offer has expired, so we reject rather than fail open.
+        {
+            const offersKey = REDIS_KEYS.TRIP_OFFERS ? REDIS_KEYS.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`;
+            const offers    = await redisHelpers.getJson(offersKey);
+            const offered   = offers?.notifiedDrivers || offers?.drivers || [];
+            if (!offered.includes(driverId)) {
+                await redisClient.del(lockKey, acceptingKey, noExpireKey);
+                console.log(`⛔ [ACCEPT-TRIP] Driver ${driverId} was not offered trip ${tripId} — rejecting`);
+                return res.status(403).json({
+                    error:   true,
+                    message: 'This trip was not offered to you or the offer has expired',
+                    code:    'OFFER_NOT_FOUND',
+                });
+            }
+        }
+
         // ── STEP 4b: Wallet balance gate ───────────────────────────────
         try {
             const fareEstimate       = Math.round(trip.fareEstimate || 0);
@@ -1585,17 +1606,14 @@ exports.getRatings = async (req, res, next) => {
         const driverId = req.user.uuid;
         const offset   = (parseInt(page) - 1) * parseInt(limit);
 
+        // Ratings are ANONYMOUS: a driver must not be able to see WHICH passenger
+        // gave a given (e.g. 1-star) rating, or they could retaliate. We no longer
+        // join the rater's identity — only the score, review text and date.
         const { count, rows: ratings } = await Rating.findAndCountAll({
             where: {
                 ratedUser:  driverId,
                 ratingType: 'PASSENGER_TO_DRIVER',
             },
-            include: [{
-                model:      Account,
-                as:         'rater',
-                attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
-                required:   false,
-            }],
             order:  [['createdAt', 'DESC']],
             limit:  parseInt(limit),
             offset,
@@ -1622,12 +1640,7 @@ exports.getRatings = async (req, res, next) => {
                     rating:    r.rating,
                     review:    r.review || null,
                     createdAt: r.createdAt,
-                    rater: r.rater ? {
-                        uuid:      r.rater.uuid,
-                        firstName: r.rater.first_name,
-                        lastName:  r.rater.last_name,
-                        avatar:    r.rater.avatar_url,
-                    } : null,
+                    // rater identity intentionally omitted — ratings are anonymous.
                 })),
                 pagination: {
                     total:      count,

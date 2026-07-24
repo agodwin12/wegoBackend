@@ -102,4 +102,20 @@ const authLimiter = rateLimit({
     message: { success: false, error: 'Too many attempts, please try again later.' },
 });
 
-module.exports = { corsOptions, globalLimiter, authLimiter, ALLOWED_ORIGINS, ALLOW_ALL };
+// Ride creation is expensive: each POST /trips broadcasts to nearby drivers and
+// fires push notifications. A passenger can't hold two active trips at once (the
+// controller guards that), but nothing stopped rapid create→cancel→create churn
+// spamming drivers. Cap creations per user — generous for real use, hostile to
+// a spammer. Keyed by authenticated user (falls back to IP).
+const CREATE_TRIP_WINDOW_MS = Number(process.env.CREATE_TRIP_RATE_WINDOW_MS) || 10 * 60 * 1000;
+const CREATE_TRIP_MAX       = Number(process.env.CREATE_TRIP_RATE_MAX) || 15;
+const createTripLimiter = rateLimit({
+    windowMs: CREATE_TRIP_WINDOW_MS,
+    max: CREATE_TRIP_MAX,
+    keyGenerator: userOrIpKey,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many ride requests in a short time. Please wait a moment and try again.' },
+});
+
+module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, ALLOWED_ORIGINS, ALLOW_ALL };

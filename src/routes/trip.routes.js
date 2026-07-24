@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const tripController = require('../controllers/tripController');
 const { authenticate } = require('../middleware/auth.middleware');
+const { createTripLimiter } = require('../config/security');
 
 // Static routes FIRST (before any /:tipId)
 router.get('/recent', authenticate, tripController.getRecentTrips);
@@ -15,7 +16,7 @@ router.get('/:tripId/events', authenticate, tripController.getTripEvents);
 router.put('/:tripId/cancel', authenticate, tripController.cancelTrip);
 router.post('/:tripId/sos', authenticate, tripController.raiseSos);
 router.post('/:tripId/share', authenticate, tripController.shareTrip);
-router.post('/', authenticate, tripController.createTrip);
+router.post('/', authenticate, createTripLimiter, tripController.createTrip);
 
 
 module.exports = router;

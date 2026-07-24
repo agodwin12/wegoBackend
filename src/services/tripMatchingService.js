@@ -257,15 +257,16 @@ class TripMatchingService {
                 paymentMethod: trip.paymentMethod,
                 vehicleType:   requestedTier,
                 vehicle_type:  requestedTier,
+                // PRE-ACCEPT offer goes to EVERY eligible driver, most of whom
+                // will never take the trip. Expose only what a driver needs to
+                // decide — first name, avatar, rating. NO phone and NO surname:
+                // the passenger's full contact is revealed to the ONE driver who
+                // accepts, in the acceptTrip response / trip:matched payload.
                 passenger: {
                     uuid:       passengerAccount.uuid,
-                    name:       `${passengerAccount.first_name} ${passengerAccount.last_name}`.trim(),
+                    name:       passengerAccount.first_name,
                     firstName:  passengerAccount.first_name,
-                    lastName:   passengerAccount.last_name,
                     first_name: passengerAccount.first_name,
-                    last_name:  passengerAccount.last_name,
-                    phone:      passengerAccount.phone_e164,
-                    phone_e164: passengerAccount.phone_e164,
                     avatar:     passengerAccount.avatar_url,
                     avatar_url: passengerAccount.avatar_url,
                     rating:     passengerRating,
@@ -419,6 +420,19 @@ class TripMatchingService {
                 if (!driver || driver.current_mode !== 'ride') {
                     console.log(`⚠️  [MATCHING] Driver ${driverId} no longer in ride mode — rejecting`);
                     return { success: false, reason: 'Driver switched to delivery mode' };
+                }
+
+                // ── Offer membership: a driver may only accept a trip they were
+                //    actually offered. Without this any authenticated driver could
+                //    accept any SEARCHING trip by id (stealing it, bypassing the
+                //    matching radius/tier/wallet filters). The current round's
+                //    offered set lives in TRIP_OFFERS; if it's gone the offer has
+                //    expired, so we reject rather than fail open.
+                const offers   = await redisHelpers.getJson(REDIS_KEYS.TRIP_OFFERS(tripId));
+                const offered  = offers?.notifiedDrivers || offers?.drivers || [];
+                if (!offered.includes(driverId)) {
+                    console.log(`⛔ [MATCHING] Driver ${driverId} was not offered trip ${tripId} — rejecting`);
+                    return { success: false, reason: 'This trip was not offered to you or the offer has expired', code: 'OFFER_NOT_FOUND' };
                 }
 
                 // ── Re-check wallet (reserve vs. max settleable, as the gate) ──
