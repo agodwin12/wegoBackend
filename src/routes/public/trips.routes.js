@@ -3,6 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const tripsController = require('../../controllers/public/tripsController');
+const mainTripController = require('../../controllers/tripController');
 const { authenticate } = require('../../middleware/auth.middleware');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -32,6 +33,18 @@ router.use(authenticate);
  * @query   status - Filter by status (optional)
  */
 router.get('/recent', tripsController.getRecentTrips);
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATIC ROUTES THAT WOULD OTHERWISE BE SHADOWED BY /:tripId
+// ═══════════════════════════════════════════════════════════════════════
+// This router is mounted on /api/trips BEFORE the main trip router, so an
+// unqualified `/:tripId` below captures sibling static paths — notably
+// GET /trips/active (trip RESUME after phone-off) and GET /trips/history,
+// which were resolving to getTripDetails and 404-ing as "Trip not found".
+// Declaring them here (before /:tripId) routes them to the real handlers.
+// (Express 5 dropped inline param-regex, so we list the routes explicitly.)
+router.get('/active',  mainTripController.getActiveTrip);
+router.get('/history', mainTripController.getTripHistory);
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET TRIP DETAILS
