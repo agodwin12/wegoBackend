@@ -75,7 +75,7 @@ function _getIO(req) {
 async function getRouteDistance(originLat, originLng, destLat, destLng) {
     try {
         // LocationIQ (OSRM) — same provider as the ride fare engine. Returns the
-        // same {routes:[{distance(m),duration(s)}]} shape Mapbox did.
+        // Returns the standard OSRM {routes:[{distance(m),duration(s)}]} shape.
         const key = process.env.LOCATIONIQ_KEY;
         if (!key) throw new Error('LOCATIONIQ_KEY not set');
 
@@ -111,9 +111,8 @@ async function getRouteDistance(originLat, originLng, destLat, destLng) {
     }
 }
 
-// Aliases kept for any internal callers (names are historical).
+// Alias kept for existing callers (name is historical).
 const getGoogleMapsDistance = getRouteDistance;
-const getMapboxDistance     = getRouteDistance;
 
 async function findPricingZone() {
     return DeliveryPricing.findOne({ where: { is_active: true }, order: [['id', 'ASC']] });
