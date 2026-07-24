@@ -275,7 +275,7 @@ exports.getRecentTrips = async (req, res) => {
                     include: [
                         {
                             model:      DriverProfile,
-                            as:         'driverProfile',
+                            as:         'driver_profile',
                             attributes: [
                                 'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
                                 'vehicle_color', 'vehicle_year', 'rating_avg', 'total_trips',
@@ -311,15 +311,15 @@ exports.getRecentTrips = async (req, res) => {
                 lastName:   trip.driver.last_name,
                 phone:      trip.driver.phone_e164,
                 avatar:     trip.driver.avatar_url,
-                vehicle: trip.driver.driverProfile ? {
-                    type:      trip.driver.driverProfile.vehicle_type,
-                    plate:     trip.driver.driverProfile.vehicle_plate,
-                    makeModel: trip.driver.driverProfile.vehicle_make_model,
-                    color:     trip.driver.driverProfile.vehicle_color,
-                    year:      trip.driver.driverProfile.vehicle_year,
+                vehicle: trip.driver.driver_profile ? {
+                    type:      trip.driver.driver_profile.vehicle_type,
+                    plate:     trip.driver.driver_profile.vehicle_plate,
+                    makeModel: trip.driver.driver_profile.vehicle_make_model,
+                    color:     trip.driver.driver_profile.vehicle_color,
+                    year:      trip.driver.driver_profile.vehicle_year,
                 } : null,
-                rating:     trip.driver.driverProfile?.rating_avg  || null,
-                totalTrips: trip.driver.driverProfile?.total_trips || 0,
+                rating:     trip.driver.driver_profile?.rating_avg  || null,
+                totalTrips: trip.driver.driver_profile?.total_trips || 0,
             } : null,
         }));
 
@@ -431,7 +431,7 @@ exports.getTripDetails = async (req, res, next) => {
                     include: [
                         {
                             model:      DriverProfile,
-                            as:         'driverProfile',
+                            as:         'driver_profile',
                             attributes: [
                                 'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
                                 'vehicle_color', 'vehicle_year', 'vehicle_photo_url',
@@ -508,7 +508,7 @@ exports.getActiveTrip = async (req, res, next) => {
                     include: [
                         {
                             model:      DriverProfile,
-                            as:         'driverProfile',
+                            as:         'driver_profile',
                             attributes: [
                                 'vehicle_type', 'vehicle_plate', 'vehicle_make_model',
                                 'vehicle_color', 'vehicle_year', 'vehicle_photo_url', 'rating_avg',
@@ -566,7 +566,7 @@ exports.getTripHistory = async (req, res, next) => {
                     include: [
                         {
                             model:      DriverProfile,
-                            as:         'driverProfile',
+                            as:         'driver_profile',
                             attributes: ['vehicle_type', 'vehicle_plate', 'vehicle_make_model', 'rating_avg'],
                             required:   false,
                         },
