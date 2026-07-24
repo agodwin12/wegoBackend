@@ -33,8 +33,12 @@ const CANCELLABLE_FROM = [
 const TRANSITIONS = Object.freeze({
     [STATES.DRAFT]:           [STATES.SEARCHING],
     [STATES.SEARCHING]:       [STATES.MATCHED, STATES.NO_DRIVERS],
-    [STATES.MATCHED]:         [STATES.DRIVER_ASSIGNED, STATES.DRIVER_EN_ROUTE],
-    [STATES.DRIVER_ASSIGNED]: [STATES.DRIVER_EN_ROUTE],
+    // The HTTP driver flow has no explicit "en route" signal: a driver goes
+    // MATCHED → DRIVER_ARRIVED directly (the passenger's arriving screen tracks
+    // the approach live). DRIVER_ASSIGNED / DRIVER_EN_ROUTE remain valid
+    // intermediate states for flows that do emit them.
+    [STATES.MATCHED]:         [STATES.DRIVER_ASSIGNED, STATES.DRIVER_EN_ROUTE, STATES.DRIVER_ARRIVED],
+    [STATES.DRIVER_ASSIGNED]: [STATES.DRIVER_EN_ROUTE, STATES.DRIVER_ARRIVED],
     [STATES.DRIVER_EN_ROUTE]: [STATES.DRIVER_ARRIVED],
     [STATES.DRIVER_ARRIVED]:  [STATES.IN_PROGRESS, STATES.NO_SHOW],
     [STATES.IN_PROGRESS]:     [STATES.COMPLETED],

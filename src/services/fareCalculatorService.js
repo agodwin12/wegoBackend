@@ -9,6 +9,12 @@ const { PriceRule, RideSurgeRule } = require('../models');
 // Hard ceiling so no surge rule (or stacking) can multiply a fare beyond this.
 const MAX_SURGE_MULTIPLIER = 3.0;
 
+// The most a settled final fare may exceed its quoted estimate (waiting/detour).
+// Exported below so the driver accept-gate reserves against the same ceiling —
+// otherwise a maxed-out final fare's commission could exceed the gated amount
+// and push the wallet negative.
+const MAX_FINAL_FARE_MULTIPLIER = 1.5;
+
 const VEHICLE_TYPES = ['economy', 'comfort', 'luxury'];
 
 class FareCalculatorService {
@@ -463,8 +469,6 @@ class FareCalculatorService {
     // Returns { fare, adjusted, reason } — `adjusted` true when the client
     // value was clamped or dropped, for audit visibility.
     resolveFinalFare(fareEstimate, clientFinalFare) {
-        const MAX_FINAL_FARE_MULTIPLIER = 1.5;
-
         const estimate = Math.round(Number(fareEstimate) || 0);
         if (estimate <= 0) {
             // No trustworthy estimate to anchor to — accept a sane client
@@ -489,4 +493,8 @@ class FareCalculatorService {
     }
 }
 
-module.exports = new FareCalculatorService();
+const fareCalculatorService = new FareCalculatorService();
+// Expose the settlement ceiling so callers (e.g. the driver accept-gate) can
+// reserve against the maximum a trip could ever settle at.
+fareCalculatorService.MAX_FINAL_FARE_MULTIPLIER = MAX_FINAL_FARE_MULTIPLIER;
+module.exports = fareCalculatorService;

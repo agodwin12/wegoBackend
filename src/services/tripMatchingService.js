@@ -2,6 +2,8 @@
 'use strict';
 
 const locationService                        = require('./locationService');
+const fareCalculatorService                  = require('./fareCalculatorService');
+const { applyTransition }                    = require('./tripState.service');
 const { redisClient, REDIS_KEYS, redisHelpers } = require('../config/redis');
 const {
     Trip, TripEvent, Account, DriverProfile,
@@ -26,13 +28,43 @@ class TripMatchingService {
         this.offerTtlMs     = parseInt(process.env.OFFER_TTL_MS            || 20000, 10);
         this.searchRadiusKm = parseFloat(process.env.DRIVER_SEARCH_RADIUS_KM || 5);
 
+        // Retry / radius-expansion: rather than a single blast that gives up the
+        // instant the first radius has no taker, we run up to N rounds, widening
+        // the search each round. A driver just outside the initial ring, or one
+        // who comes online a few seconds later, still gets a shot.
+        this.maxSearchRadiusKm  = parseFloat(process.env.DRIVER_MAX_SEARCH_RADIUS_KM  || 15);
+        this.radiusStepKm       = parseFloat(process.env.DRIVER_SEARCH_RADIUS_STEP_KM || 5);
+        this.maxBroadcastRounds = parseInt(process.env.MATCH_MAX_ROUNDS || 3, 10);
+        // Pause between an empty round and the next (wider) one, so drivers that
+        // just came online / moved into range can be picked up.
+        this.roundRetryDelayMs  = parseInt(process.env.MATCH_ROUND_RETRY_MS || 3000, 10);
+
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔧 [TRIP-MATCHING] Config:');
         console.log('   OFFER_TTL_MS  :', this.offerTtlMs, 'ms');
         console.log('   SEARCH_RADIUS :', this.searchRadiusKm, 'km');
+        console.log('   MAX_RADIUS    :', this.maxSearchRadiusKm, 'km');
+        console.log('   RADIUS_STEP   :', this.radiusStepKm, 'km');
+        console.log('   MAX_ROUNDS    :', this.maxBroadcastRounds);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         this.activeTimeouts = new Map();
+    }
+
+    // Round state (attempt # + current radius) lives in Redis so it survives
+    // across the setTimeout callbacks and is not lost if the trip is picked up
+    // by a different worker.
+    _roundKey(tripId) { return `trip:match_round:${tripId}`; }
+
+    async _getRoundState(tripId) {
+        const s = await redisHelpers.getJson(this._roundKey(tripId));
+        return s || { round: 1, radiusKm: this.searchRadiusKm };
+    }
+
+    async _setRoundState(tripId, state) {
+        // Keep it a little longer than one offer window so a late timeout can
+        // still read it.
+        await redisHelpers.setJson(this._roundKey(tripId), state, Math.ceil(this.offerTtlMs / 1000) + 30);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -58,17 +90,28 @@ class TripMatchingService {
         }
     }
 
+    // Public entry point — starts round 1 at the base radius, then delegates to
+    // _runMatchRound. Later rounds (wider radius) are scheduled from
+    // _advanceOrGiveUp when a round finds no taker.
     async broadcastTripToDrivers(tripId, io) {
+        await this._setRoundState(tripId, { round: 1, radiusKm: this.searchRadiusKm });
+        return this._runMatchRound(tripId, io);
+    }
+
+    async _runMatchRound(tripId, io) {
         try {
-            console.log(`\n📢 [MATCHING] broadcastTripToDrivers(${tripId})`);
+            const { round, radiusKm } = await this._getRoundState(tripId);
+            console.log(`\n📢 [MATCHING] _runMatchRound(${tripId}) — round ${round}/${this.maxBroadcastRounds}, radius ${radiusKm} km`);
 
             const trip = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
             if (!trip) {
                 console.log(`❌ [MATCHING] Trip ${tripId} not found in Redis`);
+                await redisClient.del(this._roundKey(tripId));
                 return { success: false, reason: 'Trip not found' };
             }
             if (trip.status !== 'SEARCHING') {
                 console.log(`⚠️  [MATCHING] Trip ${tripId} status is ${trip.status}, expected SEARCHING`);
+                await redisClient.del(this._roundKey(tripId));
                 return { success: false, reason: 'Trip not in searching status' };
             }
 
@@ -87,15 +130,12 @@ class TripMatchingService {
             const nearbyDrivers = await locationService.findNearbyDrivers(
                 parseFloat(trip.pickupLng),
                 parseFloat(trip.pickupLat),
-                this.searchRadiusKm
+                radiusKm
             );
 
             if (!nearbyDrivers || nearbyDrivers.length === 0) {
-                console.log(`❌ [MATCHING] No drivers near trip ${tripId}`);
-                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-                await this._closeUnmatchedTrip(tripId);
-                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+                console.log(`❌ [MATCHING] No drivers near trip ${tripId} within ${radiusKm} km`);
+                return this._advanceOrGiveUp(tripId, io, 'no_drivers_in_radius');
             }
 
             console.log(`🔍 [MATCHING] ${nearbyDrivers.length} drivers found in radius`);
@@ -117,11 +157,8 @@ class TripMatchingService {
             console.log(`✅ [MATCHING] ${rideModeDrivers.length}/${nearbyDrivers.length} drivers in ride mode`);
 
             if (rideModeDrivers.length === 0) {
-                console.log(`❌ [MATCHING] No ride-mode drivers available for trip ${tripId}`);
-                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-                await this._closeUnmatchedTrip(tripId);
-                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+                console.log(`❌ [MATCHING] No ride-mode drivers within ${radiusKm} km for trip ${tripId}`);
+                return this._advanceOrGiveUp(tripId, io, 'no_ride_mode_drivers');
             }
 
             // ── STEP 2.5: STRICT vehicle-tier filter ────────────────────────
@@ -150,20 +187,23 @@ class TripMatchingService {
             console.log(`✅ [MATCHING] ${tierDrivers.length}/${rideModeDrivers.length} drivers match tier '${requestedTier}'`);
 
             if (tierDrivers.length === 0) {
-                console.log(`❌ [MATCHING] No '${requestedTier}' drivers available for trip ${tripId}`);
-                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-                await this._closeUnmatchedTrip(tripId);
-                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+                console.log(`❌ [MATCHING] No '${requestedTier}' drivers within ${radiusKm} km for trip ${tripId}`);
+                return this._advanceOrGiveUp(tripId, io, 'no_tier_drivers');
             }
 
             // ── STEP 3: Wallet gate ─────────────────────────────────────────
+            // Reserve against the MOST this trip could settle at (final fare may
+            // rise to estimate × cap), matching the driver accept-gate — so we
+            // never offer a trip a driver can't actually afford to complete.
             const fareEstimate       = Math.round(trip.fareEstimate || 0);
-            const commissionRate     = await this._getCommissionRate(fareEstimate);
-            const commissionRequired = Math.ceil(fareEstimate * commissionRate);
+            const maxSettleableFare  = Math.round(fareEstimate * fareCalculatorService.MAX_FINAL_FARE_MULTIPLIER);
+            const rateAtEstimate     = await this._getCommissionRate(fareEstimate);
+            const rateAtCap          = await this._getCommissionRate(maxSettleableFare);
+            const commissionRate     = Math.max(rateAtEstimate, rateAtCap);
+            const commissionRequired = Math.ceil(maxSettleableFare * commissionRate);
 
             console.log(`\n💰 [MATCHING] Wallet gate:`);
-            console.log(`   Fare estimate     : ${fareEstimate} XAF`);
+            console.log(`   Fare estimate     : ${fareEstimate} XAF (reserve vs. max ${maxSettleableFare} XAF)`);
             console.log(`   Commission rate   : ${(commissionRate * 100).toFixed(1)}%`);
             console.log(`   Min balance needed: ${commissionRequired} XAF`);
 
@@ -191,11 +231,8 @@ class TripMatchingService {
             console.log(`✅ [MATCHING] ${eligibleDrivers.length}/${tierDrivers.length} tier-matched drivers have sufficient balance\n`);
 
             if (eligibleDrivers.length === 0) {
-                console.log(`❌ [MATCHING] No drivers with sufficient wallet balance for trip ${tripId}`);
-                await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-                await redisClient.del(`passenger:active_trip:${trip.passengerId}`);
-                await this._closeUnmatchedTrip(tripId);
-                return { success: false, reason: 'No drivers available', driversNotified: 0 };
+                console.log(`❌ [MATCHING] No wallet-eligible drivers within ${radiusKm} km for trip ${tripId}`);
+                return this._advanceOrGiveUp(tripId, io, 'no_wallet_eligible_drivers');
             }
 
             // ── STEP 4: Build trip offer payload ────────────────────────────
@@ -384,10 +421,13 @@ class TripMatchingService {
                     return { success: false, reason: 'Driver switched to delivery mode' };
                 }
 
-                // ── Re-check wallet ─────────────────────────────────────────
+                // ── Re-check wallet (reserve vs. max settleable, as the gate) ──
                 const fareEstimate       = Math.round(tripData.fareEstimate || 0);
-                const commissionRate     = await this._getCommissionRate(fareEstimate);
-                const commissionRequired = Math.ceil(fareEstimate * commissionRate);
+                const maxSettleableFare  = Math.round(fareEstimate * fareCalculatorService.MAX_FINAL_FARE_MULTIPLIER);
+                const rateAtEstimate     = await this._getCommissionRate(fareEstimate);
+                const rateAtCap          = await this._getCommissionRate(maxSettleableFare);
+                const commissionRate     = Math.max(rateAtEstimate, rateAtCap);
+                const commissionRequired = Math.ceil(maxSettleableFare * commissionRate);
 
                 const wallet = await DriverWallet.findOne({
                     where:      { driverId, status: 'ACTIVE' },
@@ -419,14 +459,22 @@ class TripMatchingService {
                 await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, 7200);
 
                 // ── Persist to MySQL (source of truth) ─────────────────────
-                await Trip.update(
-                    {
-                        driverId,
-                        status:    'MATCHED',
-                        matchedAt: new Date(),
-                    },
-                    { where: { id: tripId } }
-                );
+                // Route through the central state machine: validates
+                // SEARCHING → MATCHED, stamps matchedAt, and writes the audit
+                // event — instead of a raw status write that logged nothing.
+                const dbTrip = await Trip.findByPk(tripId);
+                if (!dbTrip) {
+                    return { success: false, reason: 'Trip no longer available' };
+                }
+                dbTrip.driverId = driverId;
+                try {
+                    await applyTransition(dbTrip, 'MATCHED', { actor: 'DRIVER' });
+                } catch (e) {
+                    if (e.code === 'ILLEGAL_TRANSITION' || e.code === 'INVALID_STATE') {
+                        return { success: false, reason: 'Trip no longer available' };
+                    }
+                    throw e;
+                }
 
                 // ── Index active trip by driver + passenger ─────────────────
                 await redisClient.setex(
@@ -659,42 +707,94 @@ class TripMatchingService {
             }
 
             const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
-            if (!tripData) {
+            if (!tripData || tripData.status !== 'SEARCHING') {
                 await redisClient.del(`trip:timeout:${tripId}`);
                 return;
             }
 
-            if (tripData.status !== 'SEARCHING') {
-                await redisClient.del(`trip:timeout:${tripId}`);
-                return;
-            }
-
-            console.log(`⏱️  [MATCHING] Trip ${tripId} timed out with no driver`);
-
-            await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
-            await redisClient.del(`passenger:active_trip:${tripData.passengerId}`);
-            await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
+            console.log(`⏱️  [MATCHING] Trip ${tripId} offer window expired with no acceptance`);
+            // This round's offers are dead — clear them and try again, wider.
+            // _advanceOrGiveUp decides whether rounds/radius remain or we stop.
             await redisClient.del(`trip:timeout:${tripId}`);
-
-            const noDriverPayload = {
-                tripId,
-                message:   'No drivers accepted your trip. Please try again.',
-                timestamp: new Date().toISOString(),
-            };
-
-            io.to(`passenger:${tripData.passengerId}`).emit('trip:no_drivers', noDriverPayload);
-            io.to(`user:${tripData.passengerId}`).emit('trip:no_drivers', noDriverPayload);
-
-            const pSid = await redisClient.get(REDIS_KEYS.USER_SOCKET(tripData.passengerId));
-            if (pSid && io.sockets.sockets.get(pSid)) {
-                io.to(pSid).emit('trip:no_drivers', noDriverPayload);
-            }
-
-            console.log(`📤 [MATCHING] trip:no_drivers sent to passenger ${tripData.passengerId}`);
+            await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
+            await this._advanceOrGiveUp(tripId, io, 'offer_window_expired');
 
         } catch (error) {
             console.error(`❌ [MATCHING] _checkTripTimeout error:`, error.message);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIVATE: RETRY / RADIUS EXPANSION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // A round found no taker. Widen the radius and schedule another round if we
+    // still have rounds/radius headroom; otherwise give up for real.
+    async _advanceOrGiveUp(tripId, io, reason) {
+        const tripData = await redisHelpers.getJson(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        if (!tripData || tripData.status !== 'SEARCHING') {
+            await redisClient.del(this._roundKey(tripId));
+            return { success: false, reason: 'Trip no longer searching', driversNotified: 0 };
+        }
+
+        const state      = await this._getRoundState(tripId);
+        const nextRadius  = Math.min(state.radiusKm + this.radiusStepKm, this.maxSearchRadiusKm);
+        const canWiden    = nextRadius > state.radiusKm;
+        const hasRounds   = state.round < this.maxBroadcastRounds;
+
+        // Stop only once BOTH the round budget and the radius headroom are spent.
+        if (!hasRounds && !canWiden) {
+            console.log(`🛑 [MATCHING] Search exhausted for trip ${tripId} (round ${state.round}, radius ${state.radiusKm} km, reason ${reason})`);
+            return this._giveUp(tripId, io, tripData);
+        }
+
+        const nextState = {
+            round:    state.round + 1,
+            radiusKm: canWiden ? nextRadius : state.radiusKm,
+        };
+        await this._setRoundState(tripId, nextState);
+        console.log(`🔁 [MATCHING] Retry trip ${tripId} — round ${nextState.round}, radius ${nextState.radiusKm} km (prev reason ${reason})`);
+
+        const existing = this.activeTimeouts.get(tripId);
+        if (existing) { clearTimeout(existing); this.activeTimeouts.delete(tripId); }
+
+        const retryId = setTimeout(async () => {
+            this.activeTimeouts.delete(tripId);
+            try { await this._runMatchRound(tripId, io); }
+            catch (e) { console.error(`❌ [MATCHING] retry round failed for ${tripId}:`, e.message); }
+        }, this.roundRetryDelayMs);
+        this.activeTimeouts.set(tripId, retryId);
+
+        return { success: false, retrying: true, driversNotified: 0 };
+    }
+
+    // Truly out of options — tear down, close the DB row, tell the passenger.
+    async _giveUp(tripId, io, tripData) {
+        await redisClient.del(REDIS_KEYS.ACTIVE_TRIP(tripId));
+        await redisClient.del(`passenger:active_trip:${tripData.passengerId}`);
+        await redisClient.del(REDIS_KEYS.TRIP_OFFERS(tripId));
+        await redisClient.del(`trip:timeout:${tripId}`);
+        await redisClient.del(this._roundKey(tripId));
+
+        const t = this.activeTimeouts.get(tripId);
+        if (t) { clearTimeout(t); this.activeTimeouts.delete(tripId); }
+
+        await this._closeUnmatchedTrip(tripId);
+
+        const noDriverPayload = {
+            tripId,
+            message:   'No drivers available right now. Please try again shortly.',
+            timestamp: new Date().toISOString(),
+        };
+        io.to(`passenger:${tripData.passengerId}`).emit('trip:no_drivers', noDriverPayload);
+        io.to(`user:${tripData.passengerId}`).emit('trip:no_drivers', noDriverPayload);
+        const pSid = await redisClient.get(REDIS_KEYS.USER_SOCKET(tripData.passengerId));
+        if (pSid && io.sockets.sockets.get(pSid)) {
+            io.to(pSid).emit('trip:no_drivers', noDriverPayload);
+        }
+        console.log(`📤 [MATCHING] trip:no_drivers sent to passenger ${tripData.passengerId} (search exhausted)`);
+
+        return { success: false, reason: 'No drivers available', driversNotified: 0 };
     }
 
     // ═══════════════════════════════════════════════════════════════════════

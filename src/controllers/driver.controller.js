@@ -671,8 +671,19 @@ exports.acceptTrip = async (req, res, next) => {
         // ── STEP 4b: Wallet balance gate ───────────────────────────────
         try {
             const fareEstimate       = Math.round(trip.fareEstimate || 0);
-            const commissionRate     = await _getCommissionRate(fareEstimate);
-            const commissionRequired = Math.ceil(fareEstimate * commissionRate);
+            // Reserve against the MOST this trip could ever settle at, not the
+            // bare estimate. The final fare may rise to estimate × the cap
+            // (waiting/detour) and commission is charged on that final fare —
+            // gating on the estimate alone let the settlement debit exceed the
+            // balance and push the wallet negative. Same ceiling the fare
+            // resolver enforces, so the gate and the settlement stay consistent.
+            // Commission is fare-tiered, so reserve at the higher of the two
+            // band rates (estimate band vs. capped-fare band).
+            const maxSettleableFare  = Math.round(fareEstimate * fareCalculatorService.MAX_FINAL_FARE_MULTIPLIER);
+            const rateAtEstimate     = await _getCommissionRate(fareEstimate);
+            const rateAtCap          = await _getCommissionRate(maxSettleableFare);
+            const commissionRate     = Math.max(rateAtEstimate, rateAtCap);
+            const commissionRequired = Math.ceil(maxSettleableFare * commissionRate);
 
             const wallet = await DriverWallet.findOne({
                 where:      { driverId, status: 'ACTIVE' },
@@ -750,39 +761,38 @@ exports.acceptTrip = async (req, res, next) => {
         // We UPDATE the existing row — never create a duplicate.
         let dbTrip;
         try {
-            await Trip.update(
-                {
-                    driverId,
-                    status:            'MATCHED',
-                    driverLocationLat: driverLocation.lat,
-                    driverLocationLng: driverLocation.lng,
-                    matchedAt:         new Date(),
-                },
-                { where: { id: tripId } }
-            );
             dbTrip = await Trip.findByPk(tripId);
+            if (!dbTrip) {
+                await redisClient.del(lockKey, acceptingKey, noExpireKey);
+                return res.status(404).json({ error: true, message: 'Trip not found', code: 'TRIP_NOT_FOUND' });
+            }
+            dbTrip.driverId          = driverId;
+            dbTrip.driverLocationLat = driverLocation.lat;
+            dbTrip.driverLocationLng = driverLocation.lng;
+            // Validated SEARCHING → MATCHED transition via the central state
+            // machine: stamps matchedAt AND writes the audit event with the
+            // correct columns ({id,tripId,type,payload}). The old manual
+            // TripEvent.create used eventType/performedBy/metadata + no id —
+            // none of those are columns, so every accept audit silently threw.
+            await applyTransition(dbTrip, 'MATCHED', { actor: 'DRIVER', meta: { driverLocation } });
             console.log('✅ [ACCEPT-TRIP] Trip updated in DB → MATCHED:', dbTrip.id);
         } catch (dbError) {
-            console.error('❌ [ACCEPT-TRIP] DB update error:', dbError.message);
             await redisClient.del(lockKey, acceptingKey, noExpireKey);
+            if (dbError.code === 'ILLEGAL_TRANSITION' || dbError.code === 'INVALID_STATE') {
+                // DB says the trip already moved on (race the Redis check missed).
+                return res.status(409).json({
+                    error:   true,
+                    message: 'This trip is no longer available',
+                    code:    'TRIP_NOT_AVAILABLE',
+                });
+            }
+            console.error('❌ [ACCEPT-TRIP] DB update error:', dbError.message);
             return res.status(500).json({
                 error:   true,
                 message: 'Failed to update trip',
                 code:    'DATABASE_ERROR',
                 details: dbError.message,
             });
-        }
-
-        // ── STEP 8: Trip event audit log (non-fatal) ───────────────────
-        try {
-            await TripEvent.create({
-                tripId:      trip.id,
-                eventType:   'TRIP_MATCHED',
-                performedBy: driverId,
-                metadata:    { driverLocation, matchedAt: new Date().toISOString() },
-            });
-        } catch (e) {
-            console.warn('⚠️  [ACCEPT-TRIP] TripEvent create failed (non-fatal):', e.message);
         }
 
         // ── STEP 9: Update active trip refs in Redis ───────────────────
@@ -1003,18 +1013,22 @@ exports.arrivedAtPickup = async (req, res, next) => {
         if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
         if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
-        const allowedPrev = ['MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE'];
-        if (!allowedPrev.includes(trip.status)) {
-            return res.status(400).json({
-                error:         'Invalid status transition',
-                message:       `Cannot mark arrived from status: ${trip.status}. Must be one of: ${allowedPrev.join(', ')}`,
-                currentStatus: trip.status,
-            });
+        // Central state machine validates the jump, stamps driverArrivedAt
+        // (NOT the phantom `arrivedAt` — that column does not exist and was
+        // silently dropped by Sequelize, losing the arrival time), and writes
+        // the audit event with the correct columns.
+        try {
+            await applyTransition(trip, 'DRIVER_ARRIVED', { actor: 'DRIVER' });
+        } catch (e) {
+            if (e.code === 'ILLEGAL_TRANSITION' || e.code === 'INVALID_STATE') {
+                return res.status(400).json({
+                    error:         'Invalid status transition',
+                    message:       `Cannot mark arrived from status: ${trip.status}.`,
+                    currentStatus: trip.status,
+                });
+            }
+            throw e;
         }
-
-        trip.status    = 'DRIVER_ARRIVED';
-        trip.arrivedAt = new Date();
-        await trip.save();
 
         await redisHelpers.setJson(
             REDIS_KEYS.ACTIVE_TRIP(tripId),
@@ -1025,7 +1039,7 @@ exports.arrivedAtPickup = async (req, res, next) => {
         const io = getIO();
         io.to(`passenger:${trip.passengerId}`).emit('trip:driver_arrived', {
             tripId:    trip.id,
-            arrivedAt: trip.arrivedAt,
+            arrivedAt: trip.driverArrivedAt,
         });
 
         res.status(200).json({ message: 'Status updated: Driver arrived at pickup', data: { trip } });
@@ -1047,17 +1061,20 @@ exports.startTrip = async (req, res, next) => {
         if (!trip)                           return res.status(404).json({ error: 'Trip not found' });
         if (trip.driverId !== req.user.uuid) return res.status(403).json({ error: 'Access denied' });
 
-        if (trip.status !== 'DRIVER_ARRIVED') {
-            return res.status(400).json({
-                error:         'Invalid status transition',
-                message:       `Cannot start trip from status: ${trip.status}. Driver must be DRIVER_ARRIVED first.`,
-                currentStatus: trip.status,
-            });
+        // Central state machine validates DRIVER_ARRIVED → IN_PROGRESS, stamps
+        // tripStartedAt, and writes the audit event.
+        try {
+            await applyTransition(trip, 'IN_PROGRESS', { actor: 'DRIVER' });
+        } catch (e) {
+            if (e.code === 'ILLEGAL_TRANSITION' || e.code === 'INVALID_STATE') {
+                return res.status(400).json({
+                    error:         'Invalid status transition',
+                    message:       `Cannot start trip from status: ${trip.status}. Driver must be DRIVER_ARRIVED first.`,
+                    currentStatus: trip.status,
+                });
+            }
+            throw e;
         }
-
-        trip.status        = 'IN_PROGRESS';
-        trip.tripStartedAt = new Date();
-        await trip.save();
 
         await redisHelpers.setJson(
             REDIS_KEYS.ACTIVE_TRIP(tripId),
