@@ -251,7 +251,7 @@ class FareCalculatorService {
         console.log('🚀 [FARE] estimateAllVehicleTypes() called');
 
         try {
-            // Step 1: Route from Mapbox (one call for all vehicle types)
+            // Step 1: Route from LocationIQ (one call for all vehicle types)
             const route = await this.getRouteDetails(pickupLat, pickupLng, dropoffLat, dropoffLng);
             if (route.error) return route;
 

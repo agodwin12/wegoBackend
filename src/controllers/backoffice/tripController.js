@@ -522,3 +522,64 @@ exports.getPassengerTripDetail = async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to fetch trip details' });
     }
 };
+
+// @desc    Live map feed — all in-flight trips with their current driver position
+// @route   GET /api/backoffice/trips/live
+exports.getLiveTrips = async (req, res) => {
+    try {
+        const { getDriverLocation } = require('../../config/redis');
+
+        const ACTIVE = ['SEARCHING', 'MATCHED', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'IN_PROGRESS'];
+
+        const trips = await Trip.findAll({
+            where:   { status: { [Op.in]: ACTIVE } },
+            include: [
+                { model: Account, as: 'passenger', attributes: ['uuid', 'first_name', 'last_name'], required: false },
+                { model: Account, as: 'driver',    attributes: ['uuid', 'first_name', 'last_name'], required: false },
+            ],
+            order:   [['createdAt', 'DESC']],
+            limit:   500,
+        });
+
+        const items = await Promise.all(trips.map(async (t) => {
+            // Prefer the live Redis fix; fall back to the last position persisted
+            // on the trip row (present once a driver is assigned).
+            let driverPos = null;
+            if (t.driverId) {
+                const live = await getDriverLocation(t.driverId);
+                if (live) {
+                    driverPos = { lat: live.lat, lng: live.lng, heading: live.heading, source: 'live' };
+                } else if (t.driverLocationLat != null && t.driverLocationLng != null) {
+                    driverPos = { lat: Number(t.driverLocationLat), lng: Number(t.driverLocationLng), heading: 0, source: 'last_known' };
+                }
+            }
+            const nameOf = (a) => a ? `${a.first_name || ''} ${a.last_name || ''}`.trim() : null;
+            return {
+                id:       t.id,
+                status:   t.status,
+                pickup:   { lat: Number(t.pickupLat),  lng: Number(t.pickupLng),  address: t.pickupAddress },
+                dropoff:  { lat: Number(t.dropoffLat), lng: Number(t.dropoffLng), address: t.dropoffAddress },
+                driver:   t.driverId ? { id: t.driverId, name: nameOf(t.driver), position: driverPos } : null,
+                passenger:{ name: nameOf(t.passenger) },
+                vehicleType: t.vehicleType,
+                fareEstimate: t.fareEstimate,
+                createdAt: t.createdAt,
+            };
+        }));
+
+        const byStatus = items.reduce((acc, i) => { acc[i.status] = (acc[i.status] || 0) + 1; return acc; }, {});
+
+        res.status(200).json({
+            success: true,
+            data: {
+                trips:    items,
+                total:    items.length,
+                byStatus,
+                serverTime: new Date().toISOString(),
+            },
+        });
+    } catch (error) {
+        console.error('❌ [TRIP LIVE] Error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch live trips' });
+    }
+};

@@ -8,6 +8,12 @@ const { authenticateEmployee } = require('../../middleware/employeeAuth.middlewa
 // @access  Private (Employee)
 router.get('/stats', authenticateEmployee, tripController.getTripStats);
 
+// @route   GET /api/backoffice/trips/live
+// @desc    Live map feed — in-flight trips + current driver positions
+// @access  Private (Employee)
+// NOTE: must be declared BEFORE '/:id' or "live" is captured as an id.
+router.get('/live', authenticateEmployee, tripController.getLiveTrips);
+
 // @route   GET /api/backoffice/trips/:id
 // @desc    Get single trip details
 // @access  Private (Employee)

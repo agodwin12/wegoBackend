@@ -72,17 +72,17 @@ function _getIO(req) {
     return getIO();
 }
 
-async function getMapboxDistance(originLat, originLng, destLat, destLng) {
+async function getRouteDistance(originLat, originLng, destLat, destLng) {
     try {
-        const token = process.env.MAPBOX_ACCESS_TOKEN;
-        if (!token) throw new Error('MAPBOX_ACCESS_TOKEN not set');
+        // LocationIQ (OSRM) — same provider as the ride fare engine. Returns the
+        // same {routes:[{distance(m),duration(s)}]} shape Mapbox did.
+        const key = process.env.LOCATIONIQ_KEY;
+        if (!key) throw new Error('LOCATIONIQ_KEY not set');
 
-        const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${originLng},${originLat};${destLng},${destLat}`;
+        const url = `https://us1.locationiq.com/v1/directions/driving/${originLng},${originLat};${destLng},${destLat}`;
         const response = await axios.get(url, {
-            params: {
-                access_token: token,
-                overview:     'false',
-            },
+            params: { key, overview: 'false' },
+            timeout: 8000,
         });
 
         const route = response.data.routes?.[0];
@@ -96,7 +96,7 @@ async function getMapboxDistance(originLat, originLng, destLat, destLng) {
         return { distanceKm, durationSeconds, distanceText, durationText };
 
     } catch (error) {
-        console.error('❌ [DELIVERY] Mapbox directions error:', error.message);
+        console.error('❌ [DELIVERY] LocationIQ directions error:', error.message);
         // Haversine fallback (straight-line × 1.3 road factor)
         const R    = 6371;
         const dLat = (destLat - originLat) * Math.PI / 180;
@@ -111,8 +111,9 @@ async function getMapboxDistance(originLat, originLng, destLat, destLng) {
     }
 }
 
-// Alias kept for any internal callers
-const getGoogleMapsDistance = getMapboxDistance;
+// Aliases kept for any internal callers (names are historical).
+const getGoogleMapsDistance = getRouteDistance;
+const getMapboxDistance     = getRouteDistance;
 
 async function findPricingZone() {
     return DeliveryPricing.findOne({ where: { is_active: true }, order: [['id', 'ASC']] });
