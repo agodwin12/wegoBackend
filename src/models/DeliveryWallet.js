@@ -68,6 +68,17 @@ module.exports = (sequelize) => {
             get() { return parseFloat(this.getDataValue('balance') || 0); },
         },
 
+        // Commission locked by accepted-but-not-yet-completed deliveries. The
+        // pre-paid commission service reserves here on accept, then moves it out
+        // of balance on completion (or releases it on cancel). Spendable balance
+        // is (balance - reserved_balance).
+        reserved_balance: {
+            type:         DataTypes.DECIMAL(12, 2),
+            allowNull:    false,
+            defaultValue: 0.00,
+            get() { return parseFloat(this.getDataValue('reserved_balance') || 0); },
+        },
+
         total_earned: {
             type:         DataTypes.DECIMAL(12, 2),
             allowNull:    false,
