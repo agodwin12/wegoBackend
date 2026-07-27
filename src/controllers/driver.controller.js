@@ -829,15 +829,26 @@ exports.acceptTrip = async (req, res, next) => {
         );
 
         // ── STEP 10: Clean driver offer queues ────────────────────────
-        const offerKeys = await redisClient.keys('driver:pending_offers:*');
-        for (const key of offerKeys) {
-            const offers = await redisHelpers.getJson(key) || [];
-            if (Array.isArray(offers)) {
-                const filtered = offers.filter(o => o.tripId !== tripId);
-                if (filtered.length !== offers.length) {
-                    await redisHelpers.setJson(key, filtered, 3600);
+        // Only the drivers this trip was OFFERED to can have it queued, and
+        // that set is already in TRIP_OFFERS. Iterate just those keys instead
+        // of `KEYS driver:pending_offers:*` — KEYS scans the WHOLE keyspace and
+        // blocks single-threaded Redis (~6ms at ~1k users, on every accept).
+        try {
+            const offersKey    = REDIS_KEYS.TRIP_OFFERS ? REDIS_KEYS.TRIP_OFFERS(tripId) : `trip:offers:${tripId}`;
+            const offersRecord = await redisHelpers.getJson(offersKey);
+            const offeredIds   = offersRecord?.notifiedDrivers || offersRecord?.drivers || [];
+            for (const offeredId of offeredIds) {
+                const key    = `driver:pending_offers:${offeredId}`;
+                const offers = await redisHelpers.getJson(key) || [];
+                if (Array.isArray(offers)) {
+                    const filtered = offers.filter(o => o.tripId !== tripId);
+                    if (filtered.length !== offers.length) {
+                        await redisHelpers.setJson(key, filtered, 3600);
+                    }
                 }
             }
+        } catch (e) {
+            console.warn('⚠️  [ACCEPT-TRIP] Offer-queue cleanup skipped:', e.message);
         }
 
         // ── STEP 11: Fetch passenger info from DB ──────────────────────
