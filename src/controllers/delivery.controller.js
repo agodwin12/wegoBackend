@@ -1346,7 +1346,9 @@ exports.getMyDeliveries = async (req, res) => {
 
         const { count, rows } = await Delivery.findAndCountAll({
             where,
-            include: [{ association: 'driver', attributes: ['id', 'phone', 'rating'] }],
+            // userId is needed to resolve the agent's display name (the Driver
+            // row has no name — it lives on the Account). Stripped again below.
+            include: [{ association: 'driver', attributes: ['id', 'userId', 'phone', 'rating'] }],
             order:   [['created_at', 'DESC']],
             limit:   parseInt(limit),
             offset:  (parseInt(page) - 1) * parseInt(limit),
@@ -1361,6 +1363,28 @@ exports.getMyDeliveries = async (req, res) => {
             obj.categoryEmoji = CATEGORY_META[obj.package_category]?.emoji || '📦';
             return obj;
         });
+
+        // Enrich the assigned agent with a display name + avatar so the sender's
+        // tracking/resume view shows a real name instead of the generic fallback.
+        // The name lives on the Account, not the Driver — resolve it in ONE query
+        // for the whole page, then drop the internal account uuid from the payload.
+        const driverUserIds = [...new Set(deliveries.map(d => d.driver?.userId).filter(Boolean))];
+        if (driverUserIds.length) {
+            const accounts = await Account.findAll({
+                where:      { uuid: driverUserIds },
+                attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
+            });
+            const byUuid = new Map(accounts.map(a => [a.uuid, a]));
+            for (const d of deliveries) {
+                if (!d.driver) continue;
+                const a = byUuid.get(d.driver.userId);
+                if (a) {
+                    d.driver.name   = `${a.first_name || ''} ${a.last_name || ''}`.trim();
+                    d.driver.avatar = a.avatar_url || null;
+                }
+                delete d.driver.userId;
+            }
+        }
 
         return res.json({
             success: true,
