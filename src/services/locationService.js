@@ -93,24 +93,27 @@ class LocationService {
 
             console.log(`📊 [LOCATION] Found ${nearbyDrivers.length} drivers nearby`);
 
+            // Batch-fetch all candidate metadata in ONE round-trip (MGET) instead
+            // of a serial GET per driver. Up to `limit` (50) blocking Redis
+            // round-trips on the hot matching path — shared by rides AND delivery
+            // dispatch — collapse to a single call. The per-driver console.log
+            // lines were also removed: at ~1k users they were cumulative
+            // synchronous stdout latency inside this loop.
+            const metaKeys   = nearbyDrivers.map(([driverId]) => REDIS_KEYS.DRIVER_META(driverId));
+            const metaValues = metaKeys.length ? await redisClient.mget(...metaKeys) : [];
+
             const driversWithMeta = [];
 
-            for (const [driverId, distance] of nearbyDrivers) {
-                const metaKey = REDIS_KEYS.DRIVER_META(driverId);
-                const metadataStr = await redisClient.get(metaKey);
-
-                if (!metadataStr) {
-                    console.log(`⚠️ [LOCATION] No metadata found for driver ${driverId}, skipping`);
-                    continue;
-                }
+            for (let i = 0; i < nearbyDrivers.length; i++) {
+                const [driverId, distance] = nearbyDrivers[i];
+                const metadataStr = metaValues[i];
+                if (!metadataStr) continue;
 
                 try {
                     const meta = JSON.parse(metadataStr);
 
-                    console.log(`🔍 [LOCATION] Driver ${driverId} - Status: ${meta.status}, CurrentTrip: ${meta.currentTripId || 'none'}`);
-
-                    // Check if driver is available (online and not on a trip)
-                    if (meta.status.toLowerCase() === 'online' && !meta.currentTripId)  {
+                    // Available = online and not already on a trip
+                    if (meta.status && meta.status.toLowerCase() === 'online' && !meta.currentTripId) {
                         driversWithMeta.push({
                             driverId,
                             distance: parseFloat(distance),
@@ -121,9 +124,6 @@ class LocationService {
                             lat: meta.lat,
                             lng: meta.lng
                         });
-                        console.log(`✅ [LOCATION] Driver ${driverId} is AVAILABLE`);
-                    } else {
-                        console.log(`❌ [LOCATION] Driver ${driverId} is NOT available (status: ${meta.status}, trip: ${meta.currentTripId})`);
                     }
                 } catch (parseError) {
                     console.error(`❌ [LOCATION] Error parsing metadata for driver ${driverId}:`, parseError.message);

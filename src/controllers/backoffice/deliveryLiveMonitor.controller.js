@@ -30,7 +30,9 @@ exports.getLiveDeliveries = async (req, res) => {
                 },
                 {
                     association: 'driver',
-                    attributes:  ['id', 'lat', 'lng', 'heading', 'status', 'phone', 'rating'],
+                    // userId is required to resolve the agent's Account name below
+                    // (without it the name lookup always fell back to 'Unknown Driver').
+                    attributes:  ['id', 'userId', 'lat', 'lng', 'heading', 'status', 'phone', 'rating'],
                 },
             ],
             order: [['updated_at', 'DESC']],

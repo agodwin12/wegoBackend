@@ -748,6 +748,22 @@ exports.acceptDelivery = async (req, res) => {
             if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found' });
             if (delivery.status !== 'searching') return res.status(409).json({ success: false, message: 'Delivery no longer available' });
 
+            // ── Offer membership: an agent may only accept a delivery they were
+            //    actually offered. Without this any authenticated delivery agent
+            //    (delivery mode, funded wallet, online) could accept ANY searching
+            //    delivery by id, bypassing the geo radius / delivery-mode fan-out.
+            //    The offered set (ACCOUNT uuids) lives in delivery:offers:<id>; if
+            //    it is gone the offer expired, so we reject rather than fail open.
+            //    (Parity with the ride flow — tripMatchingService.acceptTrip.)
+            const offersData = await redisHelpers.getJson(`delivery:offers:${deliveryId}`);
+            if (!offersData?.drivers?.includes(driver.userId)) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'This delivery was not offered to you or the offer has expired',
+                    code:    'OFFER_NOT_FOUND',
+                });
+            }
+
             try {
                 await deliveryCommissionService.reserveCommission(deliveryId, driver.id);
             } catch (commErr) {
@@ -774,9 +790,13 @@ exports.acceptDelivery = async (req, res) => {
             }
 
             await redisClient.set(`driver:active_delivery:${driver.id}`, deliveryId, 'EX', 7200);
-            await locationService.updateDriverStatus(driver.id, 'busy', null);
+            // Mark the agent busy under their ACCOUNT UUID — that is the key
+            // findNearbyDrivers reads (driver:<accountUuid>:metadata). Using
+            // Driver.id here wrote to a phantom key for backoffice-created agents
+            // (Driver.id !== account uuid), leaving them discoverable while busy
+            // and allowing a second delivery to be offered/accepted concurrently.
+            await locationService.updateDriverStatus(driver.userId, 'busy', null);
 
-            const offersData = await redisHelpers.getJson(`delivery:offers:${deliveryId}`);
             for (const otherId of (offersData?.drivers || []).filter(id => id !== driver.userId)) {
                 await emitToDriver(io, otherId, 'delivery:request_expired', { deliveryId });
 
@@ -1030,7 +1050,9 @@ exports.verifyPin = async (req, res) => {
             await releaseLock(lockKey);
         }
 
-        await locationService.updateDriverStatus(driver.id, 'online', null);
+        // Free the agent under their ACCOUNT UUID (the DRIVER_META key) — see the
+        // busy-status note in acceptDelivery; Driver.id would leave a phantom key.
+        await locationService.updateDriverStatus(driver.userId, 'online', null);
         await redisClient.del(`delivery:active:${deliveryId}`);
         await redisClient.del(`sender:active_delivery:${delivery.sender_id}`);
         await redisClient.del(`driver:active_delivery:${driver.id}`);
@@ -1148,10 +1170,15 @@ exports.cancelDelivery = async (req, res) => {
             deliveryCommissionService.releaseCommission(deliveryId, delivery.driver_id)
                 .catch(err => console.error(`❌ [DELIVERY] Commission release failed:`, err.message));
 
-            await locationService.updateDriverStatus(delivery.driver_id, 'online', null);
+            const cancelledDriver = await Driver.findByPk(delivery.driver_id, { attributes: ['userId'] });
+
+            // Free the agent under their ACCOUNT UUID (the DRIVER_META key that
+            // findNearbyDrivers reads), not Driver.id — for backoffice-created
+            // agents the two differ, so Driver.id would leave a phantom 'busy'
+            // key and the freed agent would never become discoverable again.
+            await locationService.updateDriverStatus(cancelledDriver?.userId || delivery.driver_id, 'online', null);
             await redisClient.del(`driver:active_delivery:${delivery.driver_id}`);
 
-            const cancelledDriver = await Driver.findByPk(delivery.driver_id, { attributes: ['userId'] });
             if (cancelledDriver) {
                 const driverSocketId = await redisClient.get(REDIS_KEYS.USER_SOCKET(cancelledDriver.userId));
                 if (driverSocketId) {
@@ -1312,7 +1339,10 @@ exports.getMyDeliveries = async (req, res) => {
     try {
         const { page = 1, limit = 10, status } = req.query;
         const where = { sender_id: req.user.uuid };
-        if (status) where.status = status;
+        // Accept a single status OR a comma-joined list (the mobile resume check
+        // sends ?status=accepted,en_route_pickup,…). Literal equality against a
+        // comma list matches zero rows, which silently broke resume.
+        if (status) where.status = status.includes(',') ? { [Op.in]: status.split(',') } : status;
 
         const { count, rows } = await Delivery.findAndCountAll({
             where,
@@ -1361,7 +1391,10 @@ exports.getDriverDeliveries = async (req, res) => {
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
 
         const where    = { driver_id: driver.id };
-        if (status) where.status = status;
+        // Accept a single status OR a comma-joined list (the agent dashboard
+        // resume check sends ?status=accepted,en_route_pickup,…). Literal
+        // equality against a comma list matches zero rows → resume never fired.
+        if (status) where.status = status.includes(',') ? { [Op.in]: status.split(',') } : status;
 
         const pageNum  = Math.max(parseInt(page,  10) || 1,  1);
         const limitNum = Math.max(parseInt(limit, 10) || 10, 1);

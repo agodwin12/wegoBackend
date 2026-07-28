@@ -45,8 +45,11 @@ const { DeliveryTracking, Delivery, Driver } = require('../../models');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// Express: record every GPS ping (called ~every 3-5s by the app)
+// Express: record a dense trail, but never faster than this (server-side floor
+//   so a fast/flooding client can't grow delivery_tracking without bound; the
+//   live map is driven by the real-time Redis cache + sender emit, not the DB).
 // Regular: only record if at least this many seconds have passed since last point
+const EXPRESS_TRACKING_INTERVAL_S = 3;
 const REGULAR_TRACKING_INTERVAL_S = 30;
 
 // GPS accuracy threshold — discard points worse than this
@@ -180,17 +183,26 @@ async function handleDriverLocationUpdate(socket, io, data) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId, phase, lat, lng, heading, speed_kmh, accuracy_meters }) {
-    // 1. Write every point to DeliveryTracking (dense trail)
-    await DeliveryTracking.record({
-        deliveryId,
-        driverId,
-        latitude:        lat,
-        longitude:       lng,
-        bearing:         heading,
-        speedKmh:        speed_kmh,
-        accuracyMeters:  accuracy_meters,
-        phase,
-    });
+    // 1. Persist a dense trail to DeliveryTracking — throttled by a server-side
+    //    floor so a fast/flooding client cannot grow the table without bound.
+    //    The live moving-map is driven by the Redis cache + sender emit below
+    //    (both real-time), so throttling only the DB write is invisible to users.
+    const lastTrackKey = LAST_TRACK_TIME_KEY(driverId);
+    const lastTrack    = await redisClient.get(lastTrackKey);
+    const dueForWrite  = !lastTrack || (Date.now() - parseInt(lastTrack)) / 1000 >= EXPRESS_TRACKING_INTERVAL_S;
+    if (dueForWrite) {
+        await DeliveryTracking.record({
+            deliveryId,
+            driverId,
+            latitude:        lat,
+            longitude:       lng,
+            bearing:         heading,
+            speedKmh:        speed_kmh,
+            accuracyMeters:  accuracy_meters,
+            phase,
+        });
+        await redisClient.setEx(lastTrackKey, EXPRESS_TRACKING_INTERVAL_S + 10, Date.now().toString());
+    }
 
     // 2. Cache latest driver position in Redis (for live monitor + reconnect replay)
     await redisClient.setEx(
