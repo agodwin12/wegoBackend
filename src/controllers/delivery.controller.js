@@ -1142,13 +1142,11 @@ exports.cancelDelivery = async (req, res) => {
         });
 
         if (delivery.driver_id) {
-            if (isDriver) {
-                deliveryCommissionService.penaliseCommission(deliveryId, delivery.driver_id)
-                    .catch(err => console.error(`❌ [DELIVERY] Commission penalty failed:`, err.message));
-            } else {
-                deliveryCommissionService.releaseCommission(deliveryId, delivery.driver_id)
-                    .catch(err => console.error(`❌ [DELIVERY] Commission release failed:`, err.message));
-            }
+            // A cancel — by the driver OR the sender — simply RELEASES the
+            // reserved commission back to the agent. Drivers are no longer
+            // penalised for cancelling (penalty feature removed by request).
+            deliveryCommissionService.releaseCommission(deliveryId, delivery.driver_id)
+                .catch(err => console.error(`❌ [DELIVERY] Commission release failed:`, err.message));
 
             await locationService.updateDriverStatus(delivery.driver_id, 'online', null);
             await redisClient.del(`driver:active_delivery:${delivery.driver_id}`);
