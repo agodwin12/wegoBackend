@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const { Delivery, Account, Driver, DeliveryTracking } = require('../../models');
 const { redisClient } = require('../../config/redis');
+const etaService = require('../../services/etaService');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GET ALL ACTIVE DELIVERIES FOR LIVE MAP
@@ -97,10 +98,25 @@ exports.getLiveDeliveries = async (req, res) => {
                 ? Math.floor((Date.now() - new Date(delivery.updated_at).getTime()) / 60000)
                 : null;
 
+            // Live ETA to the current target: dropoff once the package is
+            // collected, otherwise the pickup the agent is heading to. Non-blocking
+            // (cache-or-haversine + background road refresh) so the 30s poll never
+            // blocks on N provider calls.
+            let etaMinutes = null;
+            if (driverLat && driverLng) {
+                const toDropoff = ['picked_up', 'en_route_dropoff', 'arrived_dropoff'].includes(delivery.status);
+                etaMinutes = await etaService.liveEtaMinutes(
+                    driverLat, driverLng,
+                    toDropoff ? parseFloat(delivery.dropoff_latitude)  : parseFloat(delivery.pickup_latitude),
+                    toDropoff ? parseFloat(delivery.dropoff_longitude) : parseFloat(delivery.pickup_longitude),
+                );
+            }
+
             return {
                 id:           delivery.id,
                 deliveryCode: delivery.delivery_code,
                 status:       delivery.status,
+                etaMinutes,
 
                 // Pickup
                 pickup: {
