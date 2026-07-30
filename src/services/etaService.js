@@ -30,6 +30,14 @@ const PROVIDER_TIMEOUT_MS = parseInt(process.env.ETA_TIMEOUT_MS || 3000, 10);
 
 function _isNum(n) { return typeof n === 'number' && isFinite(n); }
 
+// Coerce to a finite number, but reject null/undefined/'' (Number(null) === 0,
+// which would otherwise turn missing coords into a bogus (0,0) Gulf-of-Guinea ETA).
+function _num(v) {
+    if (v === null || v === undefined || v === '') return NaN;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+}
+
 function _toRad(d) { return (d * Math.PI) / 180; }
 
 function _haversineKm(aLat, aLng, bLat, bLng) {
@@ -73,9 +81,9 @@ async function _roadMinutes(fromLat, fromLng, toLat, toLng) {
  * @returns {Promise<{minutes:number, source:'cache'|'road'|'estimate'}|null>}
  */
 async function estimateMinutes(fromLat, fromLng, toLat, toLng) {
-    fromLat = Number(fromLat); fromLng = Number(fromLng);
-    toLat = Number(toLat);     toLng = Number(toLng);
-    if (![fromLat, fromLng, toLat, toLng].every(_isNum)) return null;
+    fromLat = _num(fromLat); fromLng = _num(fromLng);
+    toLat = _num(toLat);     toLng = _num(toLng);
+    if ([fromLat, fromLng, toLat, toLng].some(Number.isNaN)) return null;
 
     const key = _cacheKey(fromLat, fromLng, toLat, toLng);
 
@@ -125,9 +133,9 @@ async function etaMinutes(fromLat, fromLng, toLat, toLng) {
  * @returns {Promise<number|null>}
  */
 async function liveEtaMinutes(fromLat, fromLng, toLat, toLng) {
-    fromLat = Number(fromLat); fromLng = Number(fromLng);
-    toLat = Number(toLat);     toLng = Number(toLng);
-    if (![fromLat, fromLng, toLat, toLng].every(_isNum)) return null;
+    fromLat = _num(fromLat); fromLng = _num(fromLng);
+    toLat = _num(toLat);     toLng = _num(toLng);
+    if ([fromLat, fromLng, toLat, toLng].some(Number.isNaN)) return null;
 
     const key = _cacheKey(fromLat, fromLng, toLat, toLng);
 
