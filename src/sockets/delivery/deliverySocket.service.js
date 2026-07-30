@@ -42,6 +42,7 @@
 
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../../config/redis');
 const { DeliveryTracking, Delivery, Driver } = require('../../models');
+const etaService = require('../../services/etaService');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -95,6 +96,10 @@ async function resolveActiveDelivery(driverId) {
                     deliveryType: cached.deliveryType || 'regular',
                     senderId:     cached.senderId,
                     status:       cached.status,
+                    pickupLat:    cached.pickupLat,
+                    pickupLng:    cached.pickupLng,
+                    dropoffLat:   cached.dropoffLat,
+                    dropoffLng:   cached.dropoffLng,
                 };
             }
         }
@@ -106,7 +111,8 @@ async function resolveActiveDelivery(driverId) {
             driver_id: driverId,
             status:    ['accepted','en_route_pickup','arrived_pickup','picked_up','en_route_dropoff','arrived_dropoff'],
         },
-        attributes: ['id', 'delivery_type', 'sender_id', 'status'],
+        attributes: ['id', 'delivery_type', 'sender_id', 'status',
+            'pickup_latitude', 'pickup_longitude', 'dropoff_latitude', 'dropoff_longitude'],
         order:      [['accepted_at', 'DESC']],
     });
 
@@ -117,6 +123,10 @@ async function resolveActiveDelivery(driverId) {
         deliveryType: delivery.delivery_type || 'regular',
         senderId:     delivery.sender_id,
         status:       delivery.status,
+        pickupLat:    parseFloat(delivery.pickup_latitude),
+        pickupLng:    parseFloat(delivery.pickup_longitude),
+        dropoffLat:   parseFloat(delivery.dropoff_latitude),
+        dropoffLng:   parseFloat(delivery.dropoff_longitude),
     };
 }
 
@@ -154,7 +164,8 @@ async function handleDriverLocationUpdate(socket, io, data) {
         const activeDelivery = await resolveActiveDelivery(driverId);
         if (!activeDelivery) return; // Driver has no active delivery
 
-        const { deliveryId, deliveryType, senderId, status } = activeDelivery;
+        const { deliveryId, deliveryType, senderId, status,
+                pickupLat, pickupLng, dropoffLat, dropoffLng } = activeDelivery;
 
         // Determine current phase for tracking record
         const phase = statusToTrackingPhase(status);
@@ -162,7 +173,8 @@ async function handleDriverLocationUpdate(socket, io, data) {
         if (deliveryType === 'express') {
             // ── EXPRESS: stream every ping to sender + write dense tracking ──
             await handleExpressLocationUpdate(io, {
-                driverId, deliveryId, senderId, phase,
+                driverId, deliveryId, senderId, phase, status,
+                pickupLat, pickupLng, dropoffLat, dropoffLng,
                 lat, lng, heading, speed_kmh, accuracy_meters,
             });
         } else {
@@ -182,7 +194,7 @@ async function handleDriverLocationUpdate(socket, io, data) {
 // EXPRESS HANDLER
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId, phase, lat, lng, heading, speed_kmh, accuracy_meters }) {
+async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId, phase, status, pickupLat, pickupLng, dropoffLat, dropoffLng, lat, lng, heading, speed_kmh, accuracy_meters }) {
     // 1. Persist a dense trail to DeliveryTracking — throttled by a server-side
     //    floor so a fast/flooding client cannot grow the table without bound.
     //    The live moving-map is driven by the Redis cache + sender emit below
@@ -211,7 +223,18 @@ async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId,
         JSON.stringify({ lat, lng, heading, speed_kmh, updatedAt: Date.now() })
     );
 
-    // 3. Stream real-time location to the sender's app
+    // 3. Live ETA to the current target: dropoff once the package is collected,
+    //    otherwise the pickup the agent is heading to. Non-blocking (cache-or-
+    //    haversine now, road refresh in the background) so it never delays the
+    //    live position stream.
+    const toDropoff = ['picked_up', 'en_route_dropoff', 'arrived_dropoff'].includes(status);
+    const etaMin = await etaService.liveEtaMinutes(
+        lat, lng,
+        toDropoff ? dropoffLat : pickupLat,
+        toDropoff ? dropoffLng : pickupLng,
+    );
+
+    // 4. Stream real-time location to the sender's app
     await emitToSender(io, senderId, 'delivery:driver_location', {
         deliveryId,
         driver: {
@@ -221,6 +244,8 @@ async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId,
             speed_kmh: speed_kmh || null,
         },
         phase,
+        etaMinutes: etaMin,
+        etaTarget:  toDropoff ? 'dropoff' : 'pickup',
         timestamp: new Date().toISOString(),
     });
 }

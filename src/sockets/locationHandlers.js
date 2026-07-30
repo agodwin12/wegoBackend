@@ -29,6 +29,7 @@ const { redisClient,
     REDIS_KEYS }        = require('../config/redis');
 const locationService       = require('../services/locationService');
 const deliverySocketService = require('../services/delivery/deliverySocket.service');
+const etaService            = require('../services/etaService');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -134,7 +135,8 @@ async function _handleLocationEvent(io, socket, data) {
 
             if (driverMeta?.currentTripId) {
                 const trip = await Trip.findByPk(driverMeta.currentTripId, {
-                    attributes: ['id', 'passengerId'],
+                    attributes: ['id', 'passengerId', 'status',
+                        'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng'],
                 });
 
                 if (trip?.passengerId) {
@@ -143,12 +145,24 @@ async function _handleLocationEvent(io, socket, data) {
                     );
 
                     if (passengerSocketId && io.sockets.sockets.get(passengerSocketId)) {
+                        // Live ETA to the current target: the dropoff once the ride
+                        // is IN_PROGRESS, otherwise the pickup the driver is heading
+                        // to. Cache-first + haversine fallback, so it never blocks.
+                        const toDropoff = trip.status === 'IN_PROGRESS';
+                        const etaMin = await etaService.liveEtaMinutes(
+                            parsedLat, parsedLng,
+                            toDropoff ? Number(trip.dropoffLat) : Number(trip.pickupLat),
+                            toDropoff ? Number(trip.dropoffLng) : Number(trip.pickupLng),
+                        );
+
                         io.to(passengerSocketId).emit('driver:location_updated', {
-                            tripId:  driverMeta.currentTripId,
-                            lat:     parsedLat,
-                            lng:     parsedLng,
-                            heading: heading || 0,
-                            speed:   parsedSpeed,
+                            tripId:     driverMeta.currentTripId,
+                            lat:        parsedLat,
+                            lng:        parsedLng,
+                            heading:    heading || 0,
+                            speed:      parsedSpeed,
+                            etaMinutes: etaMin,
+                            etaTarget:  toDropoff ? 'dropoff' : 'pickup',
                         });
                     }
                 }
