@@ -307,6 +307,9 @@ module.exports = (sequelize) => {
             package_description: { type: DataTypes.STRING(500),  allowNull: true },
             package_photo_url:   { type: DataTypes.STRING(1000), allowNull: true },
             pickup_photo_url:    { type: DataTypes.STRING(1000), allowNull: true },
+            // Proof-of-delivery photo the agent takes at the dropoff (in addition
+            // to the PIN handoff). Shown to the sender on the completed delivery.
+            proof_photo_url:     { type: DataTypes.STRING(1000), allowNull: true },
 
             is_fragile:      { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
             pricing_zone_id: { type: DataTypes.INTEGER, allowNull: true  },

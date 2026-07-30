@@ -36,6 +36,15 @@ const getNotificationService = () => require('../services/NotificationService');
 const DELIVERY_SEARCH_RADIUS_KM = parseFloat(process.env.DELIVERY_SEARCH_RADIUS_KM || 5);
 const DELIVERY_OFFER_TTL_MS     = parseInt(process.env.DELIVERY_OFFER_TTL_MS || 25000, 10);
 
+// Retry / radius-expansion (mirrors the ride matcher): rather than a single
+// blast that gives up the instant the first radius has no taker, run up to N
+// rounds, widening the search each round. An agent just outside the initial
+// ring, or one who comes online seconds after booking, still gets the job.
+const DELIVERY_MAX_SEARCH_RADIUS_KM = parseFloat(process.env.DELIVERY_MAX_SEARCH_RADIUS_KM || 15);
+const DELIVERY_RADIUS_STEP_KM       = parseFloat(process.env.DELIVERY_RADIUS_STEP_KM       || 5);
+const DELIVERY_MATCH_MAX_ROUNDS     = parseInt(process.env.DELIVERY_MATCH_MAX_ROUNDS       || 3, 10);
+const DELIVERY_ROUND_RETRY_MS       = parseInt(process.env.DELIVERY_ROUND_RETRY_MS         || 3000, 10);
+
 const DIGITAL_PAYMENT_METHODS = ['mtn_mobile_money', 'orange_money'];
 
 const CATEGORY_META = {
@@ -532,47 +541,63 @@ exports.bookDelivery = async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _searchForDriver(deliveryId, io) {
+    return _runMatchRound(deliveryId, io, 0);
+}
+
+exports.searchForDriver = _searchForDriver;
+
+// One matching round: find agents within the current (widening) radius, offer
+// the delivery to any NOT already offered it, and arm the offer window. If the
+// round yields nobody — or the offer window elapses with no acceptance — the
+// delivery advances to the next (wider) round, up to DELIVERY_MATCH_MAX_ROUNDS,
+// then expires.
+async function _runMatchRound(deliveryId, io, round = 0) {
     const _io = () => {
         if (io && io.sockets) return io;
         try { return getIO(); } catch (_) { return null; }
     };
 
     try {
-        debugPrint(`\n🔍 [DELIVERY] Searching drivers for delivery #${deliveryId}`);
-
         const deliveryData = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
-        if (!deliveryData) return;
+        if (!deliveryData || deliveryData.status !== 'searching') return; // accepted/cancelled/expired
+
+        const radiusKm = Math.min(
+            DELIVERY_SEARCH_RADIUS_KM + round * DELIVERY_RADIUS_STEP_KM,
+            DELIVERY_MAX_SEARCH_RADIUS_KM,
+        );
+        debugPrint(`\n🔍 [DELIVERY] Match round ${round + 1}/${DELIVERY_MATCH_MAX_ROUNDS} for #${deliveryId} @ ${radiusKm}km`);
 
         const nearbyDrivers = await locationService.findNearbyDrivers(
             deliveryData.pickupLng,
             deliveryData.pickupLat,
-            DELIVERY_SEARCH_RADIUS_KM,
+            radiusKm,
         );
 
-        if (!nearbyDrivers || nearbyDrivers.length === 0) {
-            await _handleNoDriversFound(deliveryId, deliveryData, _io());
-            return;
+        // Agents already offered this delivery in a previous round — don't re-offer.
+        const priorOffers    = (await redisHelpers.getJson(`delivery:offers:${deliveryId}`))?.drivers || [];
+        const alreadyOffered = new Set(priorOffers);
+
+        let filteredDrivers = [];
+        if (nearbyDrivers && nearbyDrivers.length) {
+            const accountUuids = nearbyDrivers
+                .map(d => d.driverId)
+                .filter(uuid => !alreadyOffered.has(uuid));
+            if (accountUuids.length) {
+                const driverRecords = await Driver.findAll({
+                    where:      { userId: accountUuids, current_mode: 'delivery', status: 'online' },
+                    attributes: ['id', 'userId', 'status', 'current_mode'],
+                });
+                const driverByAccountUuid = new Map(driverRecords.map(d => [d.userId, d]));
+                filteredDrivers = nearbyDrivers
+                    .filter(nd => driverByAccountUuid.has(nd.driverId))
+                    .map(nd => ({ ...nd, driver: driverByAccountUuid.get(nd.driverId) }));
+            }
         }
 
-        const accountUuids  = nearbyDrivers.map(d => d.driverId);
-        const driverRecords = await Driver.findAll({
-            where: {
-                userId:       accountUuids,
-                current_mode: 'delivery',
-                status:       'online',
-            },
-            attributes: ['id', 'userId', 'status', 'current_mode'],
-        });
-
-        if (driverRecords.length === 0) {
-            await _handleNoDriversFound(deliveryId, deliveryData, _io());
-            return;
+        if (filteredDrivers.length === 0) {
+            // Nobody new within this radius — widen and retry, or give up.
+            return _advanceRoundOrExpire(deliveryId, deliveryData, _io(), round);
         }
-
-        const driverByAccountUuid = new Map(driverRecords.map(d => [d.userId, d]));
-        const filteredDrivers     = nearbyDrivers
-            .filter(nd => driverByAccountUuid.has(nd.driverId))
-            .map(nd => ({ ...nd, driver: driverByAccountUuid.get(nd.driverId) }));
 
         const delivery = await Delivery.findByPk(deliveryId, {
             include: [{ association: 'sender', attributes: ['uuid', 'first_name', 'last_name'] }],
@@ -653,14 +678,18 @@ async function _searchForDriver(deliveryId, io) {
         }
 
         if (notifiedAccountUuids.length === 0) {
-            await _handleNoDriversFound(deliveryId, deliveryData, ioInstance);
-            return;
+            // Everyone we tried was unreachable — widen and retry, or give up.
+            return _advanceRoundOrExpire(deliveryId, deliveryData, ioInstance, round);
         }
 
+        // Accumulate offered agents across rounds so the accept-time membership
+        // guard recognises anyone offered in ANY round.
+        const mergedDrivers = [...alreadyOffered, ...notifiedAccountUuids];
         await redisHelpers.setJson(`delivery:offers:${deliveryId}`, {
-            drivers:     notifiedAccountUuids,
+            drivers:     mergedDrivers,
             broadcastAt: Date.now(),
             expiresAt:   Date.now() + DELIVERY_OFFER_TTL_MS,
+            round,
         }, Math.ceil(DELIVERY_OFFER_TTL_MS / 1000) + 60);
 
         // Cache base offer payload for reconnect replay (distance fields omitted — per-driver)
@@ -668,24 +697,40 @@ async function _searchForDriver(deliveryId, io) {
 
         await delivery.increment('search_attempts');
 
+        // Offer window: if nobody accepts before it elapses, widen + retry.
         const timeoutId = setTimeout(async () => {
-            await _handleDeliveryTimeout(deliveryId, _io());
             activeTimeouts.delete(deliveryId);
+            const dd = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
+            if (dd && dd.status === 'searching') {
+                await _advanceRoundOrExpire(deliveryId, dd, _io(), round);
+            }
         }, DELIVERY_OFFER_TTL_MS);
         activeTimeouts.set(deliveryId, timeoutId);
 
     } catch (error) {
-        console.error('❌ [DELIVERY] _searchForDriver error:', error.message);
+        console.error('❌ [DELIVERY] _runMatchRound error:', error.message);
     }
 }
 
-exports.searchForDriver = _searchForDriver;
+// Advance to the next (wider) round after a short pause, or expire if the
+// max rounds are exhausted.
+async function _advanceRoundOrExpire(deliveryId, deliveryData, io, round) {
+    const nextRound = round + 1;
+    if (nextRound < DELIVERY_MATCH_MAX_ROUNDS) {
+        debugPrint(`⏳ [DELIVERY] #${deliveryId} round ${round + 1} dry — widening in ${DELIVERY_ROUND_RETRY_MS}ms`);
+        const t = setTimeout(() => {
+            activeTimeouts.delete(deliveryId);
+            _runMatchRound(deliveryId, io, nextRound);
+        }, DELIVERY_ROUND_RETRY_MS);
+        activeTimeouts.set(deliveryId, t);
+        return;
+    }
+    await _expireDelivery(deliveryId, deliveryData, io);
+}
 
-async function _handleDeliveryTimeout(deliveryId, io) {
+// Terminal: no agent found across all rounds → expire + notify the sender.
+async function _expireDelivery(deliveryId, deliveryData, io) {
     try {
-        const deliveryData = await redisHelpers.getJson(`delivery:active:${deliveryId}`);
-        if (!deliveryData || deliveryData.status !== 'searching') return;
-
         await Delivery.update({ status: 'expired' }, { where: { id: deliveryId, status: 'searching' } });
         await redisClient.del(`delivery:active:${deliveryId}`);
         await redisClient.del(`delivery:offers:${deliveryId}`);
@@ -699,24 +744,7 @@ async function _handleDeliveryTimeout(deliveryId, io) {
             });
         }
     } catch (error) {
-        console.error('❌ [DELIVERY] Timeout handler error:', error.message);
-    }
-}
-
-async function _handleNoDriversFound(deliveryId, deliveryData, io) {
-    try {
-        await Delivery.update({ status: 'expired' }, { where: { id: deliveryId } });
-        await redisClient.del(`delivery:active:${deliveryId}`);
-        await redisClient.del(`sender:active_delivery:${deliveryData.senderId}`);
-
-        if (io) {
-            await emitToSender(io, deliveryData.senderId, 'delivery:no_drivers', {
-                deliveryId,
-                message: 'No delivery drivers available nearby. Please try again.',
-            });
-        }
-    } catch (error) {
-        console.error('❌ [DELIVERY] _handleNoDriversFound error:', error.message);
+        console.error('❌ [DELIVERY] _expireDelivery error:', error.message);
     }
 }
 
@@ -951,19 +979,39 @@ exports.updateStatus = async (req, res) => {
             driverLocation,
         });
 
-        // ── 🔔 NOTIFICATION: Package picked up → sender ───────────────────
-        if (status === 'picked_up') {
+        // ── 🔔 NOTIFICATION: meaningful stage moments → sender ────────────
+        //    (transient en_route_* moves are intentionally not pushed to avoid
+        //     spam; the live map / stage screen already reflects them.)
+        const STAGE_PUSH = {
+            arrived_pickup: {
+                type:  'DELIVERY_ARRIVED_PICKUP',
+                title: '🛵 Agent at pickup',
+                body:  'Your agent has arrived to collect the package.',
+            },
+            picked_up: {
+                type:  'DELIVERY_PICKED_UP',
+                title: '📦 Package picked up!',
+                body:  `Your package is on the way to ${delivery.dropoff_address}.`,
+            },
+            arrived_dropoff: {
+                type:  'DELIVERY_ARRIVED_DROPOFF',
+                title: '📍 Almost there!',
+                body:  `Your agent is arriving at ${delivery.dropoff_address}.`,
+            },
+        };
+        const stagePush = STAGE_PUSH[status];
+        if (stagePush) {
             getNotificationService().send({
                 accountUuid: delivery.sender_id,
-                type:        'DELIVERY_PICKED_UP',
-                title:       '📦 Package picked up!',
-                body:        `Your package is on the way to ${delivery.dropoff_address}.`,
+                type:        stagePush.type,
+                title:       stagePush.title,
+                body:        stagePush.body,
                 data: {
                     screen:        'delivery_tracking',
                     delivery_id:   String(deliveryId),
                     delivery_code: delivery.delivery_code,
                 },
-            }).catch(e => console.warn('⚠️  [DELIVERY] Picked up push failed:', e.message));
+            }).catch(e => console.warn(`⚠️  [DELIVERY] ${stagePush.type} push failed:`, e.message));
         }
 
         return res.json({
@@ -986,7 +1034,7 @@ exports.verifyPin = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
-        const { pin }     = req.body;
+        const { pin, proof_photo_url } = req.body;
         const io          = _getIO(req);
 
         if (!pin) return res.status(400).json({ success: false, message: 'PIN is required' });
@@ -1033,7 +1081,9 @@ exports.verifyPin = async (req, res) => {
                 });
             }
 
-            await delivery.transitionTo('delivered');
+            // Store the proof-of-delivery photo (if the agent captured one) as
+            // part of the delivered transition.
+            await delivery.transitionTo('delivered', proof_photo_url ? { proof_photo_url } : {});
             if (delivery.payment_method === 'cash') {
                 await delivery.update({ payment_status: 'cash_pending' });
             }
@@ -1069,8 +1119,22 @@ exports.verifyPin = async (req, res) => {
             status:        'delivered',
             totalPrice:    parseFloat(delivery.total_price),
             paymentMethod: delivery.payment_method,
+            proofPhotoUrl: delivery.proof_photo_url || null,
             message:       'Your package has been delivered!',
         });
+
+        // ── 🔔 NOTIFICATION: Delivered → sender (the completion push) ──────
+        getNotificationService().send({
+            accountUuid: delivery.sender_id,
+            type:        'DELIVERY_DELIVERED',
+            title:       '✅ Delivered!',
+            body:        `Your package was delivered to ${delivery.recipient_name || delivery.dropoff_address}.`,
+            data: {
+                screen:        'delivery_tracking',
+                delivery_id:   String(deliveryId),
+                delivery_code: delivery.delivery_code,
+            },
+        }).catch(e => console.warn('⚠️  [DELIVERY] Delivered push failed:', e.message));
 
         return res.json({
             success:      true,
