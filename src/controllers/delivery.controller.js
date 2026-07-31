@@ -24,7 +24,6 @@ const deliveryEarningsService   = require('../services/deliveryEarningsService')
 const deliveryCommissionService = require('../services/delivery/deliveryCommission.service');
 const deliveryBonusService      = require('../services/delivery/deliveryBonusService');
 const deliverySocketService     = require('../sockets/delivery/deliverySocket.service');
-const { EXPRESS_SURCHARGE }     = require('../middleware/delivery.middleware');
 const { getIO }                 = require('../sockets/exports');
 const { sendSms }               = require('../services/comm/sms.service');
 
@@ -171,8 +170,10 @@ async function getDriverByAccountUuid(accountUuid) {
     });
 }
 
-function trackingMode(deliveryType) {
-    return deliveryType === 'express' ? 'live_map' : 'stage_updates';
+function trackingMode() {
+    // Unified delivery: every delivery uses the live moving-map (the former
+    // "express" experience). There is no longer a stage-updates-only variant.
+    return 'live_map';
 }
 
 // ── Coupon evaluation (shared by estimate preview + booking) ──────────────────
@@ -221,7 +222,7 @@ exports.getEstimate = async (req, res) => {
     try {
         const {
             pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-            package_size, delivery_type = 'regular', coupon_code,
+            package_size, coupon_code,
         } = req.query;
 
         if (!pickup_lat || !pickup_lng || !dropoff_lat || !dropoff_lng || !package_size) {
@@ -229,9 +230,6 @@ exports.getEstimate = async (req, res) => {
         }
         if (!['small', 'medium', 'large'].includes(package_size)) {
             return res.status(400).json({ success: false, message: 'package_size must be small, medium, or large' });
-        }
-        if (!['regular', 'express'].includes(delivery_type)) {
-            return res.status(400).json({ success: false, message: "delivery_type must be 'regular' or 'express'" });
         }
 
         const { distanceKm, durationSeconds, distanceText, durationText } =
@@ -250,11 +248,13 @@ exports.getEstimate = async (req, res) => {
 
         const priceBreakdown = pricingZone.calculatePrice(distanceKm, package_size, surgeMultiplier);
 
-        let expressSurchargeXAF = 0;
-        let totalPrice          = priceBreakdown.totalPrice;
-        if (delivery_type === 'express' && EXPRESS_SURCHARGE > 0) {
-            expressSurchargeXAF = Math.round(priceBreakdown.totalPrice * EXPRESS_SURCHARGE);
-            totalPrice += expressSurchargeXAF;
+        // Unified delivery fee — a flat, back-office-configurable amount added to
+        // every delivery when enabled (replaces the old express-only surcharge).
+        let deliveryFeeXAF = 0;
+        let totalPrice     = priceBreakdown.totalPrice;
+        if (pricingZone.delivery_fee_enabled && parseFloat(pricingZone.delivery_fee) > 0) {
+            deliveryFeeXAF = Math.round(parseFloat(pricingZone.delivery_fee));
+            totalPrice += deliveryFeeXAF;
         }
 
         // Optional coupon preview (only if the user is authenticated & typed one).
@@ -275,9 +275,9 @@ exports.getEstimate = async (req, res) => {
             estimate: {
                 ...priceBreakdown,
                 totalPrice,
-                expressSurcharge: expressSurchargeXAF,
-                deliveryType:     delivery_type,
-                trackingMode:     trackingMode(delivery_type),
+                deliveryFee:      deliveryFeeXAF,
+                deliveryType:     'express',
+                trackingMode:     trackingMode(),
                 distanceKm, durationSeconds, distanceText, durationText,
                 pricingZoneId:    pricingZone.id,
                 pricingZoneName:  pricingZone.zone_name,
@@ -300,9 +300,9 @@ exports.getEstimate = async (req, res) => {
 
 exports.bookDelivery = async (req, res) => {
     try {
-        const senderUuid        = req.user.uuid;
-        const deliveryType      = req.deliveryType      || 'regular';
-        const expressMultiplier = req.expressMultiplier || 1.0;
+        const senderUuid = req.user.uuid;
+        // Unified delivery — every booking is the single live-map delivery type.
+        const deliveryType = 'express';
 
         const {
             pickup_address, pickup_latitude, pickup_longitude, pickup_landmark,
@@ -370,14 +370,16 @@ exports.bookDelivery = async (req, res) => {
             await DeliverySurgeRule.getActiveSurge(pricingZone.id);
         const priceBreakdown = pricingZone.calculatePrice(distanceKm, package_size, surgeMultiplier);
 
-        let finalTotalPrice     = priceBreakdown.totalPrice;
-        let finalCommission     = priceBreakdown.commissionAmount;
-        let expressSurchargeXAF = 0;
+        let finalTotalPrice = priceBreakdown.totalPrice;
+        let finalCommission = priceBreakdown.commissionAmount;
+        let deliveryFeeXAF  = 0;
 
-        if (deliveryType === 'express' && expressMultiplier > 1.0) {
-            expressSurchargeXAF = Math.round(priceBreakdown.totalPrice * (expressMultiplier - 1.0));
-            finalTotalPrice    += expressSurchargeXAF;
-            finalCommission    += expressSurchargeXAF;
+        // Flat back-office delivery fee (platform revenue): added to the total AND
+        // the commission so the driver payout is never reduced.
+        if (pricingZone.delivery_fee_enabled && parseFloat(pricingZone.delivery_fee) > 0) {
+            deliveryFeeXAF   = Math.round(parseFloat(pricingZone.delivery_fee));
+            finalTotalPrice += deliveryFeeXAF;
+            finalCommission += deliveryFeeXAF;
         }
 
         // ── Coupon (platform-funded discount) ─────────────────────────────
@@ -504,7 +506,7 @@ exports.bookDelivery = async (req, res) => {
                 id:           delivery.id,
                 deliveryCode,
                 deliveryType,
-                trackingMode: trackingMode(deliveryType),
+                trackingMode: trackingMode(),
                 status:       'searching',
                 totalPrice:   finalTotalPrice,
                 priceBreakdown: {
@@ -513,7 +515,7 @@ exports.bookDelivery = async (req, res) => {
                     sizeMultiplier:   priceBreakdown.sizeMultiplierApplied,
                     surgeMultiplier:  priceBreakdown.surgeMultiplierApplied,
                     surgeActive:      priceBreakdown.isSurging,
-                    expressSurcharge: expressSurchargeXAF,
+                    deliveryFee:      deliveryFeeXAF,
                     couponCode:       couponRow?.code || null,
                     discount:         couponDiscount,
                     subtotalBeforeDiscount: originalTotal,

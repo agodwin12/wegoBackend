@@ -43,6 +43,7 @@ exports.createPricingZone = async (req, res) => {
             base_fee, per_km_rate,
             size_multiplier_small, size_multiplier_medium, size_multiplier_large,
             commission_percentage, minimum_price, max_distance_km,
+            delivery_fee, delivery_fee_enabled,
             is_active,
         } = req.body;
 
@@ -61,6 +62,8 @@ exports.createPricingZone = async (req, res) => {
             commission_percentage: parseFloat(commission_percentage),
             minimum_price:         parseFloat(minimum_price || 1000),
             max_distance_km:       parseFloat(max_distance_km || 50),
+            delivery_fee:          parseFloat(delivery_fee || 0),
+            delivery_fee_enabled:  delivery_fee_enabled !== undefined ? delivery_fee_enabled : false,
             is_active:             is_active !== undefined ? is_active : true,
             created_by:            req.user.id,
         });
@@ -81,7 +84,8 @@ exports.updatePricingZone = async (req, res) => {
         const fields = [
             'zone_name', 'zone_description', 'base_fee', 'per_km_rate',
             'size_multiplier_small', 'size_multiplier_medium', 'size_multiplier_large',
-            'commission_percentage', 'minimum_price', 'max_distance_km', 'is_active',
+            'commission_percentage', 'minimum_price', 'max_distance_km',
+            'delivery_fee', 'delivery_fee_enabled', 'is_active',
         ];
 
         const updates = {};

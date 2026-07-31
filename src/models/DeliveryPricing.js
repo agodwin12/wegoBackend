@@ -169,6 +169,22 @@ module.exports = (sequelize) => {
                     max: { args: [500], msg: 'Max distance cannot exceed 500 km' },
                 },
             },
+            // Back-office-configurable flat delivery fee applied to EVERY delivery
+            // when enabled (replaces the old express-only surcharge). Platform
+            // revenue — added to the total and the commission, never the payout.
+            delivery_fee: {
+                type: DataTypes.DECIMAL(10, 2),
+                allowNull: false,
+                defaultValue: 0.00,
+                validate: {
+                    min: { args: [0], msg: 'Delivery fee cannot be negative' },
+                },
+            },
+            delivery_fee_enabled: {
+                type: DataTypes.BOOLEAN,
+                allowNull: false,
+                defaultValue: false,
+            },
             is_active: {
                 type: DataTypes.BOOLEAN,
                 allowNull: false,

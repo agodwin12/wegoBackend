@@ -170,20 +170,13 @@ async function handleDriverLocationUpdate(socket, io, data) {
         // Determine current phase for tracking record
         const phase = statusToTrackingPhase(status);
 
-        if (deliveryType === 'express') {
-            // ── EXPRESS: stream every ping to sender + write dense tracking ──
-            await handleExpressLocationUpdate(io, {
-                driverId, deliveryId, senderId, phase, status,
-                pickupLat, pickupLng, dropoffLat, dropoffLng,
-                lat, lng, heading, speed_kmh, accuracy_meters,
-            });
-        } else {
-            // ── REGULAR: throttled tracking only, no live stream to sender ──
-            await handleRegularLocationUpdate(driverId, {
-                deliveryId, phase,
-                lat, lng, heading, speed_kmh, accuracy_meters,
-            });
-        }
+        // Unified delivery — every delivery streams live to the sender (the
+        // former "express" behaviour); there is no stage-updates-only variant.
+        await handleExpressLocationUpdate(io, {
+            driverId, deliveryId, senderId, phase, status,
+            pickupLat, pickupLng, dropoffLat, dropoffLng,
+            lat, lng, heading, speed_kmh, accuracy_meters,
+        });
 
     } catch (error) {
         console.error(`❌ [DELIVERY SOCKET] handleDriverLocationUpdate error for driver ${driverId}:`, error.message);

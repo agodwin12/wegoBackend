@@ -225,7 +225,7 @@ module.exports = (sequelize) => {
                 deliveryId:       this.id,
                 deliveryCode:     this.delivery_code,
                 deliveryType:     this.delivery_type,    // ← NEW
-                trackingMode:     this.delivery_type === 'express' ? 'live_map' : 'stage_updates', // ← NEW
+                trackingMode:     'live_map', // unified delivery — always live map
                 status:           this.status,
                 paymentStatus:    this.payment_status,
                 paymentMethod:    this.payment_method,
