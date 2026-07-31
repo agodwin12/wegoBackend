@@ -96,7 +96,7 @@ async function getCached(key) {
 
 async function setCache(key, data) {
     try {
-        await redisClient.setEx(key, CACHE_TTL, JSON.stringify(data));
+        await redisClient.setex(key, CACHE_TTL, JSON.stringify(data));
     } catch {
         // Non-blocking — if Redis fails we just skip caching
     }

@@ -206,11 +206,11 @@ async function handleExpressLocationUpdate(io, { driverId, deliveryId, senderId,
             accuracyMeters:  accuracy_meters,
             phase,
         });
-        await redisClient.setEx(lastTrackKey, EXPRESS_TRACKING_INTERVAL_S + 10, Date.now().toString());
+        await redisClient.setex(lastTrackKey, EXPRESS_TRACKING_INTERVAL_S + 10, Date.now().toString());
     }
 
     // 2. Cache latest driver position in Redis (for live monitor + reconnect replay)
-    await redisClient.setEx(
+    await redisClient.setex(
         `driver:live:${driverId}`,
         300, // 5 minute TTL — auto-clears if driver goes offline
         JSON.stringify({ lat, lng, heading, speed_kmh, updatedAt: Date.now() })
@@ -271,7 +271,7 @@ async function handleRegularLocationUpdate(driverId, { deliveryId, phase, lat, l
     });
 
     // Update throttle timestamp
-    await redisClient.setEx(lastTrackKey, REGULAR_TRACKING_INTERVAL_S + 10, Date.now().toString());
+    await redisClient.setex(lastTrackKey, REGULAR_TRACKING_INTERVAL_S + 10, Date.now().toString());
 
     // NOTE: No location event emitted to sender for regular deliveries.
     // Sender only receives status stage events via delivery:status_updated.
