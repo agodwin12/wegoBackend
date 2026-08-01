@@ -218,36 +218,18 @@ async function _finalizeSuccessful(payment, payload, io) {
 // ── TRIP — removed: rides are never paid through CamPay (fare is P2P). ─────────
 
 // ── DELIVERY ──────────────────────────────────────────────────────────────────
+// Deliveries are NOT paid through CamPay: the customer pays the agent directly
+// (cash/MoMo/Orange, off-app) and dispatch starts at booking. This finalizer is
+// intentionally a no-op — a stray/legacy `delivery` collection webhook must never
+// flip a delivery to 'paid' or re-trigger the matcher. Kept (not deleted) so the
+// switch case and any historical reconciliation resolve harmlessly.
 
 async function _finalizeDelivery(payment, payload, io) {
-    const deliveryId = parseInt(payment.vertical_id);
-
-    const delivery = await Delivery.findByPk(deliveryId);
-    if (!delivery) {
-        console.error(`❌ [WEBHOOK][DELIVERY] Delivery ${deliveryId} not found`);
-        return;
-    }
-
-    if (delivery.payment_status === 'paid') {
-        console.log(`ℹ️  [WEBHOOK][DELIVERY] Delivery ${deliveryId} already paid — skipping.`);
-        return;
-    }
-
-    await delivery.update({ payment_status: 'paid', paid_at: new Date() });
-
-    searchForDriver(deliveryId, io).catch(err => {
-        console.error(`❌ [WEBHOOK][DELIVERY] searchForDriver failed for ${deliveryId}:`, err.message);
-    });
-
-    _emitToUser(io, delivery.sender_id, 'payment:confirmed', {
-        vertical:   'delivery',
-        verticalId: deliveryId,
-        amount:     payment.amount,
-        operator:   payload.operator,
-        message:    'Payment confirmed! Searching for a driver...',
-    });
-
-    console.log(`✅ [WEBHOOK][DELIVERY] Delivery ${deliveryId} payment finalised — driver search started`);
+    console.warn(
+        `⚠️  [WEBHOOK][DELIVERY] Ignoring a 'delivery' collection webhook ` +
+        `(payment #${payment.id}, delivery #${payment.vertical_id}). ` +
+        `Deliveries are no longer paid via CamPay — no state change, no dispatch.`
+    );
 }
 
 // ── RENTAL ────────────────────────────────────────────────────────────────────

@@ -44,8 +44,6 @@ const DELIVERY_RADIUS_STEP_KM       = parseFloat(process.env.DELIVERY_RADIUS_STE
 const DELIVERY_MATCH_MAX_ROUNDS     = parseInt(process.env.DELIVERY_MATCH_MAX_ROUNDS       || 3, 10);
 const DELIVERY_ROUND_RETRY_MS       = parseInt(process.env.DELIVERY_ROUND_RETRY_MS         || 3000, 10);
 
-const DIGITAL_PAYMENT_METHODS = ['mtn_mobile_money', 'orange_money'];
-
 const CATEGORY_META = {
     document:    { emoji: '📄', label: 'Document' },
     food:        { emoji: '🍱', label: 'Food & Drinks' },
@@ -442,7 +440,11 @@ exports.bookDelivery = async (req, res) => {
             discount_amount:               couponDiscount,
             original_total_price:          couponDiscount > 0 ? originalTotal : null,
             payment_method,
-            payment_status:                payment_method === 'cash' ? 'cash_pending' : 'pending',
+            // The app never collects the customer payment — every method
+            // (cash/MoMo/Orange) is settled DIRECTLY with the agent. This is
+            // just a record of the chosen method; the agent confirms receipt
+            // at handoff. Commission is taken from the agent's wallet.
+            payment_status:                'pending',
             delivery_pin:                  pinHashed,
             pin_attempts:                  0,
             status:                        'searching',
@@ -487,21 +489,18 @@ exports.bookDelivery = async (req, res) => {
 
         await redisClient.set(`sender:active_delivery:${senderUuid}`, delivery.id, 'EX', 7200);
 
-        const isDigitalPayment = DIGITAL_PAYMENT_METHODS.includes(payment_method);
-
-        if (!isDigitalPayment) {
-            const io = _getIO(req);
-            _searchForDriver(delivery.id, io).catch(err => {
-                console.error(`❌ [DELIVERY] Driver search failed for ${deliveryCode}:`, err.message);
-            });
-        }
+        // Dispatch immediately for EVERY payment method. The customer pays the
+        // agent directly (cash/MoMo/Orange, off-app) — the app never collects a
+        // customer payment, so there is nothing to wait for before searching.
+        const io = _getIO(req);
+        _searchForDriver(delivery.id, io).catch(err => {
+            console.error(`❌ [DELIVERY] Driver search failed for ${deliveryCode}:`, err.message);
+        });
 
         return res.status(201).json({
             success:         true,
-            message:         isDigitalPayment
-                ? 'Delivery booked. Please complete your mobile money payment to find a driver.'
-                : 'Delivery booked. Searching for a driver...',
-            requiresPayment: isDigitalPayment,
+            message:         'Delivery booked. Searching for a driver...',
+            requiresPayment: false,   // customer never pays in-app; pays the agent directly
             delivery: {
                 id:           delivery.id,
                 deliveryCode,

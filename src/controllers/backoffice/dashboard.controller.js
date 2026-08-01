@@ -19,7 +19,10 @@ const { WegoPayment, ServiceAdPayment } = require('../../models');
 
 // CamPay verticals that represent platform SALES (revenue) — excludes wallet
 // top-ups (fleet_topup / delivery_topup), which are deposits, not revenue.
-const REVENUE_VERTICALS = ['delivery', 'listing_fee', 'rental'];
+// Deliveries are not paid via CamPay (customer pays the agent directly), so
+// 'delivery' is not a CamPay revenue vertical. Platform delivery revenue is the
+// commission taken from agent wallets, tracked separately.
+const REVENUE_VERTICALS = ['listing_fee', 'rental'];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -27,8 +27,6 @@ const campayClient   = require('./campayClient');
 
 const {
     WegoPayment,
-    Trip,
-    Delivery,
     ServiceAdPayment,
     VehicleRental,
     DeliveryWalletTopUp,
@@ -38,7 +36,10 @@ const {
 // ── Vertical identifiers ──────────────────────────────────────────────────────
 // Must match WegoPayment.vertical ENUM exactly.
 const VERTICALS = {
-    DELIVERY:         'delivery',
+    // NB: there is no customer 'delivery' vertical. Like rides, a delivery is
+    // paid DIRECTLY to the agent (cash/MoMo/Orange, off-app) — the app only
+    // records the chosen method and deducts commission from the agent's wallet.
+    // CamPay for deliveries is agent-side only (see DELIVERY_TOPUP).
     SERVICE_REQUEST:  'service_request',
     RENTAL:           'rental',
     LISTING_FEE:      'listing_fee',      // alias — resolves from ServiceAdPayment
@@ -244,24 +245,10 @@ function _normalisePhone(phone) {
 async function _resolveAmountAndDescription(vertical, verticalId) {
     switch (vertical) {
 
-        // Rides are NOT paid through CamPay — the passenger pays the driver
-        // directly (P2P). CamPay only handles driver wallet top-ups.
-
-        case VERTICALS.DELIVERY: {
-            const delivery = await Delivery.findByPk(verticalId, {
-                attributes: ['id', 'total_price', 'payment_status', 'delivery_code'],
-            });
-            if (!delivery) throw new Error(`[CAMPAY SERVICE] Delivery #${verticalId} not found`);
-            if (delivery.payment_status === 'paid') {
-                throw new Error(`[CAMPAY SERVICE] Delivery #${verticalId} is already paid`);
-            }
-            const amount = parseFloat(delivery.total_price);
-            if (!amount || amount <= 0) throw new Error(`[CAMPAY SERVICE] Delivery #${verticalId} has no price set`);
-            return {
-                amount:      _demoCap(Math.floor(amount)),
-                description: `WeGo delivery payment (${delivery.delivery_code})`,
-            };
-        }
+        // Rides AND deliveries are NOT paid through CamPay — the customer pays
+        // the driver/agent directly (cash/MoMo/Orange, off-app). CamPay only
+        // handles agent/driver wallet top-ups (DELIVERY_TOPUP / FLEET_TOPUP).
+        // A 'delivery' vertical therefore falls through to the default throw.
 
         // service_request and listing_fee both resolve from ServiceAdPayment.
         // listing_fee is kept as a distinct vertical string in the ENUM so the
@@ -393,7 +380,6 @@ function _demoCap(amount) {
  */
 function _verticalCode(vertical) {
     const codes = {
-        delivery:        'DLV',
         service_request: 'SVC',
         rental:          'RNT',
         listing_fee:     'LST',
