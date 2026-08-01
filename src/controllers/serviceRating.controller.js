@@ -159,15 +159,22 @@ exports.createRating = async (req, res) => {
 exports.getRatingsForListing = async (req, res) => {
     try {
         // ✅ FIXED: Accept listing ID from BOTH path params AND query params
-        const listingId = req.params.listingId || req.query.listing_id;
+        // Route param is :listing_id (snake_case). A listing id is REQUIRED —
+        // never fall through to returning every rating on the platform.
+        const listingId = req.params.listing_id || req.query.listing_id;
 
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
         const offset = (page - 1) * limit;
         const { min_rating } = req.query;
 
-        // ✅ FIXED: Only validate if listing_id is provided (now optional)
-        if (listingId && isNaN(listingId)) {
+        if (!listingId) {
+            return res.status(400).json({
+                success: false,
+                message: 'A listing id is required.',
+            });
+        }
+        if (isNaN(listingId)) {
             return res.status(400).json({
                 success: false,
                 message: 'Invalid listing ID. Please provide a valid numeric ID.',
@@ -194,7 +201,7 @@ exports.getRatingsForListing = async (req, res) => {
                 {
                     model: Account,
                     as: 'customer',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name'],
                 },
             ],
             limit,
@@ -261,18 +268,18 @@ exports.getRatingsForListing = async (req, res) => {
 
 exports.getRatingsForProvider = async (req, res) => {
     try {
-        // ✅ FIXED: Accept provider ID from BOTH path params AND query params
-        const providerId = req.params.providerId || req.query.provider_id;
+        // Scoped to the AUTHENTICATED provider — /provider/my-ratings must only
+        // ever return the caller's own received ratings, never the whole table.
+        const providerId = req.user?.uuid || req.params.providerId || req.query.provider_id;
 
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const offset = (page - 1) * limit;
 
-        // ✅ FIXED: Only validate if provider_id is provided (now optional)
-        if (providerId && (typeof providerId !== 'string' || providerId.trim() === '')) {
+        if (!providerId || typeof providerId !== 'string' || providerId.trim() === '') {
             return res.status(400).json({
                 success: false,
-                message: 'Invalid provider ID.',
+                message: 'Provider could not be resolved.',
             });
         }
 
@@ -292,7 +299,7 @@ exports.getRatingsForProvider = async (req, res) => {
                 {
                     model: Account,
                     as: 'customer',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name'],
                 },
                 {
                     model: ServiceListing,
@@ -369,12 +376,12 @@ exports.getRatingById = async (req, res) => {
                 {
                     model: Account,
                     as: 'customer',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name'],
                 },
                 {
                     model: Account,
                     as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name'],
                 },
                 {
                     model: ServiceListing,
@@ -619,7 +626,7 @@ exports.getMyRatings = async (req, res) => {
                 {
                     model: Account,
                     as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name'],
                 },
             ],
             limit,

@@ -133,4 +133,17 @@ const contactLimiter = rateLimit({
     message: { success: false, error: 'Too many provider contacts in a short time. Please wait a moment and try again.' },
 });
 
-module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, contactLimiter, ALLOWED_ORIGINS, ALLOW_ALL };
+// Reporting a listing (POST /services/listings/:id/report) writes a trust/safety
+// record. Cap it so one user can't spam the moderation queue. Keyed by user.
+const REPORT_WINDOW_MS = Number(process.env.REPORT_RATE_WINDOW_MS) || 60 * 60 * 1000;
+const REPORT_MAX       = Number(process.env.REPORT_RATE_MAX) || 10;
+const reportLimiter = rateLimit({
+    windowMs: REPORT_WINDOW_MS,
+    max: REPORT_MAX,
+    keyGenerator: userOrIpKey,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many reports in a short time. Please try again later.' },
+});
+
+module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, contactLimiter, reportLimiter, ALLOWED_ORIGINS, ALLOW_ALL };

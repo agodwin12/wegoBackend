@@ -5,6 +5,7 @@ const express = require('express');
 const router = express.Router();
 const serviceAdminController = require('../../controllers/backoffice/serviceAdmin.controller');
 const topupTraceController = require('../../controllers/backoffice/topupTrace.controller');
+const listingReportAdminController = require('../../controllers/backoffice/serviceListingReportAdmin.controller');
 const { authenticateEmployee, requireEmployeeRole } = require('../../middleware/employeeAuth.middleware');
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -83,6 +84,24 @@ router.get(
     '/topups',
     requireEmployeeRole('super_admin', 'admin', 'manager', 'accountant'),
     topupTraceController.getAllTopups
+);
+
+// ═══════════════════════════════════════════════════════════════════════
+// LISTING REPORTS (trust/safety queue)
+// ═══════════════════════════════════════════════════════════════════════
+
+// @route   GET /api/services/admin/listing-reports?status=open
+router.get(
+    '/listing-reports',
+    requireEmployeeRole('super_admin', 'admin', 'manager'),
+    listingReportAdminController.listReports
+);
+
+// @route   PATCH /api/services/admin/listing-reports/:id/resolve
+router.patch(
+    '/listing-reports/:id/resolve',
+    requireEmployeeRole('super_admin', 'admin', 'manager'),
+    listingReportAdminController.resolveReport
 );
 
 module.exports = router;

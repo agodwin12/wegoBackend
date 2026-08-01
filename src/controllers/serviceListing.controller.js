@@ -2,7 +2,7 @@
 // Service Listing Controller - Provider Listings Management
 // PRODUCTION READY - ALL FIELDS RETURNED
 
-const { ServiceListing, ServiceCategory, Account, Employee, ServiceRating, ServiceListingPlan, ServiceAdPayment } = require('../models');
+const { ServiceListing, ServiceCategory, Account, Employee, ServiceRating, ServiceListingPlan, ServiceAdPayment, ServiceListingReport } = require('../models');
 const { uploadFileToR2, deleteFile } = require('../middleware/upload');
 const { Op, literal } = require('sequelize');
 const NotificationService = require('../services/NotificationService');
@@ -163,6 +163,7 @@ exports.createListing = async (req, res) => {
                     created_at: { [Op.gte]: activePlan.plan_starts_at },
                     status:     { [Op.ne]: 'rejected' },
                 },
+                paranoid: false, // deleting a post must NOT refund the credit
             });
             if (listingCount >= activePlan.plan.listing_quota) {
                 const isFree = (activePlan.plan.price_xaf || 0) <= 0;
@@ -230,7 +231,7 @@ exports.createListing = async (req, res) => {
 
         const listing_id = generateListingId();
 
-        const listing = await ServiceListing.create({
+        const newListingFields = {
             listing_id,
             provider_id,
             category_id,
@@ -254,7 +255,49 @@ exports.createListing = async (req, res) => {
             // moderator's approval can apply the right boost/expiry.
             current_plan_id: activePlan.plan_id || null,
             status: 'pending_review', // every post is moderated before going live
-        });
+        };
+
+        // Atomic quota gate: lock the provider's active plan row so concurrent
+        // posts serialize, re-count authoritatively inside the transaction, and
+        // only then insert. This closes the check-then-insert (TOCTOU) race that
+        // let parallel requests both pass the earlier fast-fail check. Photo
+        // uploads already happened above, so the lock window is just count+insert.
+        let listing;
+        try {
+            listing = await ServiceListing.sequelize.transaction(async (t) => {
+                if (activePlan.plan?.listing_quota != null) {
+                    await ServiceAdPayment.findByPk(activePlan.id, { transaction: t, lock: t.LOCK.UPDATE });
+                    const usedNow = await ServiceListing.count({
+                        where: {
+                            provider_id,
+                            created_at: { [Op.gte]: activePlan.plan_starts_at },
+                            status:     { [Op.ne]: 'rejected' },
+                        },
+                        paranoid: false,
+                        transaction: t,
+                    });
+                    if (usedNow >= activePlan.plan.listing_quota) {
+                        const e = new Error('QUOTA_REACHED');
+                        e.code   = 'QUOTA_REACHED';
+                        e.isFree = (activePlan.plan.price_xaf || 0) <= 0;
+                        e.quota  = activePlan.plan.listing_quota;
+                        throw e;
+                    }
+                }
+                return ServiceListing.create(newListingFields, { transaction: t });
+            });
+        } catch (e) {
+            if (e.code === 'QUOTA_REACHED') {
+                return res.status(403).json({
+                    success: false,
+                    code:    'QUOTA_REACHED',
+                    message: e.isFree
+                        ? `Free accounts can post 1 listing per month. You've used your free post for this period — upgrade to a paid plan to post more.`
+                        : `You've reached your plan's limit of ${e.quota} posts for this period. Upgrade or wait for the next period to post more.`,
+                });
+            }
+            throw e; // real error — let the outer catch handle it
+        }
 
         console.log('✅ [SERVICE_LISTING_CONTROLLER] Listing created:', listing.listing_id);
 
@@ -408,7 +451,7 @@ exports.getAllListings = async (req, res) => {
                 {
                     model: Account,
                     as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
                 },
             ],
             limit,
@@ -471,7 +514,8 @@ exports.getAllListings = async (req, res) => {
                 hero_expires_at: listingData.hero_expires_at,
                 category: listingData.category,
                 provider: listingData.provider,
-                provider_phone: listingData.provider?.phone_e164 || null,
+                // provider phone is intentionally NOT exposed in public reads —
+                // it is revealed only via the authed, rate-limited /contact endpoint.
             };
         });
 
@@ -531,7 +575,7 @@ exports.getListingById = async (req, res) => {
                 {
                     model: Account,
                     as: 'provider',
-                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url', 'phone_e164'],
+                    attributes: ['uuid', 'first_name', 'last_name', 'avatar_url'],
                 },
                 {
                     model: ServiceRating,
@@ -990,6 +1034,67 @@ exports.requestService = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: 'Unable to send your request. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// REPORT A LISTING (trust/safety) — POST /api/services/listings/:id/report
+// Auth'd + rate-limited. One open report per user per listing.
+// ═══════════════════════════════════════════════════════════════════════
+
+const REPORT_CATEGORIES = ['scam', 'spam', 'inappropriate', 'wrong_info', 'impersonation', 'other'];
+
+exports.reportListing = async (req, res) => {
+    try {
+        const reporter_id = req.user.uuid;
+        const listingId   = parseInt(req.params.id);
+        const { reason_category, reason_text } = req.body;
+
+        if (!listingId || isNaN(listingId)) {
+            return res.status(400).json({ success: false, message: 'A valid listing id is required.' });
+        }
+        if (!REPORT_CATEGORIES.includes(reason_category)) {
+            return res.status(400).json({ success: false, message: `reason_category must be one of: ${REPORT_CATEGORIES.join(', ')}.` });
+        }
+        if (reason_text && String(reason_text).length > 500) {
+            return res.status(400).json({ success: false, message: 'reason_text must be 500 characters or fewer.' });
+        }
+
+        const listing = await ServiceListing.findByPk(listingId, { attributes: ['id', 'provider_id'] });
+        if (!listing) {
+            return res.status(404).json({ success: false, message: 'Listing not found.' });
+        }
+        if (listing.provider_id === reporter_id) {
+            return res.status(400).json({ success: false, message: 'You cannot report your own listing.' });
+        }
+
+        try {
+            const report = await ServiceListingReport.create({
+                listing_id:      listingId,
+                reporter_id,
+                reason_category,
+                reason_text:     reason_text ? String(reason_text).trim() : null,
+                status:          'open',
+            });
+            return res.status(201).json({
+                success: true,
+                message: 'Thanks — this listing has been reported to our team for review.',
+                data: { report_id: report.id },
+            });
+        } catch (e) {
+            if (e.name === 'SequelizeUniqueConstraintError') {
+                return res.status(409).json({ success: false, message: 'You have already reported this listing. Our team is reviewing it.' });
+            }
+            throw e;
+        }
+
+    } catch (error) {
+        console.error('❌ [SERVICE_LISTING_CONTROLLER] Error in reportListing:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to submit your report. Please try again later.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined,
         });
     }

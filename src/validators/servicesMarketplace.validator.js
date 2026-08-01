@@ -219,7 +219,11 @@ const cancelRequestSchema = Joi.object({
 // ═══════════════════════════════════════════════════════════════════════
 
 const createRatingSchema = Joi.object({
-    request_id: Joi.number().integer().positive().required(),
+    // A review is tied to a LISTING (lead-gen marketplace). request_id is a
+    // deprecated leftover from the dead ServiceRequest model — accepted but
+    // ignored so old clients don't 422; listing_id is what the controller uses.
+    listing_id: Joi.number().integer().positive().required(),
+    request_id: Joi.number().integer().positive().optional().allow(null),
     rating: Joi.number().integer().min(1).max(5).required(),
     review_text: Joi.string().min(3).max(500).optional().allow(null, ''),
     quality_rating: Joi.number().integer().min(1).max(5).optional().allow(null),

@@ -190,6 +190,20 @@ exports.initiateSubscription = async (req, res) => {
             return res.status(400).json({ success: false, message: 'This is a free plan — use activate-free instead.' });
         }
 
+        // Double-charge guard: refuse if the provider already has an active PAID
+        // subscription. createListing only ever picks one active plan, so paying
+        // for a second overlapping paid plan adds no quota — it is pure repeat
+        // billing. (A provider on a FREE plan upgrading to paid is allowed.)
+        const existingActive = await findActiveSubscription(providerUuid);
+        if (existingActive && (existingActive.plan?.price_xaf || 0) > 0) {
+            await t.rollback();
+            return res.status(409).json({
+                success: false,
+                code:    'ALREADY_SUBSCRIBED',
+                message: 'You already have an active paid subscription. You can renew or change it once it expires — no need to pay again now.',
+            });
+        }
+
         // A previous subscription attempt may have left a pending_payment record.
         // Only block if it is a GENUINELY in-progress CamPay collection (its
         // WegoPayment is still PENDING and recent). Otherwise the record is stale

@@ -1,5 +1,9 @@
 // backend/src/controllers/backoffice/serviceProviderAdmin.controller.js
 // Service Provider Admin Controller - Provider Management & Overview
+//
+// Account.status ENUM is UPPERCASE: 'ACTIVE' | 'PENDING' | 'SUSPENDED' | 'DELETED'.
+// ServiceListing status uses a dedicated 'suspended' value for admin takedown
+// (distinct from provider-set 'inactive'), so suspend/restore is unambiguous.
 
 const {
     Account,
@@ -12,175 +16,115 @@ const { Op } = require('sequelize');
 const sequelize = require('sequelize');
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET ALL PROVIDERS (Admin - All users who have service listings)
+// GET ALL PROVIDERS (Admin - accounts that own service listings)
 // GET /api/services/admin/providers
+//
+// Bounded: paginate accounts at the DB (LIMIT/OFFSET), then enrich ONLY the
+// current page with a constant number of grouped queries — never one query
+// per provider. Global stats are a handful of aggregate COUNTs.
 // ═══════════════════════════════════════════════════════════════════════
+
+const NO_STORE = {
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+};
 
 const getAllProviders = async (req, res) => {
     try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
+        const page   = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit  = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
         const offset = (page - 1) * limit;
 
-        const {
-            status,
-            search,
-            sort_by = 'recent',
-            sort_order = 'DESC',
-            min_rating,
-            verified_only,
-        } = req.query;
+        const { status, search, sort_by = 'recent', sort_order = 'DESC' } = req.query;
 
-        console.log(`👥 [SERVICE_PROVIDER_ADMIN] Fetching providers - Page: ${page}, Status: ${status || 'all'}, Sort: ${sort_by}`);
+        console.log(`👥 [SERVICE_PROVIDER_ADMIN] providers page=${page} limit=${limit} status=${status || 'all'} sort=${sort_by}`);
 
-        // ─────────────────────────────────────────────────────────────────
-        // GET ALL UNIQUE PROVIDER IDs FROM LISTINGS
-        // ─────────────────────────────────────────────────────────────────
-
-        const providerListings = await ServiceListing.findAll({
-            attributes: [
-                [sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']
-            ],
-            raw: true
+        // Universe of providers = distinct provider_id on listings (one query)
+        const providerRows = await ServiceListing.findAll({
+            attributes: [[sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']],
+            raw: true,
         });
+        const allProviderIds = providerRows.map(p => p.provider_id).filter(Boolean);
 
-        const providerIds = providerListings.map(p => p.provider_id);
-
-        if (providerIds.length === 0) {
-            res.set({
-                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            });
-
+        if (allProviderIds.length === 0) {
+            res.set(NO_STORE);
             return res.status(200).json({
                 success: true,
                 message: 'No providers found',
                 providers: [],
-                stats: {
-                    total_providers: 0,
-                    active_providers: 0,
-                    verified_providers: 0,
-                    suspended_providers: 0,
-                    average_rating: 0,
-                    total_commission_due: '0.00',
-                },
-                pagination: {
-                    total: 0,
-                    page: 1,
-                    limit,
-                    totalPages: 0,
-                    hasNext: false,
-                    hasPrev: false,
-                }
+                stats: { total_providers: 0, active_providers: 0, verified_providers: 0, suspended_providers: 0, average_rating: 0, total_commission_due: '0.00' },
+                pagination: { total: 0, page: 1, limit, totalPages: 0, hasNext: false, hasPrev: false },
             });
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // BUILD WHERE CLAUSE FOR ACCOUNTS
-        // ─────────────────────────────────────────────────────────────────
+        // Account-level filter (status + search), applied at the DB
+        const where = { uuid: { [Op.in]: allProviderIds } };
+        if (status === 'suspended')                       where.status = 'SUSPENDED';
+        else if (status === 'active' || status === 'verified') where.status = 'ACTIVE';
 
-        const where = {
-            uuid: { [Op.in]: providerIds }
-        };
-
-        // Status filter - FIXED: using 'status' instead of 'account_status'
-        if (status === 'suspended') {
-            where.status = 'suspended';
-        } else if (status === 'active') {
-            where.status = 'active';
-        } else if (status === 'verified') {
-            where.status = 'active';
-        }
-
-        // Search filter
         if (search) {
             where[Op.or] = [
                 { first_name: { [Op.like]: `%${search}%` } },
-                { last_name: { [Op.like]: `%${search}%` } },
-                { email: { [Op.like]: `%${search}%` } },
+                { last_name:  { [Op.like]: `%${search}%` } },
+                { email:      { [Op.like]: `%${search}%` } },
                 { phone_e164: { [Op.like]: `%${search}%` } },
             ];
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // FETCH PROVIDERS (ACCOUNTS) - No pagination yet
-        // ─────────────────────────────────────────────────────────────────
-
-        const providers = await Account.findAll({
+        // Page of accounts (DB-paginated). Ordered by created_at; rating/services
+        // sorts are applied within the page (a global aggregate sort would need a
+        // provider-stats rollup — out of scope here, the O(7N) blocker is the fix).
+        const orderDir = String(sort_order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+        const { count: totalMatching, rows: pageAccounts } = await Account.findAndCountAll({
             where,
-            attributes: [
-                'uuid',
-                'first_name',
-                'last_name',
-                'email',
-                'phone_e164',
-                'avatar_url',
-                'user_type',
-                'status', // FIXED: changed from account_status
-                'created_at',
-            ],
+            attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164', 'avatar_url', 'user_type', 'status', 'created_at'],
+            order: [['created_at', orderDir]],
+            limit,
+            offset,
         });
 
-        console.log(`📊 Found ${providers.length} providers matching filters`);
+        const pageIds = pageAccounts.map(a => a.uuid);
 
-        // ─────────────────────────────────────────────────────────────────
-        // ENRICH WITH PROVIDER STATS (For each provider)
-        // ─────────────────────────────────────────────────────────────────
-
-        const enrichedProviders = await Promise.all(providers.map(async (provider) => {
-            const providerId = provider.uuid;
-
-            // Count of listings
-            const totalListings = await ServiceListing.count({
-                where: { provider_id: providerId }
-            });
-
-            const activeListings = await ServiceListing.count({
-                where: { provider_id: providerId, status: 'active' }
-            });
-
-            const pendingListings = await ServiceListing.count({
-                where: { provider_id: providerId, status: 'pending_review' }
-            });
-
-            // Plans purchased by this provider
-            const [activePlans, totalPlans] = await Promise.all([
-                ServiceAdPayment.count({ where: { paid_by: providerId, status: 'active' } }),
-                ServiceAdPayment.count({ where: { paid_by: providerId } }),
+        // ── Batch-enrich ONLY the page (constant # of grouped queries) ─────────
+        let listingByProvider = {}, planActiveByProvider = {}, ratingByProvider = {};
+        if (pageIds.length > 0) {
+            const [listingRows, planRows, ratingRows] = await Promise.all([
+                ServiceListing.findAll({
+                    attributes: ['provider_id', 'status', [sequelize.fn('COUNT', sequelize.col('id')), 'cnt']],
+                    where: { provider_id: { [Op.in]: pageIds } },
+                    group: ['provider_id', 'status'],
+                    raw: true,
+                }),
+                ServiceAdPayment.findAll({
+                    attributes: ['paid_by', [sequelize.fn('COUNT', sequelize.col('id')), 'cnt']],
+                    where: { paid_by: { [Op.in]: pageIds }, status: 'active' },
+                    group: ['paid_by'],
+                    raw: true,
+                }),
+                ServiceRating.findAll({
+                    attributes: ['provider_id', [sequelize.fn('AVG', sequelize.col('rating')), 'avg'], [sequelize.fn('COUNT', sequelize.col('rating')), 'cnt']],
+                    where: { provider_id: { [Op.in]: pageIds } },
+                    group: ['provider_id'],
+                    raw: true,
+                }),
             ]);
-            const [planRevenueRow] = await ServiceAdPayment.findAll({
-                attributes: [[sequelize.fn('SUM', sequelize.col('amount_snapshot')), 'total']],
-                where: { paid_by: providerId, status: { [Op.in]: ['active', 'expired'] } },
-                raw: true,
-            });
-            const totalEarnings    = 0; // classifieds — no earnings from WeGo
-            const totalCommission  = 0; // no commission model
-            const totalServices    = totalListings;
-            const completedServices = activeListings;
-            const activeServices   = activePlans;
-            const cancelledServices = 0;
-            const completionRate   = 0;
-            const averageResponseMinutes = 0;
 
-            // Average rating across all ratings
-            const ratingsResult = await ServiceRating.findOne({
-                attributes: [
-                    [sequelize.fn('AVG', sequelize.col('rating')), 'avg'],
-                    [sequelize.fn('COUNT', sequelize.col('rating')), 'count']
-                ],
-                where: {
-                    provider_id: providerId,
-                },
-                raw: true
-            });
+            for (const r of listingRows) {
+                const b = (listingByProvider[r.provider_id] ||= { total: 0, active: 0, pending: 0 });
+                const c = parseInt(r.cnt) || 0;
+                b.total += c;
+                if (r.status === 'active')         b.active  += c;
+                if (r.status === 'pending_review') b.pending += c;
+            }
+            for (const r of planRows)   planActiveByProvider[r.paid_by]     = parseInt(r.cnt) || 0;
+            for (const r of ratingRows) ratingByProvider[r.provider_id]     = { avg: parseFloat(r.avg) || 0, count: parseInt(r.cnt) || 0 };
+        }
 
-            const averageRating = ratingsResult?.avg
-                ? parseFloat(ratingsResult.avg)
-                : 0;
-            const totalReviews = ratingsResult?.count || 0;
-
-
+        const providers = pageAccounts.map((provider) => {
+            const lb  = listingByProvider[provider.uuid] || { total: 0, active: 0, pending: 0 };
+            const rt  = ratingByProvider[provider.uuid]  || { avg: 0, count: 0 };
+            const avg = parseFloat((rt.avg || 0).toFixed(1));
             return {
                 id: provider.uuid,
                 uuid: provider.uuid,
@@ -194,147 +138,80 @@ const getAllProviders = async (req, res) => {
                 avatar_url: provider.avatar_url,
                 location: 'Douala',
                 user_type: provider.user_type,
-                account_status: provider.status, // Map to frontend expected field
+                account_status: provider.status,
                 is_verified: true,
-                is_active: provider.status === 'active', // FIXED: use status
-                is_suspended: provider.status === 'suspended', // FIXED: use status
+                is_active: provider.status === 'ACTIVE',
+                is_suspended: provider.status === 'SUSPENDED',
                 is_driver: provider.user_type === 'driver',
                 member_since: provider.created_at,
                 joined_date: provider.created_at,
                 last_active: provider.created_at,
-
-                // Statistics
-                total_services: totalServices,
-                completed_services: completedServices,
-                active_services: activeServices,
-                cancelled_services: cancelledServices,
-                completion_rate: parseFloat(completionRate),
-
-                // Financial
-                total_earnings: parseFloat(totalEarnings),
-                commission_due: parseFloat(totalCommission),
+                total_services: lb.total,
+                completed_services: lb.active,
+                active_services: planActiveByProvider[provider.uuid] || 0,
+                cancelled_services: 0,
+                completion_rate: 0,
+                total_earnings: 0,
+                commission_due: 0,
                 commission_paid: 0,
-                outstanding_commission: parseFloat(totalCommission),
-
-                // Ratings
-                rating: parseFloat(averageRating.toFixed(1)),
-                average_rating: parseFloat(averageRating.toFixed(1)),
-                total_reviews: parseInt(totalReviews),
-
-                // Performance
-                response_time_minutes: averageResponseMinutes,
-                average_response_time_minutes: averageResponseMinutes,
-
-                // Listings
-                active_listings_count: activeListings,
-                pending_listings_count: pendingListings,
-                total_listings: totalListings,
-
-                // Additional metrics
+                outstanding_commission: 0,
+                rating: avg,
+                average_rating: avg,
+                total_reviews: rt.count,
+                response_time_minutes: 0,
+                average_response_time_minutes: 0,
+                active_listings_count: lb.active,
+                pending_listings_count: lb.pending,
+                total_listings: lb.total,
                 rejection_rate: 0,
             };
-        }));
-
-        // ─────────────────────────────────────────────────────────────────
-        // SORT ENRICHED PROVIDERS
-        // ─────────────────────────────────────────────────────────────────
-
-        const sortFieldMap = {
-            'recent': 'member_since',
-            'rating': 'rating',
-            'earnings': 'total_earnings',
-            'services': 'total_services',
-            'total_earnings': 'total_earnings'
-        };
-
-        const sortField = sortFieldMap[sort_by] || 'member_since';
-        const sortDirection = sort_order.toUpperCase() === 'ASC' ? 1 : -1;
-
-        enrichedProviders.sort((a, b) => {
-            let aVal = a[sortField];
-            let bVal = b[sortField];
-
-            if (sortField === 'member_since') {
-                aVal = new Date(aVal).getTime();
-                bVal = new Date(bVal).getTime();
-            }
-
-            if (typeof aVal === 'string' && !isNaN(aVal)) {
-                aVal = parseFloat(aVal);
-                bVal = parseFloat(bVal);
-            }
-
-            if (aVal < bVal) return -1 * sortDirection;
-            if (aVal > bVal) return 1 * sortDirection;
-            return 0;
         });
 
-        // Apply rating filter if specified
-        let filteredProviders = enrichedProviders;
-        if (min_rating) {
-            const minRatingValue = parseFloat(min_rating);
-            filteredProviders = enrichedProviders.filter(p => p.rating >= minRatingValue);
+        // Page-scoped sort for non-default keys (recent is already DB-ordered)
+        if (sort_by === 'rating' || sort_by === 'services') {
+            const key = sort_by === 'rating' ? 'rating' : 'total_services';
+            const dir = orderDir === 'ASC' ? 1 : -1;
+            providers.sort((a, b) => (a[key] - b[key]) * dir);
         }
 
-        // ─────────────────────────────────────────────────────────────────
-        // CALCULATE STATS
-        // ─────────────────────────────────────────────────────────────────
+        // ── Cheap global stats (constant # of queries) ────────────────────────
+        const [activeProviders, suspendedProviders, avgRatingRow] = await Promise.all([
+            Account.count({ where: { uuid: { [Op.in]: allProviderIds }, status: 'ACTIVE' } }),
+            Account.count({ where: { uuid: { [Op.in]: allProviderIds }, status: 'SUSPENDED' } }),
+            ServiceRating.findOne({
+                attributes: [[sequelize.fn('AVG', sequelize.col('rating')), 'avg']],
+                where: { provider_id: { [Op.in]: allProviderIds } },
+                raw: true,
+            }),
+        ]);
 
-        const activeProvidersCount = filteredProviders.filter(p => p.is_active).length;
-        const suspendedProvidersCount = filteredProviders.filter(p => p.is_suspended).length;
-        const verifiedProvidersCount = filteredProviders.filter(p => p.is_verified).length;
-
-        const totalRating = filteredProviders.reduce((sum, p) => sum + p.rating, 0);
-        const avgRating = filteredProviders.length > 0 ? totalRating / filteredProviders.length : 0;
-
-        const totalCommissionDue = filteredProviders.reduce((sum, p) => sum + p.commission_due, 0);
-
-        const stats = {
-            total_providers: filteredProviders.length,
-            active_providers: activeProvidersCount,
-            verified_providers: verifiedProvidersCount,
-            suspended_providers: suspendedProvidersCount,
-            average_rating: parseFloat(avgRating.toFixed(1)),
-            total_commission_due: parseFloat(totalCommissionDue.toFixed(2)),
-        };
-
-        // Apply pagination AFTER sorting and filtering
-        const paginatedProviders = filteredProviders.slice(offset, offset + limit);
-        const totalPages = Math.ceil(filteredProviders.length / limit);
-
-        console.log(`✅ [SERVICE_PROVIDER_ADMIN] Retrieved ${filteredProviders.length} providers, returning page ${page} (${paginatedProviders.length} items)`);
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-        });
-
+        const totalPages = Math.ceil(totalMatching / limit);
+        res.set(NO_STORE);
         res.status(200).json({
             success: true,
             message: 'All providers retrieved successfully',
-            providers: paginatedProviders,
-            stats: stats,
+            providers,
+            stats: {
+                total_providers: allProviderIds.length,
+                active_providers: activeProviders,
+                verified_providers: activeProviders,
+                suspended_providers: suspendedProviders,
+                average_rating: avgRatingRow?.avg ? parseFloat(parseFloat(avgRatingRow.avg).toFixed(1)) : 0,
+                total_commission_due: '0.00',
+            },
             pagination: {
-                total: filteredProviders.length,
+                total: totalMatching,
                 page,
                 limit,
                 totalPages,
                 hasNext: page < totalPages,
                 hasPrev: page > 1,
-            }
+            },
         });
 
     } catch (error) {
         console.error('❌ [SERVICE_PROVIDER_ADMIN] Error in getAllProviders:', error);
-        console.error('Stack trace:', error.stack);
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-        });
-
+        res.set(NO_STORE);
         res.status(500).json({
             success: false,
             message: 'Unable to retrieve providers. Please try again later.',
@@ -350,107 +227,55 @@ const getAllProviders = async (req, res) => {
 
 const getProviderStats = async (req, res) => {
     try {
-        console.log('📊 [SERVICE_PROVIDER_ADMIN] Fetching provider statistics...');
-
-        const allProviders = await ServiceListing.findAll({
-            attributes: [
-                [sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']
-            ],
-            raw: true
+        // total distinct providers + distinct providers with an active listing,
+        // via COUNT(DISTINCT ...) — no materialize-then-.length.
+        const [{ total = 0 } = {}] = await ServiceListing.findAll({
+            attributes: [[sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('provider_id'))), 'total']],
+            raw: true,
         });
-        const totalProviders = allProviders.length;
-        const providerIds = allProviders.map(p => p.provider_id);
+        const [{ active = 0 } = {}] = await ServiceListing.findAll({
+            attributes: [[sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('provider_id'))), 'active']],
+            where: { status: 'active' },
+            raw: true,
+        });
 
-        if (providerIds.length === 0) {
-            res.set({
-                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            });
+        const providerRows = await ServiceListing.findAll({
+            attributes: [[sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']],
+            raw: true,
+        });
+        const providerIds = providerRows.map(p => p.provider_id).filter(Boolean);
 
-            return res.status(200).json({
-                success: true,
-                message: 'No providers found',
-                data: {
-                    total_providers: 0,
-                    active_providers: 0,
-                    verified_providers: 0,
-                    suspended_providers: 0,
-                    average_rating: 0,
-                    total_commission_due: '0.00',
-                },
-            });
+        let suspendedProviders = 0, averageRating = 0;
+        if (providerIds.length > 0) {
+            const [suspended, avgRow] = await Promise.all([
+                Account.count({ where: { uuid: { [Op.in]: providerIds }, status: 'SUSPENDED' } }),
+                ServiceRating.findOne({
+                    attributes: [[sequelize.fn('AVG', sequelize.col('rating')), 'avg']],
+                    where: { provider_id: { [Op.in]: providerIds } },
+                    raw: true,
+                }),
+            ]);
+            suspendedProviders = suspended;
+            averageRating = avgRow?.avg ? parseFloat(parseFloat(avgRow.avg).toFixed(1)) : 0;
         }
 
-        const activeProviders = await ServiceListing.findAll({
-            where: { status: 'approved' },
-            attributes: [
-                [sequelize.fn('DISTINCT', sequelize.col('provider_id')), 'provider_id']
-            ],
-            raw: true
-        });
-        const activeProvidersCount = activeProviders.length;
-
-        // FIXED: use 'status' instead of 'account_status'
-        const verifiedProviders = await Account.count({
-            where: {
-                uuid: { [Op.in]: providerIds },
-                status: 'active'
-            }
-        });
-
-        const suspendedProviders = await Account.count({
-            where: {
-                uuid: { [Op.in]: providerIds },
-                status: 'suspended'
-            }
-        });
-
-        const avgRatingResult = await ServiceRating.findOne({
-            attributes: [
-                [sequelize.fn('AVG', sequelize.col('rating')), 'avg']
-            ],
-            where: {
-                provider_id: { [Op.in]: providerIds },
-            },
-            raw: true
-        });
-        const averageRating = avgRatingResult?.avg
-            ? parseFloat(avgRatingResult.avg).toFixed(1)
-            : 0;
-
-        const totalCommissionDue = 0; // classifieds model — no commission
-
-        console.log('✅ [SERVICE_PROVIDER_ADMIN] Provider statistics retrieved');
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-        });
-
+        res.set(NO_STORE);
         res.status(200).json({
             success: true,
             message: 'Provider statistics retrieved successfully',
             data: {
-                total_providers: totalProviders,
-                active_providers: activeProvidersCount,
-                verified_providers: verifiedProviders,
+                total_providers: parseInt(total) || 0,
+                active_providers: parseInt(active) || 0,
+                verified_providers: (parseInt(total) || 0) - suspendedProviders,
                 suspended_providers: suspendedProviders,
-                average_rating: parseFloat(averageRating),
-                total_commission_due: parseFloat(totalCommissionDue).toFixed(2),
+                average_rating: averageRating,
+                total_commission_due: '0.00',
             },
         });
 
     } catch (error) {
         console.error('❌ [SERVICE_PROVIDER_ADMIN] Error in getProviderStats:', error);
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-        });
-
+        res.set(NO_STORE);
         res.status(500).json({
             success: false,
             message: 'Unable to retrieve provider statistics. Please try again later.',
@@ -459,62 +284,25 @@ const getProviderStats = async (req, res) => {
     }
 };
 
-// (Continue with getProviderById, suspendProvider, activateProvider - same fixes for 'status')
-
 const getProviderById = async (req, res) => {
     try {
         const { id } = req.params;
-
         if (!id) {
-            res.set({
-                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            });
-
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid provider ID.',
-            });
+            res.set(NO_STORE);
+            return res.status(400).json({ success: false, message: 'Invalid provider ID.' });
         }
 
         const provider = await Account.findOne({
             where: { uuid: id },
-            attributes: [
-                'uuid',
-                'first_name',
-                'last_name',
-                'email',
-                'phone_e164',
-                'avatar_url',
-                'user_type',
-                'status', // FIXED
-                'created_at',
-                'updated_at'
-            ]
+            attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164', 'avatar_url', 'user_type', 'status', 'created_at', 'updated_at'],
         });
 
         if (!provider) {
-            res.set({
-                'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            });
-
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found.',
-            });
+            res.set(NO_STORE);
+            return res.status(404).json({ success: false, message: 'Provider not found.' });
         }
 
-        // ... (rest of the function remains the same) ...
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-        });
-
+        res.set(NO_STORE);
         res.status(200).json({
             success: true,
             message: 'Provider details retrieved successfully',
@@ -527,9 +315,10 @@ const getProviderById = async (req, res) => {
                 phone_e164: provider.phone_e164,
                 avatar_url: provider.avatar_url,
                 user_type: provider.user_type,
-                account_status: provider.status, // FIXED
+                account_status: provider.status,
+                is_active: provider.status === 'ACTIVE',
+                is_suspended: provider.status === 'SUSPENDED',
                 joined_date: provider.created_at,
-                // ... rest of data
             },
         });
 
@@ -543,61 +332,45 @@ const getProviderById = async (req, res) => {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// SUSPEND PROVIDER — blocks the account AND takes their live ads down
+// ═══════════════════════════════════════════════════════════════════════
+
 const suspendProvider = async (req, res) => {
     try {
         const { id } = req.params;
         const { suspension_reason } = req.body;
 
         if (!id || !suspension_reason || suspension_reason.trim().length < 10) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid input.',
-            });
+            return res.status(400).json({ success: false, message: 'A suspension reason of at least 10 characters is required.' });
         }
 
         const provider = await Account.findOne({ where: { uuid: id } });
-
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found.',
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found.' });
+        }
+        if (provider.status === 'SUSPENDED') {
+            return res.status(400).json({ success: false, message: 'Provider is already suspended.' });
         }
 
-        if (provider.status === 'suspended') { // FIXED
-            return res.status(400).json({
-                success: false,
-                message: 'Provider is already suspended.',
-            });
-        }
-
-        await provider.update({ status: 'suspended' }); // FIXED
-
-        await ServiceListing.update(
-            { status: 'inactive' },
-            {
-                where: {
-                    provider_id: id,
-                    status: 'approved'
-                }
-            }
-        );
-
-        console.log(`✅ [SERVICE_PROVIDER_ADMIN] Provider suspended:`, id);
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
+        // Atomic: block the account AND take their currently-live ads down.
+        let hiddenCount = 0;
+        await ServiceListing.sequelize.transaction(async (t) => {
+            await provider.update({ status: 'SUSPENDED' }, { transaction: t });
+            const [affected] = await ServiceListing.update(
+                { status: 'suspended' },
+                { where: { provider_id: id, status: 'active' }, transaction: t }
+            );
+            hiddenCount = affected || 0;
         });
 
+        console.log(`✅ [SERVICE_PROVIDER_ADMIN] Provider ${id} suspended; ${hiddenCount} listing(s) taken down.`);
+
+        res.set(NO_STORE);
         res.status(200).json({
             success: true,
-            message: 'Provider suspended successfully.',
-            data: {
-                provider_id: id,
-                account_status: 'suspended',
-            },
+            message: 'Provider suspended and their live listings taken down.',
+            data: { provider_id: id, account_status: 'SUSPENDED', listings_taken_down: hiddenCount },
         });
 
     } catch (error) {
@@ -610,50 +383,44 @@ const suspendProvider = async (req, res) => {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// ACTIVATE PROVIDER — restores the account AND the ads suspension took down
+// ═══════════════════════════════════════════════════════════════════════
+
 const activateProvider = async (req, res) => {
     try {
         const { id } = req.params;
-
         if (!id) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid provider ID.',
-            });
+            return res.status(400).json({ success: false, message: 'Invalid provider ID.' });
         }
 
         const provider = await Account.findOne({ where: { uuid: id } });
-
         if (!provider) {
-            return res.status(404).json({
-                success: false,
-                message: 'Provider not found.',
-            });
+            return res.status(404).json({ success: false, message: 'Provider not found.' });
+        }
+        if (provider.status === 'ACTIVE') {
+            return res.status(400).json({ success: false, message: 'Provider is already active.' });
         }
 
-        if (provider.status === 'active') { // FIXED
-            return res.status(400).json({
-                success: false,
-                message: 'Provider is already active.',
-            });
-        }
-
-        await provider.update({ status: 'active' }); // FIXED
-
-        console.log(`✅ [SERVICE_PROVIDER_ADMIN] Provider activated:`, id);
-
-        res.set({
-            'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-            'Pragma': 'no-cache',
-            'Expires': '0'
+        // Restore only the listings admin-suspension took down ('suspended'),
+        // never listings the provider themselves set to 'inactive'.
+        let restoredCount = 0;
+        await ServiceListing.sequelize.transaction(async (t) => {
+            await provider.update({ status: 'ACTIVE' }, { transaction: t });
+            const [affected] = await ServiceListing.update(
+                { status: 'active' },
+                { where: { provider_id: id, status: 'suspended' }, transaction: t }
+            );
+            restoredCount = affected || 0;
         });
 
+        console.log(`✅ [SERVICE_PROVIDER_ADMIN] Provider ${id} activated; ${restoredCount} listing(s) restored.`);
+
+        res.set(NO_STORE);
         res.status(200).json({
             success: true,
-            message: 'Provider account reactivated successfully.',
-            data: {
-                provider_id: id,
-                account_status: 'active',
-            },
+            message: 'Provider account reactivated and their listings restored.',
+            data: { provider_id: id, account_status: 'ACTIVE', listings_restored: restoredCount },
         });
 
     } catch (error) {

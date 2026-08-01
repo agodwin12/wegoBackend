@@ -58,6 +58,7 @@ const IdempotencyKey = require('./IdempotencyKey');
 const ServiceCategory    = require('./ServiceCategory');
 const ServiceListing     = require('./ServiceListing');
 const ServiceRating      = require('./ServiceRating');
+const ServiceListingReport = require('./ServiceListingReport');
 const BroadcastMessage = require('./BroadcastMessage');
 const Notification     = require('./Notification');
 const DeviceToken      = require('./DeviceToken');
@@ -102,7 +103,7 @@ const _allModels = {
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
     PriceRule, RideSurgeRule, IdempotencyKey,
-    ServiceCategory, ServiceListing, ServiceRating,
+    ServiceCategory, ServiceListing, ServiceRating, ServiceListingReport,
     ServiceListingPlan, ServiceAdPayment,
     TripReceipt, DriverWallet, DriverWalletTransaction, EarningRule, BonusProgram, BonusAward,
     DeliveryPricing, DeliverySurgeRule, Delivery, DeliveryTracking, DeliveryDispute,
@@ -404,6 +405,17 @@ ServiceListing.hasMany(ServiceRating,   { foreignKey: 'listing_id', as: 'ratings
 
 ServiceRating.belongsTo(Employee, { foreignKey: 'moderated_by', as: 'moderator' });
 Employee.hasMany(ServiceRating,   { foreignKey: 'moderated_by', as: 'moderatedServiceRatings' });
+
+// ── ServiceListingReport — user reports of listings (trust/safety) ───────────
+
+ServiceListingReport.belongsTo(ServiceListing, { foreignKey: 'listing_id', as: 'listing' });
+ServiceListing.hasMany(ServiceListingReport,   { foreignKey: 'listing_id', as: 'reports' });
+
+ServiceListingReport.belongsTo(Account, { foreignKey: 'reporter_id', targetKey: 'uuid', as: 'reporter' });
+Account.hasMany(ServiceListingReport,   { foreignKey: 'reporter_id', sourceKey: 'uuid', as: 'serviceReportsFiled' });
+
+ServiceListingReport.belongsTo(Employee, { foreignKey: 'resolved_by', as: 'resolver', constraints: false });
+Employee.hasMany(ServiceListingReport,   { foreignKey: 'resolved_by', as: 'resolvedServiceReports' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — EARNINGS ENGINE

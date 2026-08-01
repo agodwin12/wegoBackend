@@ -170,6 +170,16 @@ ServiceRating.init(
         timestamps: true,
         paranoid: true,
         underscored: true,
+        indexes: [
+            {
+                // One review per customer per listing. The controller pre-checks
+                // and catches SequelizeUniqueConstraintError — this makes that
+                // catch real and closes the concurrent double-submit race.
+                name:   'uq_service_rating_listing_customer',
+                unique: true,
+                fields: ['listing_id', 'customer_id'],
+            },
+        ],
     }
 );
 
