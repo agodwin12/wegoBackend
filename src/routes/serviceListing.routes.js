@@ -7,6 +7,7 @@ const serviceListingController = require('../controllers/serviceListing.controll
 const serviceListingAdminController = require('../controllers/serviceListingAdmin.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 const { authenticateEmployee, requireEmployeeRole } = require('../middleware/employeeAuth.middleware');
+const { contactLimiter } = require('../config/security');
 const { upload } = require('../middleware/upload');
 const validate = require('../middleware/validate');
 const serviceListingValidator = require('../validators/servicesMarketplace.validator');
@@ -148,6 +149,7 @@ router.post(
 router.post(
     '/:id/contact',
     authenticateToken,
+    contactLimiter,
     serviceListingController.requestService
 );
 

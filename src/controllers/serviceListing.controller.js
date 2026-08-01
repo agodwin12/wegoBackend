@@ -748,11 +748,14 @@ exports.updateListing = async (req, res) => {
             });
         }
 
-        // Can only edit pending or rejected moderation
-        if (!['pending', 'rejected'].includes(listing.status)) {
+        // Editable statuses. The ENUM uses 'pending_review' (not 'pending'), and
+        // editing a live/inactive listing is allowed — it re-queues to moderation
+        // below. (The old guard rejected the real 'pending_review' + 'active'
+        // states the UI offers Edit for, so every Edit 403'd.)
+        if (!['pending_review', 'rejected', 'active', 'inactive'].includes(listing.status)) {
             return res.status(403).json({
                 success: false,
-                message: 'Cannot edit active or approved moderation. Please contact support.',
+                message: `Cannot edit a listing in "${listing.status}" state. Please contact support.`,
             });
         }
 

@@ -133,6 +133,7 @@ exports.createPlan = async (req, res) => {
             highlight_label_en,
             highlight_label_fr,
             display_order,
+            listing_quota,
         } = req.body;
 
         const employeeId = req.user.id;
@@ -202,6 +203,8 @@ exports.createPlan = async (req, res) => {
             highlight_label_en:     highlight_label_en ? highlight_label_en.trim() : null,
             highlight_label_fr:     highlight_label_fr ? highlight_label_fr.trim() : null,
             display_order:          display_order !== undefined ? parseInt(display_order) : 0,
+            // null = unlimited posts; a number caps posts per plan period.
+            listing_quota:          (listing_quota === undefined || listing_quota === null || listing_quota === '') ? null : parseInt(listing_quota),
             is_active:              true,
             created_by:             employeeId,
         });
@@ -269,6 +272,7 @@ exports.updatePlan = async (req, res) => {
             highlight_label_en,
             highlight_label_fr,
             display_order,
+            listing_quota,
         } = req.body;
 
         // Validate fields that are being updated
@@ -314,6 +318,8 @@ exports.updatePlan = async (req, res) => {
             highlight_label_en:     highlight_label_en     !== undefined ? (highlight_label_en ? highlight_label_en.trim() : null) : plan.highlight_label_en,
             highlight_label_fr:     highlight_label_fr     !== undefined ? (highlight_label_fr ? highlight_label_fr.trim() : null) : plan.highlight_label_fr,
             display_order:          display_order          !== undefined ? parseInt(display_order)         : plan.display_order,
+            // null/'' = unlimited posts; a number caps posts per plan period.
+            listing_quota:          listing_quota          !== undefined ? ((listing_quota === null || listing_quota === '') ? null : parseInt(listing_quota)) : plan.listing_quota,
             updated_by:             employeeId,
         });
 

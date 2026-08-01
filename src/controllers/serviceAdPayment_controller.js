@@ -76,6 +76,7 @@ exports.getAvailablePlans = async (req, res) => {
                 'price_xaf',
                 'duration_days',
                 'max_photos',
+                'listing_quota',
                 'is_hero_placement',
                 'requires_admin_approval',
                 'boost_priority',

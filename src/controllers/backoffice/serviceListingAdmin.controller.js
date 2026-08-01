@@ -251,6 +251,13 @@ exports.approveListing = async (req, res) => {
         const now = new Date();
         const fallbackExpiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
+        // If the provider's active plan includes featured (hero) placement, apply
+        // it on approval. The live subscription flow (ServiceAdPayment with
+        // listing_id=NULL) never flagged hero on any listing, so paid hero plans
+        // previously did nothing unless an admin toggled is_hero by hand.
+        const planIsHero = !!activePlan?.plan?.is_hero_placement;
+        const planExpiry = activePlan?.plan_expires_at ?? fallbackExpiry;
+
         await listing.update({
             status:            'active',
             approved_by:       employee_id,
@@ -259,9 +266,11 @@ exports.approveListing = async (req, res) => {
             rejected_at:       null,
             rejection_reason:  null,
             current_plan_id:   activePlan?.plan_id ?? listing.current_plan_id ?? null,
-            boost_priority:    activePlan?.plan?.boost_priority ?? listing.boost_priority ?? 0,
+            boost_priority:    planIsHero ? 2 : (activePlan?.plan?.boost_priority ?? listing.boost_priority ?? 0),
             plan_activated_at: now,
-            plan_expires_at:   activePlan?.plan_expires_at ?? fallbackExpiry,
+            plan_expires_at:   planExpiry,
+            is_hero:           planIsHero ? true : listing.is_hero,
+            hero_expires_at:   planIsHero ? planExpiry : listing.hero_expires_at,
         });
 
         console.log(`✅ [LISTING_ADMIN] Listing approved & live:`, listing.listing_id, 'by employee:', employee_id);
@@ -304,7 +313,8 @@ exports.approveListing = async (req, res) => {
 exports.rejectListing = async (req, res) => {
     try {
         const { id } = req.params;
-        const { reason } = req.body;
+        // The backoffice sends `rejection_reason`; accept either field name.
+        const reason = req.body.reason || req.body.rejection_reason;
         const employee_id = req.user.id;
 
         if (!id || isNaN(id)) {

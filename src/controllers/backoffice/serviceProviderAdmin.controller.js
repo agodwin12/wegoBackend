@@ -137,11 +137,11 @@ const getAllProviders = async (req, res) => {
             });
 
             const activeListings = await ServiceListing.count({
-                where: { provider_id: providerId, status: 'approved' }
+                where: { provider_id: providerId, status: 'active' }
             });
 
             const pendingListings = await ServiceListing.count({
-                where: { provider_id: providerId, status: 'pending' }
+                where: { provider_id: providerId, status: 'pending_review' }
             });
 
             // Plans purchased by this provider

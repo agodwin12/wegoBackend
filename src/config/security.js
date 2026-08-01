@@ -118,4 +118,19 @@ const createTripLimiter = rateLimit({
     message: { success: false, error: 'Too many ride requests in a short time. Please wait a moment and try again.' },
 });
 
-module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, ALLOWED_ORIGINS, ALLOW_ALL };
+// Contacting a service provider (POST /services/.../:id/contact) records a lead
+// and fires a push to the provider. Without a cap, one customer could spam a
+// provider's phone with pushes (and inflate the listing's contact_count).
+// Keyed by authenticated user — generous for real use, hostile to a spammer.
+const CONTACT_WINDOW_MS = Number(process.env.CONTACT_RATE_WINDOW_MS) || 10 * 60 * 1000;
+const CONTACT_MAX       = Number(process.env.CONTACT_RATE_MAX) || 20;
+const contactLimiter = rateLimit({
+    windowMs: CONTACT_WINDOW_MS,
+    max: CONTACT_MAX,
+    keyGenerator: userOrIpKey,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many provider contacts in a short time. Please wait a moment and try again.' },
+});
+
+module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, contactLimiter, ALLOWED_ORIGINS, ALLOW_ALL };
