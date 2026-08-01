@@ -115,8 +115,9 @@ const uploadRoutes                = require('./routes/backoffice/uploadRoutes');
 const dashboardRoutes             = require('./routes/backoffice/dashboard.routes');
 
 // ─── Background Jobs ──────────────────────────────────────────────────────────
-const { startCleanupJob }  = require('./jobs/cleanup.job');
-const paymentExpiryJob     = require('./jobs/paymentExpiry.job');
+const { startCleanupJob }    = require('./jobs/cleanup.job');
+const paymentExpiryJob       = require('./jobs/paymentExpiry.job');
+const commissionReconcileJob = require('./jobs/commissionReconcile.job');
 const cron                 = require('node-cron');
 const { expireListings }   = require('./controllers/serviceAdPayment_controller');
 const deviceTokenRoutes = require('./routes/deviceToken_routes');
@@ -337,6 +338,7 @@ if (process.env.RUN_JOBS !== 'false') {
     console.log('🕒 [JOBS] RUN_JOBS enabled — starting background cron jobs');
     startCleanupJob();
     paymentExpiryJob.start();
+    commissionReconcileJob.start(); // finalize any orphaned delivery-commission reservations
     cron.schedule('0 2 * * *', expireListings); // daily 02:00 — expire stale listing plans
 } else {
     console.log('🚫 [JOBS] RUN_JOBS=false — background cron jobs disabled on this instance');

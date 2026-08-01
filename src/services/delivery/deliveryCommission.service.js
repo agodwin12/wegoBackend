@@ -47,12 +47,18 @@
 
 'use strict';
 
+const { Op } = require('sequelize');
 const {
     DeliveryWallet,
     DeliveryWalletTransaction,
     Delivery,
     sequelize,
 } = require('../../models');
+
+// Terminal commission ledger markers. The presence of either for a delivery
+// means the commission lifecycle already finalized — used as the idempotency
+// key by confirm/release and by the reconciliation sweep.
+const TERMINAL_TXN_TYPES = ['commission_deduction', 'commission_release'];
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -65,8 +71,21 @@ const MINIMUM_FLOAT_XAF = parseInt(process.env.COMMISSION_MINIMUM_FLOAT_XAF || 0
 /**
  * Load and lock the wallet row in a transaction.
  * Throws structured errors if wallet is missing or inactive.
+ *
+ * @param {string} driverId
+ * @param {import('sequelize').Transaction} transaction
+ * @param {object} [opts]
+ * @param {boolean} [opts.allowInactive] - skip the active-status gate. Finalization
+ *   ops (confirm/release/penalise) pass this: the commission was reserved while the
+ *   wallet was active, so freezing/suspending it afterwards must NOT block completing
+ *   the lifecycle — otherwise the reserved_balance is orphaned forever. Only
+ *   reserveCommission keeps the gate (don't let an inactive wallet take new jobs).
+ * @param {boolean} [opts.allowMissing] - return null instead of throwing when the
+ *   wallet row does not exist. Finalization uses this: wallets are never deleted, so
+ *   a missing wallet means nothing was ever reserved (reserve blocks accept otherwise)
+ *   → the caller treats it as a no-op rather than a hard 402.
  */
-async function _lockWallet(driverId, transaction) {
+async function _lockWallet(driverId, transaction, opts = {}) {
     const wallet = await DeliveryWallet.findOne({
         where: { driver_id: driverId },
         lock:  transaction.LOCK.UPDATE,
@@ -74,12 +93,13 @@ async function _lockWallet(driverId, transaction) {
     });
 
     if (!wallet) {
+        if (opts.allowMissing) return null;
         const err = new Error('Wallet not found. Please top up your wallet to continue.');
         err.statusCode = 402;
         throw err;
     }
 
-    if (wallet.status !== 'active') {
+    if (wallet.status !== 'active' && !opts.allowInactive) {
         const err = new Error(
             wallet.status === 'frozen'
                 ? 'Your wallet is frozen. Contact WeGo support to continue accepting deliveries.'
@@ -90,6 +110,24 @@ async function _lockWallet(driverId, transaction) {
     }
 
     return wallet;
+}
+
+/**
+ * Has this delivery's commission already reached a terminal ledger state
+ * (confirmed as a deduction, or released)? Used as the idempotency guard so
+ * confirm/release and the reconciliation sweep never double-apply.
+ *
+ * MUST be called AFTER the wallet row is locked FOR UPDATE — that serialises a
+ * racing finalization behind us, and (because a locking read does not open the
+ * REPEATABLE READ snapshot) the first consistent read that follows the lock sees
+ * the racing txn's committed ledger row.
+ */
+async function _findTerminalTxn(deliveryId, transaction) {
+    return DeliveryWalletTransaction.findOne({
+        where:      { delivery_id: deliveryId, type: { [Op.in]: TERMINAL_TXN_TYPES } },
+        attributes: ['id', 'type'],
+        transaction,
+    });
 }
 
 /**
@@ -210,6 +248,19 @@ async function confirmCommission(deliveryId, driverId, opts = {}) {
     const ownTxn = !opts.transaction;
 
     try {
+        // Lock the wallet FIRST so the transaction's read snapshot is established
+        // AFTER we hold the row lock — this is what makes the idempotency check
+        // below correct against a concurrent confirm (the reconcile sweep can race
+        // the PIN-verify handler, which does not share its Redis pin_lock).
+        // allowInactive: finalizing an already-reserved commission must succeed even
+        // if the wallet was frozen/suspended after accept. allowMissing: no wallet
+        // ⇒ nothing was ever reserved ⇒ no-op.
+        const wallet = await _lockWallet(driverId, t, { allowInactive: true, allowMissing: true });
+        if (!wallet) {
+            if (ownTxn) await t.commit();
+            return { deductedAmount: 0, noWallet: true };
+        }
+
         const delivery   = await _loadDelivery(deliveryId, t);
         const commission = parseFloat(delivery.commission_amount || 0);
 
@@ -218,7 +269,15 @@ async function confirmCommission(deliveryId, driverId, opts = {}) {
             return { deductedAmount: 0 };
         }
 
-        const wallet        = await _lockWallet(driverId, t);
+        // Idempotency: if the commission already reached a terminal ledger state
+        // (confirmed on a prior attempt, or released by a cancel), do nothing.
+        // Safe under concurrency because we already hold the wallet row lock.
+        const terminal = await _findTerminalTxn(deliveryId, t);
+        if (terminal) {
+            if (ownTxn) await t.commit();
+            return { deductedAmount: 0, alreadyFinalized: true, finalizedAs: terminal.type };
+        }
+
         const balanceBefore = parseFloat(wallet.balance);
         const balanceAfter  = Math.max(0, balanceBefore - commission);
 
@@ -274,6 +333,16 @@ async function releaseCommission(deliveryId, driverId, opts = {}) {
     const ownTxn = !opts.transaction;
 
     try {
+        // Lock-first (see confirmCommission) so the idempotency check is race-safe.
+        // allowInactive: a cancel must release the lock even if the wallet was frozen
+        // after accept — otherwise the reserved_balance is orphaned exactly like the
+        // confirm path. allowMissing: no wallet ⇒ nothing reserved ⇒ no-op.
+        const wallet = await _lockWallet(driverId, t, { allowInactive: true, allowMissing: true });
+        if (!wallet) {
+            if (ownTxn) await t.commit();
+            return { releasedAmount: 0, noWallet: true };
+        }
+
         const delivery   = await _loadDelivery(deliveryId, t);
         const commission = parseFloat(delivery.commission_amount || 0);
 
@@ -282,7 +351,14 @@ async function releaseCommission(deliveryId, driverId, opts = {}) {
             return { releasedAmount: 0 };
         }
 
-        const wallet        = await _lockWallet(driverId, t);
+        // Idempotency: never release twice (would wrongly free reserve still held by
+        // other deliveries) and never release something already deducted.
+        const terminal = await _findTerminalTxn(deliveryId, t);
+        if (terminal) {
+            if (ownTxn) await t.commit();
+            return { releasedAmount: 0, alreadyFinalized: true, finalizedAs: terminal.type };
+        }
+
         const balanceBefore = parseFloat(wallet.balance);
 
         // Release the reserved lock — balance stays the same
@@ -343,7 +419,9 @@ async function penaliseCommission(deliveryId, driverId, opts = {}) {
             return { penalisedAmount: 0 };
         }
 
-        const wallet        = await _lockWallet(driverId, t);
+        // allowInactive: a driver-cancel penalty on an already-reserved commission
+        // must still apply even if the wallet was frozen/suspended after accept.
+        const wallet        = await _lockWallet(driverId, t, { allowInactive: true });
         const balanceBefore = parseFloat(wallet.balance);
         const balanceAfter  = Math.max(0, balanceBefore - commission);
 

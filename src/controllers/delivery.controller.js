@@ -1089,8 +1089,15 @@ exports.verifyPin = async (req, res) => {
                 await delivery.update({ payment_status: 'cash_pending' });
             }
 
+            // Fire-and-forget on purpose: never block the agent's handoff on a
+            // wallet-lock/DB blip. confirmCommission is idempotent and the
+            // commissionReconcile sweep re-confirms any delivered delivery whose
+            // reservation is still orphaned, so this always reaches consistency.
             deliveryCommissionService.confirmCommission(deliveryId, driver.id)
-                .catch(err => console.error(`❌ [DELIVERY] Commission confirm FAILED:`, err.message));
+                .catch(err => console.error(
+                    `❌ [DELIVERY] Commission confirm FAILED (reconcile sweep will retry):`,
+                    err.message,
+                ));
 
             // Post earnings, THEN evaluate milestone bonuses (so this delivery is
             // counted). Bonuses reload the agent wallet like ride-hailing quests.
