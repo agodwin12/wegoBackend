@@ -5,11 +5,17 @@
 
 const cron           = require('node-cron');
 const { Op }         = require('sequelize');
-const { WegoPayment, Delivery } = require('../models');
+const { WegoPayment } = require('../models');
 const campayService  = require('../services/campay/campayService');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
-const EXPIRY_MINUTES = 15;
+// How long a customer/agent has to complete a CamPay mobile-money payment before
+// the pending charge is marked EXPIRED (and the vertical reset so they can retry).
+// Configurable via env (PAYMENT_EXPIRY_MINUTES); defaults to 15. Reconciliation
+// runs first every minute, so a payment CamPay actually confirmed is never wrongly
+// expired. Invalid / non-positive values fall back to the 15-minute default.
+const _envExpiryMin  = parseInt(process.env.PAYMENT_EXPIRY_MINUTES, 10);
+const EXPIRY_MINUTES = Number.isFinite(_envExpiryMin) && _envExpiryMin > 0 ? _envExpiryMin : 15;
 const CRON_SCHEDULE  = '* * * * *'; // every minute
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,20 +95,10 @@ async function _resetVerticalState(vertical, verticalId) {
 
     switch (vertical) {
 
-        case 'delivery':
-            // Reset payment_status to 'pending' so the sender can initiate again.
-            // Only reset if still 'pending' — don't overwrite 'paid' or 'cash_pending'.
-            await Delivery.update(
-                { payment_status: 'pending' },
-                {
-                    where: {
-                        id:             parseInt(verticalId),
-                        payment_status: 'pending', // only touch if still pending
-                    },
-                }
-            );
-            console.log(`  ↩️  [EXPIRY][DELIVERY] Delivery ${verticalId} payment_status reset to pending`);
-            break;
+        // NB: no 'delivery' case — deliveries are no longer paid via CamPay (the
+        // customer pays the agent directly), so no delivery WegoPayment is ever
+        // created and none can reach this sweep. A stray legacy one falls through
+        // to the default branch (harmless log, no state change).
 
         case 'rental':
             // VehicleRental stays in 'PENDING' — no change needed.
