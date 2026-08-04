@@ -23,6 +23,7 @@ const locationService           = require('../services/locationService');
 const deliveryEarningsService   = require('../services/deliveryEarningsService');
 const deliveryCommissionService = require('../services/delivery/deliveryCommission.service');
 const deliveryBonusService      = require('../services/delivery/deliveryBonusService');
+const { setDriverMode, ModeSwitchBlockedError } = require('../services/driverModeState.service');
 const deliverySocketService     = require('../sockets/delivery/deliverySocket.service');
 const { getIO }                 = require('../sockets/exports');
 const { sendSms }               = require('../services/comm/sms.service');
@@ -1736,10 +1737,23 @@ exports.toggleDriverMode = async (req, res) => {
 
         const driver = await getDriverByAccountUuid(req.user.uuid);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver record not found' });
-        if (driver.status === 'busy') return res.status(400).json({ success: false, message: 'Cannot switch mode during an active trip or delivery' });
         if (req.user.user_type === 'DELIVERY_AGENT' && mode === 'ride') return res.status(403).json({ success: false, message: 'Delivery agents cannot switch to ride mode' });
 
-        await Driver.update({ current_mode: mode }, { where: { id: driver.id } });
+        // Delegates the actual mutation (busy-guard, Redis cleanup,
+        // Driver.current_mode + Account.active_mode kept in lock-step) to the
+        // same shared service /api/auth/switch-mode uses — this endpoint no
+        // longer writes Driver.current_mode on its own, which used to be able
+        // to drift out of sync with Account.active_mode (the field every
+        // authorization check actually reads).
+        try {
+            await setDriverMode(req.user.uuid, mode === 'delivery' ? 'DELIVERY_AGENT' : 'DRIVER');
+        } catch (err) {
+            if (err instanceof ModeSwitchBlockedError) {
+                return res.status(400).json({ success: false, message: err.message, code: err.code });
+            }
+            throw err;
+        }
+
         return res.json({ success: true, message: `Switched to ${mode} mode`, currentMode: mode });
 
     } catch (error) {

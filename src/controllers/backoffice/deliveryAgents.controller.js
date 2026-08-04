@@ -2,6 +2,7 @@
 
 const { Op } = require('sequelize');
 const { Account, Driver, DriverProfile, Delivery, sequelize } = require('../../models');
+const { setDriverMode, ModeSwitchBlockedError } = require('../../services/driverModeState.service');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GET ALL DELIVERY AGENTS
@@ -190,15 +191,29 @@ exports.switchMode = async (req, res) => {
         const driver = await Driver.findByPk(driverId);
         if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });
 
-        if (driver.status === 'busy') {
-            return res.status(400).json({
-                success: false,
-                message: 'Cannot switch mode while driver has an active trip or delivery',
-            });
-        }
-
         const previousMode = driver.current_mode;
-        await driver.update({ current_mode: mode });
+
+        // Delegates to the same shared service /api/auth/switch-mode and the
+        // mobile toggle use — refuses unconditionally while status === 'busy'
+        // (no admin exception: force-switching a busy driver mid-trip or
+        // mid-delivery is exactly the scenario that strands a real customer),
+        // and keeps Account.active_mode in lock-step with Driver.current_mode
+        // so the driver's own session/matching-engine view never drifts.
+        // The affected driver's held JWT is untouched here — their app will
+        // self-heal on its next request via the existing MODE_TOKEN_STALE →
+        // /refresh-token flow, which re-derives active_mode fresh from the DB.
+        // setDriverMode() takes an ACCOUNT uuid (Driver.userId), not the
+        // Driver PK (:driverId) — they differ for delivery agents (see
+        // driverModeState.service.js). driver.userId is already the row we
+        // just fetched above, so no extra query is needed.
+        try {
+            await setDriverMode(driver.userId, mode === 'delivery' ? 'DELIVERY_AGENT' : 'DRIVER');
+        } catch (err) {
+            if (err instanceof ModeSwitchBlockedError) {
+                return res.status(400).json({ success: false, message: err.message, code: err.code });
+            }
+            throw err;
+        }
 
         console.log(`🔄 [DELIVERY AGENTS] Admin ${req.user.id} switched driver ${driverId}: ${previousMode} → ${mode}`);
 

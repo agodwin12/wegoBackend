@@ -15,13 +15,19 @@
 //   DELIVERY_AGENT in DELIVERY_AGENT mode → PASSENGER
 //   DELIVERY_AGENT in PASSENGER mode      → DELIVERY_AGENT
 //
-//   PASSENGER → nothing
+//   PASSENGER → nothing (native passenger accounts can never switch)
 //
-// ── Side effects ──────────────────────────────────────────────────────
+// ── Guard ────────────────────────────────────────────────────────────
+//
+//   Refused with 400 ACTIVE_JOB_IN_PROGRESS if Driver.status === 'busy' —
+//   switching mode mid-trip or mid-delivery would strand a real passenger
+//   or package with a frozen tracking screen and no warning to anyone.
+//
+// ── Side effects (via services/driverModeState.service.js) ─────────────
 //
 //   → PASSENGER:
 //     • Driver removed from Redis geo-index + availability sets
-//     • Driver.status = offline
+//     • Driver.status = offline, Driver.current_mode = ride
 //
 //   → DELIVERY_AGENT:
 //     • Redis cleaned (must re-call goOnline in delivery mode)
@@ -32,14 +38,19 @@
 //     • Redis cleaned (must re-call goOnline in ride mode)
 //     • Driver.current_mode = ride
 //
+//   In every case Account.active_mode is updated in lock-step with
+//   Driver.current_mode — this is the single writer both fields share with
+//   the legacy mobile toggle and the backoffice admin override, so the two
+//   can never drift out of sync regardless of which endpoint changed them.
+//
 // ═══════════════════════════════════════════════════════════════════════
 
 'use strict';
 
 const { v4: uuidv4 }      = require('uuid');
-const { Account, Driver } = require('../models');
+const { Account }         = require('../models');
 const { signAccessToken, generateRefreshToken } = require('../utils/jwt');
-const { redisClient, REDIS_KEYS }               = require('../config/redis');
+const { setDriverMode, ModeSwitchBlockedError } = require('../services/driverModeState.service');
 
 // ── Mode-aware allowed transitions ───────────────────────────────────
 // ALLOWED_TRANSITIONS[user_type][current_active_mode] → Set of allowed targets
@@ -138,26 +149,31 @@ exports.switchMode = async (req, res, next) => {
 
         console.log('   allowed    :', [...allowedFromMode].join(', '));
 
-        // ── 4. Side effects based on target mode ──────────────────────
+        // ── 4. Mutate mode (refuses if the driver has a live job) ──────
+        //
+        // setDriverMode() is the single place Driver.current_mode AND
+        // Account.active_mode are ever written, and it unconditionally
+        // refuses while status === 'busy' — switching mode mid-trip or
+        // mid-delivery would strand a real passenger/package with a frozen
+        // tracking screen and no warning to anyone.
 
-        if (target_mode === 'PASSENGER') {
-            await _sideEffectsToPassenger(driverId, userType);
-        } else if (target_mode === 'DELIVERY_AGENT') {
-            await _sideEffectsToDelivery(driverId);
-        } else if (target_mode === 'DRIVER') {
-            await _sideEffectsToDriver(driverId);
+        try {
+            await setDriverMode(driverId, target_mode);
+        } catch (err) {
+            if (err instanceof ModeSwitchBlockedError) {
+                console.log(`❌ [SWITCH-MODE] Blocked — driver has an active job:`, driverId);
+                return res.status(400).json({
+                    success: false,
+                    message: err.message,
+                    code:    err.code,
+                });
+            }
+            throw err;
         }
-
-        // ── 5. Persist new active_mode to DB ──────────────────────────
-
-        await Account.update(
-            { active_mode: target_mode },
-            { where: { uuid: driverId } }
-        );
 
         console.log(`✅ [SWITCH-MODE] DB updated: active_mode = ${target_mode}`);
 
-        // ── 6. Issue fresh token pair ─────────────────────────────────
+        // ── 5. Issue fresh token pair ─────────────────────────────────
 
         const updatedAccount  = await Account.findByPk(driverId);
         const newAccessToken  = signAccessToken(updatedAccount);
@@ -231,97 +247,8 @@ exports.getCurrentMode = async (req, res) => {
     });
 };
 
-// ═══════════════════════════════════════════════════════════════════════
-// PRIVATE SIDE-EFFECT HELPERS
-// ═══════════════════════════════════════════════════════════════════════
-
-async function _sideEffectsToPassenger(accountUuid, userType) {
-    console.log(`🚶 [SWITCH-MODE] Side effects: → PASSENGER for ${accountUuid}`);
-
-    await _cleanRedisPresence(accountUuid);
-
-    try {
-        await Driver.update(
-            { status: 'offline', current_mode: 'ride' },
-            { where: { id: accountUuid } }
-        );
-        console.log('✅ [SWITCH-MODE] Driver record set to offline');
-    } catch (e) {
-        console.warn('⚠️  [SWITCH-MODE] Driver DB update failed (non-fatal):', e.message);
-    }
-}
-
-async function _sideEffectsToDelivery(accountUuid) {
-    console.log(`📦 [SWITCH-MODE] Side effects: → DELIVERY_AGENT for ${accountUuid}`);
-
-    await _cleanRedisPresence(accountUuid);
-
-    try {
-        await Driver.update(
-            { status: 'offline', current_mode: 'delivery' },
-            { where: { id: accountUuid } }
-        );
-        console.log('✅ [SWITCH-MODE] Driver.current_mode = delivery');
-    } catch (e) {
-        console.warn('⚠️  [SWITCH-MODE] Driver mode update failed (non-fatal):', e.message);
-    }
-
-    // Auto-create DeliveryWallet on first delivery mode switch
-    try {
-        const { DeliveryWallet } = require('../models');
-        const [wallet, created]  = await DeliveryWallet.findOrCreate({
-            where:    { driver_id: accountUuid },
-            defaults: {
-                driver_id:             accountUuid,
-                balance:               0.00,
-                total_earned:          0.00,
-                total_cash_collected:  0.00,
-                total_commission_owed: 0.00,
-                total_commission_paid: 0.00,
-                total_withdrawn:       0.00,
-                pending_withdrawal:    0.00,
-                status:                'active',
-            },
-        });
-
-        if (created) {
-            console.log('✅ [SWITCH-MODE] DeliveryWallet auto-created for driver:', accountUuid);
-        } else {
-            console.log('ℹ️  [SWITCH-MODE] DeliveryWallet already exists — balance:', wallet.balance, 'XAF');
-        }
-    } catch (e) {
-        console.warn('⚠️  [SWITCH-MODE] DeliveryWallet findOrCreate failed (non-fatal):', e.message);
-    }
-}
-
-async function _sideEffectsToDriver(accountUuid) {
-    console.log(`🚗 [SWITCH-MODE] Side effects: → DRIVER for ${accountUuid}`);
-
-    await _cleanRedisPresence(accountUuid);
-
-    try {
-        await Driver.update(
-            { status: 'offline', current_mode: 'ride' },
-            { where: { id: accountUuid } }
-        );
-        console.log('✅ [SWITCH-MODE] Driver.current_mode = ride');
-    } catch (e) {
-        console.warn('⚠️  [SWITCH-MODE] Driver mode update failed (non-fatal):', e.message);
-    }
-}
-
-async function _cleanRedisPresence(accountUuid) {
-    try {
-        const id = accountUuid.toString();
-        await Promise.all([
-            redisClient.zrem(REDIS_KEYS.DRIVERS_GEO,      id),
-            redisClient.srem(REDIS_KEYS.ONLINE_DRIVERS,    id),
-            redisClient.srem(REDIS_KEYS.AVAILABLE_DRIVERS, id),
-            redisClient.del(REDIS_KEYS.DRIVER_META(accountUuid)),
-            redisClient.del(`driver:location:${accountUuid}`),
-        ]);
-        console.log('✅ [SWITCH-MODE] Redis presence cleared for:', accountUuid);
-    } catch (e) {
-        console.warn('⚠️  [SWITCH-MODE] Redis cleanup failed (non-fatal):', e.message);
-    }
-}
+// Mode-mutation side effects (Redis cleanup, Driver.current_mode,
+// Account.active_mode, DeliveryWallet provisioning, busy-guard) now live in
+// driverModeState.service.js — the single place shared with the legacy
+// mobile toggle and the backoffice admin override, so the two DB fields can
+// never drift out of sync regardless of which endpoint changed them.
