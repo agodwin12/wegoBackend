@@ -28,6 +28,11 @@ VehicleRental.init(
             onDelete: 'CASCADE',
         },
 
+        rentalRegion: {
+            type: DataTypes.STRING(64),
+            allowNull: false,
+        },
+
         rentalType: {
             type: DataTypes.ENUM('HOUR', 'DAY', 'WEEK', 'MONTH'),
             allowNull: false,
@@ -39,6 +44,17 @@ VehicleRental.init(
         status: {
             type: DataTypes.ENUM('PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED'),
             defaultValue: 'PENDING',
+        },
+
+        contactStatus: {
+            type: DataTypes.ENUM('PENDING', 'CONTACTED', 'NEGOTIATING', 'APPROVED', 'REJECTED'),
+            allowNull: false,
+            defaultValue: 'PENDING',
+        },
+
+        userNotes: {
+            type: DataTypes.TEXT,
+            allowNull: true,
         },
 
         totalPrice: {
@@ -83,13 +99,21 @@ VehicleRental.init(
             onUpdate: 'CASCADE',
             onDelete: 'SET NULL',
         },
+
+        handledByEmployeeId: {
+            type: DataTypes.CHAR(36),
+            allowNull: true,
+            references: { model: 'accounts', key: 'uuid' },
+            onUpdate: 'CASCADE',
+            onDelete: 'SET NULL',
+        },
     },
     {
         sequelize,
         modelName: 'VehicleRental',
         tableName: 'vehicle_rentals',
         timestamps: true,
-        underscored: true,
+        underscored: false, // DB uses camelCase column names — no underscored mapping
     }
 );
 

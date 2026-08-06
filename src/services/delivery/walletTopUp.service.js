@@ -865,10 +865,16 @@ async function creditWallet(topUpId, employeeId = null) {
             created_by_employee_id: employeeId,
         }, { transaction: t });
 
+        // Must run on the SAME transaction that already holds this row's lock
+        // (acquired above via `lock: t.LOCK.UPDATE`). Without `{ transaction: t }`
+        // here, this update would open a second connection and block waiting for
+        // t's lock to release — while t itself waits on this very call to
+        // resolve before it can commit. That self-deadlock previously hung every
+        // manual cash top-up confirmation until it timed out and rolled back.
         await topUp.transitionTo('credited', {
             balance_before_credit: balanceBefore,
             balance_after_credit:  balanceAfter,
-        });
+        }, { transaction: t });
 
         await t.commit();
 

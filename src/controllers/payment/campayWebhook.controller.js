@@ -71,6 +71,19 @@ exports._finalizeFromPoll = async (payment, payload, io) => {
             case 'listing_fee':    await _finalizeListingFee(payment, payload, io);    break;
             case 'delivery_topup': await _finalizeDeliveryTopUp(payment, payload, io); break;
             case 'fleet_topup':    await _finalizeFleetTopUp(payment, payload, io);    break;
+            case null:
+                // Driver self-service wallet top-ups (driverEarnings.controller.js)
+                // are created with vertical: null, external_ref prefixed
+                // 'WEGO-TOPUP-'. They normally finalize via that controller's own
+                // webhook endpoint — this poll path is the backstop for when that
+                // direct webhook never arrives or its own CamPay re-verification
+                // call transiently fails.
+                if (payment.external_ref && payment.external_ref.startsWith('WEGO-TOPUP-')) {
+                    await _finalizeDriverWalletTopUp(payment, payload, io);
+                } else {
+                    console.log(`ℹ️  [POLL FINALIZER] No finalizer for vertical "${payment.vertical}" (external_ref: ${payment.external_ref})`);
+                }
+                break;
             default:
                 console.log(`ℹ️  [POLL FINALIZER] No finalizer for vertical "${payment.vertical}"`);
         }
@@ -571,6 +584,58 @@ async function _finalizeFleetTopUp(payment, payload, io) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DRIVER WALLET TOP-UP (self-service) — reconciliation-poll backstop only.
+// These payments are created by driverEarnings.controller.js's initiateTopUp
+// with vertical: null (external_ref prefixed 'WEGO-TOPUP-') and normally
+// finalize via that controller's OWN webhook endpoint
+// (POST /api/driver/earnings/campay/webhook), never through this file's
+// handleWebhook. This case only fires from the reconciliation poll — the
+// backstop for when that direct webhook never arrives, or its own
+// re-verification call to CamPay transiently fails. By the time we're
+// called, runReconciliation has already atomically flipped WegoPayment to
+// SUCCESSFUL; without this case the driver would never be credited despite
+// CamPay having taken the money, and the audit trail would misleadingly
+// read SUCCESSFUL forever.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _finalizeDriverWalletTopUp(payment, payload, io) {
+    // Lazy require: driverEarnings.controller.js requires this file at the
+    // top level (for _validateSignature), so a top-level require here would
+    // be circular.
+    const driverEarningsController = require('../driverEarnings.controller');
+
+    const result = await driverEarningsController.finalizeDriverTopUp(payment);
+
+    if (!result.credited) {
+        console.log(`ℹ️  [POLL FINALIZER][DRIVER_TOPUP] Payment ${payment.id} not credited (${result.reason})`);
+        return;
+    }
+
+    console.log(
+        `✅ [POLL FINALIZER][DRIVER_TOPUP] Transaction ${result.txId} credited — ` +
+        `${result.amount.toLocaleString()} XAF | new balance: ${result.newBalance.toLocaleString()}`
+    );
+
+    if (io && result.driverId) {
+        _emitToUser(io, result.driverId, 'wallet:credited', {
+            transaction_id: result.txId,
+            amount:         result.amount,
+            new_balance:    result.newBalance,
+            source:         'driver_topup',
+        });
+    }
+
+    try {
+        getNotificationService().send({
+            accountUuid: result.driverId,
+            type:        'WALLET_TOPUP_SUCCESS',
+            title:       '💰 Wallet topped up!',
+            body:        `${result.amount.toLocaleString()} XAF added to your wallet. New balance: ${result.newBalance.toLocaleString()} XAF.`,
+            data:        { screen: 'wallet' },
+        }).catch(() => {});
+    } catch (_) { /* non-critical */ }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FAILURE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -667,6 +732,7 @@ async function _finalizeFailed(payment, payload, io) {
 // JWT with CAMPAY_WEBHOOK_SECRET. This is the documented CamPay mechanism — it
 // is NOT an HMAC header. Regardless of the outcome here, _processWebhook also
 // independently re-queries CamPay's API before crediting (defence in depth).
+exports._validateSignature = _validateSignature;
 function _validateSignature(payload) {
     const secret = process.env.CAMPAY_WEBHOOK_SECRET;
     const isProd = process.env.NODE_ENV === 'production';

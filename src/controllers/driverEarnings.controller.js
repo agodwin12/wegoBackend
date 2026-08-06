@@ -43,6 +43,9 @@ const sequelize        = require('../config/database');
 
 const earningsEngine   = require('../services/earningsEngineService');
 const campayClient     = require('../services/campay/campayClient');
+const campayService    = require('../services/campay/campayService');
+// Reuse the primary CamPay webhook's JWT signature check — do not reinvent it.
+const { _validateSignature } = require('./payment/campayWebhook.controller');
 
 const {
     TripReceipt,
@@ -639,8 +642,6 @@ exports.campayWebhook = async (req, res) => {
             reference:          campayRef,
             external_reference: externalRef,
             status,
-            amount,
-            operator,
             operator_reference: operatorRef,
         } = req.body;
 
@@ -649,6 +650,16 @@ exports.campayWebhook = async (req, res) => {
         if (!externalRef || !status || !campayRef) {
             console.warn('⚠️  [WEBHOOK] Missing required fields — ignoring');
             return res.status(400).json({ success: false, error: 'MISSING_FIELDS' });
+        }
+
+        // ── Authenticate the webhook ───────────────────────────────────
+        // Same JWT-in-payload check used by the primary CamPay webhook
+        // (fails closed in production). Never trust an unsigned/mis-signed
+        // request — this is what previously let anyone POST a fabricated
+        // {status:'SUCCESSFUL'} straight to this endpoint and self-credit.
+        if (!_validateSignature(req.body)) {
+            console.error('🚨 [WEBHOOK] Rejected — invalid/missing signature. Possible spoofed request.');
+            return res.status(200).json({ success: true }); // 200 so CamPay doesn't hammer retries
         }
 
         // Only top-ups arrive via webhook (disbursements are synchronous)
@@ -680,65 +691,75 @@ exports.campayWebhook = async (req, res) => {
 
         if (!pendingTx) {
             console.warn(`⚠️  [WEBHOOK] DriverWalletTransaction not found for ref: TOP_UP:${externalRef}`);
-            // Update WegoPayment anyway to reflect CamPay's status
-            await payment.update({ campay_ref: campayRef, status: status === 'SUCCESSFUL' ? 'SUCCESSFUL' : 'FAILED', resolved_at: new Date() });
             return res.status(200).json({ success: true });
         }
 
-        if (status === 'SUCCESSFUL') {
-            // ── Credit the wallet ─────────────────────────────────────
-            const t = await sequelize.transaction();
-            try {
-                const wallet = await DriverWallet.findOne({
-                    where:       { driverId: pendingTx.driverId },
-                    lock:        t.LOCK.UPDATE,
-                    transaction: t,
-                });
+        // ── Independent re-verification — never trust req.body.status/amount ──
+        // Re-query CamPay's own status-check API for the authoritative outcome,
+        // exactly like the primary webhook does. A forged webhook payload can no
+        // longer credit a wallet: only what CamPay itself confirms is trusted.
+        const reference = payment.campay_ref || campayRef;
+        let authoritative;
+        try {
+            authoritative = await campayService.checkStatus(reference);
+        } catch (err) {
+            console.error(`❌ [WEBHOOK] Could not re-verify ${reference} with CamPay — NOT finalizing:`, err.message);
+            return res.status(200).json({ success: true }); // leave PENDING; retry later
+        }
 
-                const amountInt  = parseInt(amount, 10) || pendingTx.amount;
-                const newBalance = wallet.balance + amountInt;
+        const campayStatus = authoritative.status;
+        if (campayStatus === 'PENDING') {
+            console.log(`ℹ️  [WEBHOOK] CamPay still reports ${reference} as PENDING — ignoring premature webhook.`);
+            return res.status(200).json({ success: true });
+        }
 
-                await DriverWallet.update(
-                    { balance: newBalance, updatedAt: new Date() },
-                    { where: { id: wallet.id }, transaction: t }
+        const newStatus = campayStatus === 'SUCCESSFUL' ? 'SUCCESSFUL' : 'FAILED';
+        const operator   = authoritative.operator || null;
+
+        if (newStatus === 'SUCCESSFUL') {
+            // ── Amount verification — only meaningful on success ───────────────
+            const paidAmount = Math.round(Number(authoritative.amount));
+            if (!Number.isFinite(paidAmount) || paidAmount !== pendingTx.amount) {
+                console.error(
+                    `🚨 [WEBHOOK] AMOUNT MISMATCH for ${externalRef} — ` +
+                    `expected ${pendingTx.amount} XAF, CamPay reports ${authoritative.amount}. Refusing to credit.`
                 );
-
                 await DriverWalletTransaction.update(
-                    {
-                        topUpStatus:  'COMPLETED',
-                        topUpRef:     campayRef,
-                        topUpMethod:  _operatorToMethod(operator),
-                        balanceAfter: newBalance,
-                        metadata: {
-                            ...(pendingTx.metadata || {}),
-                            campayRef,
-                            operatorRef: operatorRef || null,
-                            operator:    operator    || null,
-                            confirmedAt: new Date().toISOString(),
-                        },
-                    },
-                    { where: { id: pendingTx.id }, transaction: t }
-                );
+                    { topUpStatus: 'FAILED', metadata: { ...(pendingTx.metadata || {}), reason: 'amount_mismatch' } },
+                    { where: { id: pendingTx.id } }
+                ).catch(() => {});
+                await payment.update({
+                    campay_ref:      reference,
+                    campay_response: authoritative,
+                    status:          'FAILED',
+                    failure_reason:  `amount_mismatch: expected ${pendingTx.amount}, got ${authoritative.amount}`,
+                    resolved_at:     new Date(),
+                }).catch(() => {});
+                return res.status(200).json({ success: true });
+            }
 
-                await payment.update(
-                    {
-                        campay_ref:      campayRef,
-                        operator:        operator || null,
-                        campay_response: req.body,
-                        status:          'SUCCESSFUL',
-                        resolved_at:     new Date(),
-                    },
-                    { transaction: t }
-                );
+            // ── Credit the wallet ─────────────────────────────────────
+            // Stamp CamPay's authoritative response onto the in-memory payment
+            // object — finalizeDriverTopUp() persists it itself via its own
+            // locked/conditional WegoPayment claim (see that function).
+            payment.campay_ref      = reference;
+            payment.operator        = operator;
+            payment.campay_response = authoritative;
+            payment.resolved_at     = new Date();
 
-                await t.commit();
-                console.log(`✅ [WEBHOOK] Top-up CREDITED — ${amountInt} XAF | New balance: ${newBalance} XAF | Driver: ${pendingTx.driverId}`);
-
+            let result;
+            try {
+                result = await exports.finalizeDriverTopUp(payment, { operatorRef });
             } catch (err) {
-                await t.rollback();
                 console.error('❌ [WEBHOOK] DB error while crediting top-up:', err);
                 // Return 200 anyway — CamPay will retry and we'll process then
                 return res.status(200).json({ success: true });
+            }
+
+            if (result.credited) {
+                console.log(`✅ [WEBHOOK] Top-up CREDITED — ${result.amount} XAF | New balance: ${result.newBalance} XAF | Driver: ${result.driverId}`);
+            } else {
+                console.log(`ℹ️  [WEBHOOK] Top-up not credited (${result.reason}) for ${externalRef} — likely already finalized concurrently.`);
             }
 
         } else {
@@ -748,18 +769,18 @@ exports.campayWebhook = async (req, res) => {
                     topUpStatus: 'FAILED',
                     metadata: {
                         ...(pendingTx.metadata || {}),
-                        campayRef,
-                        failedAt: new Date().toISOString(),
-                        reason:   status,
+                        campayRef:   reference,
+                        failedAt:    new Date().toISOString(),
+                        reason:      campayStatus,
                     },
                 },
                 { where: { id: pendingTx.id } }
             );
             await payment.update({
-                campay_ref:      campayRef,
-                campay_response: req.body,
+                campay_ref:      reference,
+                campay_response: authoritative,
                 status:          'FAILED',
-                failure_reason:  `CamPay status: ${status}`,
+                failure_reason:  `CamPay status: ${campayStatus}`,
                 resolved_at:     new Date(),
             });
             console.log(`❌ [WEBHOOK] Top-up FAILED — externalRef: ${externalRef}`);
@@ -772,6 +793,145 @@ exports.campayWebhook = async (req, res) => {
     } catch (error) {
         console.error('❌ [WEBHOOK] Unhandled error:', error);
         return res.status(200).json({ success: true }); // still 200 to prevent CamPay retries
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// finalizeDriverTopUp(payment, opts)
+// ─────────────────────────────────────────────────────────────────────
+// The ONE place that actually credits a driver's wallet for a TOP_UP.
+// Called from two places:
+//   1. exports.campayWebhook (above) — the direct CamPay webhook delivery.
+//   2. campayWebhook.controller.js's _finalizeFromPoll — the reconciliation
+//      cron's backstop for a payment whose direct webhook never arrived, or
+//      whose CamPay re-verification call transiently failed. Without this
+//      shared path, such a payment would end up with WegoPayment.status =
+//      'SUCCESSFUL' forever while the driver's wallet is never credited.
+//
+// `payment` must be a WegoPayment whose authoritative CamPay status is
+// already known to be SUCCESSFUL — this function does not re-query CamPay
+// itself; each caller is responsible for that independent verification.
+//
+// Fully ACID + idempotent, mirroring campayWebhook.controller.js's
+// _finalizeFleetTopUp: the authoritative "already credited?" gate is a row
+// lock + status recheck on the DriverWalletTransaction itself, so a
+// duplicate/concurrent call — two webhook deliveries, or a webhook racing
+// the poll finalizer — is always a safe no-op, never a double credit.
+//
+// @returns {{ credited: boolean, reason?: string, driverId?, amount?, newBalance?, txId? }}
+// ═══════════════════════════════════════════════════════════════════════
+
+exports.finalizeDriverTopUp = async function finalizeDriverTopUp(payment, opts = {}) {
+    const pendingTx = await DriverWalletTransaction.findOne({
+        where: { reference: `TOP_UP:${payment.external_ref}`, type: 'TOP_UP' },
+    });
+
+    if (!pendingTx) {
+        console.warn(`⚠️  [TOPUP-FINALIZE] No DriverWalletTransaction found for payment ${payment.id} (${payment.external_ref})`);
+        return { credited: false, reason: 'transaction-not-found' };
+    }
+
+    const t = await sequelize.transaction();
+    try {
+        // ── 1. Lock + recheck the pending transaction ──────────────────
+        // The authoritative "has this already been credited" gate. Two
+        // concurrent callers (duplicate webhook deliveries, or a webhook
+        // racing the poll finalizer) both try to lock this same row; only
+        // the first proceeds — the second, once unblocked, sees topUpStatus
+        // no longer PENDING and safely no-ops.
+        const lockedTx = await DriverWalletTransaction.findOne({
+            where:       { id: pendingTx.id },
+            lock:        t.LOCK.UPDATE,
+            transaction: t,
+        });
+
+        if (!lockedTx || lockedTx.topUpStatus !== 'PENDING') {
+            await t.rollback();
+            console.log(`ℹ️  [TOPUP-FINALIZE] Transaction ${pendingTx.id} already ${lockedTx?.topUpStatus || 'missing'} — skipping duplicate.`);
+            return { credited: false, reason: 'already-finalized' };
+        }
+
+        // ── 2. Conditionally claim the WegoPayment row ──────────────────
+        // Accepts PENDING (direct-webhook path — not yet flipped) or
+        // SUCCESSFUL (poll path — runReconciliation already flipped it,
+        // atomically, before ever calling us; that's expected, not a
+        // collision). Refuses a terminal FAILED/EXPIRED row outright —
+        // crediting then would contradict our own bookkeeping about
+        // whether this payment actually succeeded.
+        const campayRef      = payment.campay_ref || lockedTx.topUpRef || null;
+        const paymentUpdate  = {
+            status:      'SUCCESSFUL',
+            resolved_at: payment.resolved_at || new Date(),
+        };
+        if (campayRef)               paymentUpdate.campay_ref      = campayRef;
+        if (payment.operator)        paymentUpdate.operator        = payment.operator;
+        if (payment.campay_response) paymentUpdate.campay_response = payment.campay_response;
+
+        const [payAffected] = await WegoPayment.update(paymentUpdate, {
+            where:       { id: payment.id, status: { [Op.in]: ['PENDING', 'SUCCESSFUL'] } },
+            transaction: t,
+        });
+
+        if (payAffected === 0) {
+            await t.rollback();
+            console.warn(`⚠️  [TOPUP-FINALIZE] WegoPayment ${payment.id} not in a finalizable state — refusing to credit.`);
+            return { credited: false, reason: 'payment-not-finalizable' };
+        }
+
+        // ── 3. Credit the wallet ─────────────────────────────────────
+        const wallet = await DriverWallet.findOne({
+            where:       { id: lockedTx.walletId },
+            lock:        t.LOCK.UPDATE,
+            transaction: t,
+        });
+
+        if (!wallet) {
+            await t.rollback();
+            console.error(`❌ [TOPUP-FINALIZE] Wallet ${lockedTx.walletId} not found for transaction ${lockedTx.id}`);
+            return { credited: false, reason: 'wallet-not-found' };
+        }
+
+        const amountInt  = parseInt(lockedTx.amount, 10);
+        const newBalance = (parseInt(wallet.balance, 10) || 0) + amountInt;
+
+        await DriverWallet.update(
+            { balance: newBalance, updatedAt: new Date() },
+            { where: { id: wallet.id }, transaction: t }
+        );
+
+        await DriverWalletTransaction.update(
+            {
+                topUpStatus:  'COMPLETED',
+                topUpRef:     campayRef || lockedTx.topUpRef,
+                topUpMethod:  _operatorToMethod(payment.operator) || lockedTx.topUpMethod,
+                balanceAfter: newBalance,
+                metadata: {
+                    ...(lockedTx.metadata || {}),
+                    campayRef:   campayRef || null,
+                    operatorRef: opts.operatorRef || null,
+                    operator:    payment.operator || null,
+                    confirmedAt: new Date().toISOString(),
+                },
+            },
+            { where: { id: lockedTx.id }, transaction: t }
+        );
+
+        await t.commit();
+
+        console.log(`✅ [TOPUP-FINALIZE] Top-up CREDITED — ${amountInt} XAF | New balance: ${newBalance} XAF | Driver: ${lockedTx.driverId}`);
+
+        return {
+            credited: true,
+            driverId: lockedTx.driverId,
+            amount:   amountInt,
+            newBalance,
+            txId:     lockedTx.id,
+        };
+
+    } catch (err) {
+        await t.rollback().catch(() => {});
+        console.error('❌ [TOPUP-FINALIZE] DB error while crediting top-up:', err);
+        throw err;
     }
 };
 

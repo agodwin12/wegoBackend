@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const Joi = require('joi');
 const { Op } = require('sequelize');
 const dayjs = require('dayjs');
+const sequelize = require('../../config/database');
 const { getFileUrl } = require('../../middleware/upload');
 
 /**
@@ -27,7 +28,9 @@ const vehicleSchema = Joi.object({
 });
 
 const createRentalSchema = Joi.object({
-    userId: Joi.string().uuid().required(),
+    // userId is intentionally NOT accepted from the client — the authenticated
+    // user's identity (req.user.uuid, set by the `authenticate` middleware) is
+    // always used instead, so a caller cannot book a rental as someone else.
     vehicleId: Joi.string().uuid().required(),
     rentalRegion: Joi.string().max(64).required(),
     rentalType: Joi.string().valid('HOUR', 'DAY', 'WEEK', 'MONTH').required(),
@@ -502,9 +505,14 @@ async function createRental(req, res, next) {
             });
         }
 
+        // Identity comes from the authenticated session (set by `authenticate`
+        // middleware), never from the client-supplied body — otherwise any
+        // caller could book a rental in someone else's name.
+        const userId = req.user.uuid;
+
         // Verify user exists
         const user = await Account.findOne({
-            where: { uuid: value.userId, user_type: 'PASSENGER' }
+            where: { uuid: userId, user_type: 'PASSENGER' }
         });
 
         if (!user) {
@@ -514,91 +522,138 @@ async function createRental(req, res, next) {
             });
         }
 
-        const vehicle = await Vehicle.findByPk(value.vehicleId);
-        console.log("🚗 Vehicle fetched:", vehicle ? vehicle.id : "Not found");
-
-        if (!vehicle || !vehicle.availableForRent) {
-            console.log("❌ Vehicle not available:", value.vehicleId);
-            return res.status(400).json({
-                error: 'Vehicle not available for rental'
+        // ── Availability check + create, atomically ─────────────────────
+        // Previously this was a plain SELECT (overlap check) followed by a
+        // separate INSERT with no lock/transaction between them, so two
+        // concurrent requests for the same vehicle/date-range could both
+        // pass the overlap check before either had inserted — double-
+        // booking the vehicle. Locking only the (possibly not-yet-existing)
+        // conflicting VehicleRental rows would not close this: with no
+        // conflicting row yet on disk, both concurrent transactions would
+        // lock nothing and still race through to a duplicate INSERT
+        // (a classic phantom-read gap). Instead we lock the parent Vehicle
+        // row itself — that row always exists, so `SELECT ... FOR UPDATE`
+        // on it serializes every createRental call for that same vehicle:
+        // the second transaction blocks until the first commits (or rolls
+        // back), and by the time it acquires the lock and re-runs the
+        // overlap check, the first transaction's rental row (if any) is
+        // already visible to it.
+        const t = await sequelize.transaction();
+        let finished = false;
+        try {
+            const vehicle = await Vehicle.findByPk(value.vehicleId, {
+                transaction: t,
+                lock: t.LOCK.UPDATE
             });
-        }
+            console.log("🚗 Vehicle fetched:", vehicle ? vehicle.id : "Not found");
 
-        // Check if vehicle region matches rental region
-        if (vehicle.region !== value.rentalRegion) {
-            return res.status(400).json({
-                error: `This vehicle is only available in ${vehicle.region}. You selected ${value.rentalRegion}.`
-            });
-        }
-
-        // Check for double booking
-        const overlap = await VehicleRental.findOne({
-            where: {
-                vehicleId: value.vehicleId,
-                status: { [Op.in]: ['PENDING', 'CONFIRMED'] },
-                startDate: { [Op.lt]: value.endDate },
-                endDate: { [Op.gt]: value.startDate }
+            if (!vehicle || !vehicle.availableForRent) {
+                console.log("❌ Vehicle not available:", value.vehicleId);
+                finished = true;
+                await t.rollback();
+                return res.status(400).json({
+                    error: 'Vehicle not available for rental'
+                });
             }
-        });
 
-        if (overlap) {
-            console.log("❌ Double booking detected:", overlap.id);
-            return res.status(400).json({
-                error: 'Vehicle already booked for this period',
-                conflictingRental: {
-                    startDate: overlap.startDate,
-                    endDate: overlap.endDate
+            // Check if vehicle region matches rental region
+            if (vehicle.region !== value.rentalRegion) {
+                finished = true;
+                await t.rollback();
+                return res.status(400).json({
+                    error: `This vehicle is only available in ${vehicle.region}. You selected ${value.rentalRegion}.`
+                });
+            }
+
+            // Check for double booking — the Vehicle row lock above already
+            // guarantees no concurrent createRental for this vehicle can be
+            // interleaved with this check, so a plain read here is safe.
+            const overlap = await VehicleRental.findOne({
+                where: {
+                    vehicleId: value.vehicleId,
+                    status: { [Op.in]: ['PENDING', 'CONFIRMED'] },
+                    startDate: { [Op.lt]: value.endDate },
+                    endDate: { [Op.gt]: value.startDate }
+                },
+                transaction: t
+            });
+
+            if (overlap) {
+                console.log("❌ Double booking detected:", overlap.id);
+                finished = true;
+                await t.rollback();
+                return res.status(400).json({
+                    error: 'Vehicle already booked for this period',
+                    conflictingRental: {
+                        startDate: overlap.startDate,
+                        endDate: overlap.endDate
+                    }
+                });
+            }
+
+            // Calculate price
+            const calculation = calculateRentalPrice(
+                vehicle,
+                value.rentalType,
+                value.startDate,
+                value.endDate
+            );
+
+            if (calculation.error) {
+                finished = true;
+                await t.rollback();
+                return res.status(400).json({ error: calculation.error });
+            }
+
+            console.log(`💰 Calculated: ${calculation.duration} ${value.rentalType}(s), Total price: ${calculation.totalPrice}`);
+
+            // Create rental with PENDING status
+            const rental = await VehicleRental.create({
+                id: uuidv4(),
+                userId,
+                vehicleId: value.vehicleId,
+                rentalRegion: value.rentalRegion,
+                rentalType: value.rentalType,
+                startDate: value.startDate,
+                endDate: value.endDate,
+                status: 'PENDING',
+                userNotes: value.userNotes || null,
+                totalPrice: calculation.totalPrice,
+                paymentStatus: 'unpaid'
+            }, { transaction: t });
+
+            finished = true;
+            await t.commit();
+
+            console.log("✅ Rental created with PENDING status:", rental.id);
+
+            res.status(201).json({
+                success: true,
+                message: 'Rental request submitted successfully. Our team will review and contact you shortly.',
+                rental: {
+                    id: rental.id,
+                    vehicleId: rental.vehicleId,
+                    userId: rental.userId,
+                    startDate: rental.startDate,
+                    endDate: rental.endDate,
+                    rentalType: rental.rentalType,
+                    totalPrice: rental.totalPrice,
+                    status: rental.status,
+                    paymentStatus: rental.paymentStatus,
+                    createdAt: rental.createdAt
                 }
             });
-        }
-
-        // Calculate price
-        const calculation = calculateRentalPrice(
-            vehicle,
-            value.rentalType,
-            value.startDate,
-            value.endDate
-        );
-
-        if (calculation.error) {
-            return res.status(400).json({ error: calculation.error });
-        }
-
-        console.log(`💰 Calculated: ${calculation.duration} ${value.rentalType}(s), Total price: ${calculation.totalPrice}`);
-
-        // Create rental with PENDING status
-        const rental = await VehicleRental.create({
-            id: uuidv4(),
-            userId: value.userId,
-            vehicleId: value.vehicleId,
-            rentalRegion: value.rentalRegion,
-            rentalType: value.rentalType,
-            startDate: value.startDate,
-            endDate: value.endDate,
-            status: 'PENDING',
-            userNotes: value.userNotes || null,
-            totalPrice: calculation.totalPrice,
-            paymentStatus: 'unpaid'
-        });
-
-        console.log("✅ Rental created with PENDING status:", rental.id);
-
-        res.status(201).json({
-            success: true,
-            message: 'Rental request submitted successfully. Our team will review and contact you shortly.',
-            rental: {
-                id: rental.id,
-                vehicleId: rental.vehicleId,
-                userId: rental.userId,
-                startDate: rental.startDate,
-                endDate: rental.endDate,
-                rentalType: rental.rentalType,
-                totalPrice: rental.totalPrice,
-                status: rental.status,
-                paymentStatus: rental.paymentStatus,
-                createdAt: rental.createdAt
+        } catch (err) {
+            // Any early-return branch above already rolled back and returned
+            // before reaching here; this only fires for an unexpected error
+            // (e.g. the INSERT itself failing) — release the lock/transaction
+            // and let the outer catch build the error response.
+            if (!finished) {
+                finished = true;
+                await t.rollback().catch(() => {});
             }
-        });
+            throw err;
+        }
     } catch (err) {
         console.error("❌ Error in createRental:", err);
         return res.status(500).json({
@@ -651,6 +706,16 @@ async function getRentalById(req, res, next) {
             });
         }
 
+        // Ownership check — a rental belongs to exactly one renter. Return the
+        // same 404 used for "doesn't exist" (not 403) so a caller probing IDs
+        // can't distinguish "not yours" from "doesn't exist".
+        if (rental.userId !== req.user.uuid) {
+            console.log("❌ Ownership check failed: rental belongs to", rental.userId, "not", req.user.uuid);
+            return res.status(404).json({
+                error: 'Rental not found'
+            });
+        }
+
         console.log("✅ Rental found:", rental.id);
 
         res.json({
@@ -674,7 +739,10 @@ async function getRentalById(req, res, next) {
  */
 const listUserRentals = async (req, res) => {
     try {
-        const { userId } = req.params;
+        // Identity comes from the authenticated session, not the :userId route
+        // param — otherwise any authenticated user could read anyone else's
+        // rental history just by changing the URL.
+        const userId = req.user.uuid;
 
         console.log('📋 Fetching rentals for user:', userId);
 
@@ -745,6 +813,13 @@ async function cancelRentalByUser(req, res, next) {
             return res.status(404).json({ error: 'Rental not found' });
         }
 
+        // Ownership check — only the renter can cancel their own rental.
+        // 404 (not 403) so existence of someone else's rental isn't leaked.
+        if (rental.userId !== req.user.uuid) {
+            console.log("❌ Ownership check failed: rental belongs to", rental.userId, "not", req.user.uuid);
+            return res.status(404).json({ error: 'Rental not found' });
+        }
+
         // Check if rental can be cancelled
         if (rental.status === 'CANCELLED') {
             return res.status(400).json({ error: 'Rental already cancelled' });
@@ -806,6 +881,14 @@ async function updatePayment(req, res, next) {
         const rental = await VehicleRental.findByPk(id);
 
         if (!rental) {
+            return res.status(404).json({ error: 'Rental not found' });
+        }
+
+        // Ownership check — only the renter can update their own rental's
+        // payment details. 404 (not 403) so existence of someone else's
+        // rental isn't leaked.
+        if (rental.userId !== req.user.uuid) {
+            console.log("❌ Ownership check failed: rental belongs to", rental.userId, "not", req.user.uuid);
             return res.status(404).json({ error: 'Rental not found' });
         }
 

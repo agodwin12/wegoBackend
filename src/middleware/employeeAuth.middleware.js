@@ -243,15 +243,18 @@ function canModifyEmployee(req, res, next) {
         return next();
     }
 
-    // Employees cannot modify themselves through this endpoint
+    // A caller modifying their OWN record is allowed through this middleware.
+    // This does NOT open a self-role-escalation hole: updateEmployee has its own,
+    // independent role-change guard that blocks any non-super_admin from changing
+    // a role (including their own) and blocks a super_admin from changing their own
+    // role, regardless of how the request reached the controller. Blocking all
+    // self-edits here was redundant with that guard and over-broad - it prevented
+    // every non-super_admin employee from ever updating unrelated fields on their
+    // own record (city, date_of_birth, gender, email, etc.) that the separate
+    // self-service profile endpoint (employeeProfile.controller.js) doesn't cover.
     if (currentEmployee.id === targetEmployeeId) {
-        console.log('❌ [EMPLOYEE AUTH] Cannot modify own account through this endpoint');
-
-        return res.status(403).json({
-            success: false,
-            message: 'You cannot modify your own account through this endpoint.',
-            code: 'CANNOT_MODIFY_SELF'
-        });
+        console.log('✅ [EMPLOYEE AUTH] Self-target - allowed (role changes independently guarded in controller)');
+        return next();
     }
 
     // Admin can modify non-admins

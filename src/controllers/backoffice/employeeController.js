@@ -213,6 +213,37 @@ exports.updateEmployee = async (req, res) => {
             });
         }
 
+        // ─────────────────────────────────────────────────────────────
+        // ROLE CHANGE GUARD
+        // Only a super_admin caller may change ANY employee's role, and
+        // nobody (not even a super_admin) may change their OWN role
+        // through this general-purpose endpoint. Without this, any
+        // authenticated employee could PATCH their own record with
+        // { role: "super_admin" } and self-promote.
+        // ─────────────────────────────────────────────────────────────
+        const callerRole = req.user?.role;
+        const callerId = req.user?.id;
+        const isRoleChangeRequested =
+            role !== undefined && role !== null && role !== "" && role !== employee.role;
+
+        if (isRoleChangeRequested) {
+            if (callerId !== undefined && callerId === employee.id) {
+                return res.status(403).json({
+                    success: false,
+                    message: "You cannot change your own role.",
+                    code: "CANNOT_CHANGE_OWN_ROLE",
+                });
+            }
+
+            if (callerRole !== "super_admin") {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only super admins can change employee roles.",
+                    code: "INSUFFICIENT_PERMISSIONS",
+                });
+            }
+        }
+
         // Check if email is being changed and already exists
         if (email && email !== employee.email) {
             const existingEmail = await Employee.findByEmail(email);

@@ -88,11 +88,62 @@ const createListingSchema = Joi.object({
             'any.required': 'Neighborhoods are required',
         }),
     service_radius_km: Joi.number().min(1).max(100).optional().default(10),
-    available_days: Joi.array().items(
-        Joi.string().valid('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
-    ).optional(),
+    // Sent as a JSON-encoded string over multipart/form-data (same pattern as
+    // `neighborhoods` / `portfolio_links` above); accept either the raw array or that JSON string.
+    available_days: Joi.alternatives()
+        .try(
+            Joi.array().items(
+                Joi.string().valid('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+            ),
+            Joi.string().custom((value, helpers) => {
+                if (!value) return value;
+                try {
+                    const parsed = JSON.parse(value);
+                    if (!Array.isArray(parsed)) {
+                        return helpers.error('any.invalid');
+                    }
+                    return parsed;
+                } catch (e) {
+                    return helpers.error('any.invalid');
+                }
+            })
+        )
+        .optional()
+        .allow(null, '')
+        .messages({
+            'any.invalid': 'Available days must be a valid array of weekday names',
+        }),
+    // Free-form "08:00-18:00" style string — mirrors ServiceListing.available_hours STRING(100).
+    available_hours: Joi.string().trim().max(100).optional().allow(null, ''),
     emergency_service: Joi.boolean().optional().default(false),
-    years_of_experience: Joi.number().integer().min(0).max(50).optional().allow(null),
+    // Wire name is `years_experience` (matches the mobile app + ServiceListing model column) —
+    // NOT `years_of_experience`, which no client ever sends.
+    years_experience: Joi.number().integer().min(0).max(50).optional().allow(null),
+    // Free-text list of certifications — mirrors ServiceListing.certifications TEXT.
+    certifications: Joi.string().trim().max(2000).optional().allow(null, ''),
+    // Sent as a JSON-encoded string over multipart/form-data (same pattern as
+    // `neighborhoods` above); accept either the raw array or that JSON string.
+    portfolio_links: Joi.alternatives()
+        .try(
+            Joi.array().items(Joi.string().trim().max(500)),
+            Joi.string().custom((value, helpers) => {
+                if (!value) return value;
+                try {
+                    const parsed = JSON.parse(value);
+                    if (!Array.isArray(parsed)) {
+                        return helpers.error('any.invalid');
+                    }
+                    return parsed;
+                } catch (e) {
+                    return helpers.error('any.invalid');
+                }
+            })
+        )
+        .optional()
+        .allow(null, '')
+        .messages({
+            'any.invalid': 'Portfolio links must be a valid array of URLs',
+        }),
 });
 
 const updateListingSchema = Joi.object({
@@ -123,11 +174,62 @@ const updateListingSchema = Joi.object({
             'any.invalid': 'Neighborhoods must be a valid array with at least one item',
         }),
     service_radius_km: Joi.number().min(1).max(100).optional(),
-    available_days: Joi.array().items(
-        Joi.string().valid('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
-    ).optional(),
+    // Sent as a JSON-encoded string over multipart/form-data (same pattern as
+    // `neighborhoods` / `portfolio_links` above); accept either the raw array or that JSON string.
+    available_days: Joi.alternatives()
+        .try(
+            Joi.array().items(
+                Joi.string().valid('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+            ),
+            Joi.string().custom((value, helpers) => {
+                if (!value) return value;
+                try {
+                    const parsed = JSON.parse(value);
+                    if (!Array.isArray(parsed)) {
+                        return helpers.error('any.invalid');
+                    }
+                    return parsed;
+                } catch (e) {
+                    return helpers.error('any.invalid');
+                }
+            })
+        )
+        .optional()
+        .allow(null, '')
+        .messages({
+            'any.invalid': 'Available days must be a valid array of weekday names',
+        }),
+    // Free-form "08:00-18:00" style string — mirrors ServiceListing.available_hours STRING(100).
+    available_hours: Joi.string().trim().max(100).optional().allow(null, ''),
     emergency_service: Joi.boolean().optional(),
-    years_of_experience: Joi.number().integer().min(0).max(50).optional().allow(null),
+    // Wire name is `years_experience` (matches the mobile app + ServiceListing model column) —
+    // NOT `years_of_experience`, which no client ever sends.
+    years_experience: Joi.number().integer().min(0).max(50).optional().allow(null),
+    // Free-text list of certifications — mirrors ServiceListing.certifications TEXT.
+    certifications: Joi.string().trim().max(2000).optional().allow(null, ''),
+    // Sent as a JSON-encoded string over multipart/form-data (same pattern as
+    // `neighborhoods` above); accept either the raw array or that JSON string.
+    portfolio_links: Joi.alternatives()
+        .try(
+            Joi.array().items(Joi.string().trim().max(500)),
+            Joi.string().custom((value, helpers) => {
+                if (!value) return value;
+                try {
+                    const parsed = JSON.parse(value);
+                    if (!Array.isArray(parsed)) {
+                        return helpers.error('any.invalid');
+                    }
+                    return parsed;
+                } catch (e) {
+                    return helpers.error('any.invalid');
+                }
+            })
+        )
+        .optional()
+        .allow(null, '')
+        .messages({
+            'any.invalid': 'Portfolio links must be a valid array of URLs',
+        }),
     is_active: Joi.boolean().optional(),
 }).min(1);
 

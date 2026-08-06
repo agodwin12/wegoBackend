@@ -146,4 +146,20 @@ const reportLimiter = rateLimit({
     message: { success: false, error: 'Too many reports in a short time. Please try again later.' },
 });
 
-module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, contactLimiter, reportLimiter, ALLOWED_ORIGINS, ALLOW_ALL };
+// Delivery booking (POST /deliveries/book) is expensive the same way ride creation
+// is: it geocodes/estimates, broadcasts to nearby agents, and fires push/SMS
+// notifications. Nothing stopped a book→cancel→book loop from farming those paid
+// API calls at no cost to the caller. Cap creations per user — generous for real
+// use, hostile to a spammer. Keyed by authenticated user (falls back to IP).
+const CREATE_DELIVERY_WINDOW_MS = Number(process.env.CREATE_DELIVERY_RATE_WINDOW_MS) || 10 * 60 * 1000;
+const CREATE_DELIVERY_MAX       = Number(process.env.CREATE_DELIVERY_RATE_MAX) || 15;
+const createDeliveryLimiter = rateLimit({
+    windowMs: CREATE_DELIVERY_WINDOW_MS,
+    max: CREATE_DELIVERY_MAX,
+    keyGenerator: userOrIpKey,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many delivery requests in a short time. Please wait a moment and try again.' },
+});
+
+module.exports = { corsOptions, globalLimiter, authLimiter, createTripLimiter, contactLimiter, reportLimiter, createDeliveryLimiter, ALLOWED_ORIGINS, ALLOW_ALL };

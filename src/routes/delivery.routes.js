@@ -9,6 +9,7 @@ const topUpCtrl = require('../controllers/delivery/walletTopUp.controller');
 const categoriesCtrl = require('../controllers/deliveryCategories.public.controller');
 
 const { authenticate } = require('../middleware/auth.middleware');
+const { createDeliveryLimiter } = require('../config/security');
 
 const {
     requireDriverAny,
@@ -161,7 +162,7 @@ router.get('/agent/history', driverAuthAny, ctrl.getDriverDeliveries);
 
 router.get('/estimate', authenticate, ctrl.getEstimate);
 
-router.post('/book', authenticate, validateDeliveryType, ctrl.bookDelivery);
+router.post('/book', authenticate, createDeliveryLimiter, validateDeliveryType, ctrl.bookDelivery);
 
 router.get('/my', authenticate, ctrl.getMyDeliveries);
 

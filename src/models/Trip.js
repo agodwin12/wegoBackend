@@ -42,7 +42,8 @@ Trip.init({
             'IN_PROGRESS',
             'COMPLETED',
             'CANCELED',
-            'NO_DRIVERS'
+            'NO_DRIVERS',
+            'NO_SHOW'
         ),
         allowNull: false,
         defaultValue: 'SEARCHING',

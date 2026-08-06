@@ -97,8 +97,17 @@ module.exports = (sequelize) => {
          *
          * @param {'under_review'|'confirmed'|'credited'|'rejected'} newStatus
          * @param {object} [extraFields]  Additional fields to update alongside status
+         * @param {object} [options]      Sequelize update options — pass
+         *   `{ transaction: t }` when this instance was loaded (and locked)
+         *   inside an existing transaction, so the update runs on that same
+         *   transaction/connection instead of a new one. Updating the row on a
+         *   separate connection while transaction `t` still holds its row lock
+         *   (e.g. from a prior `lock: t.LOCK.UPDATE` read) would block that
+         *   second connection until `t` commits or rolls back — and if `t`'s
+         *   own commit is waiting on this very call to resolve first, neither
+         *   side ever proceeds (self-deadlock until the query/lock times out).
          */
-        async transitionTo(newStatus, extraFields = {}) {
+        async transitionTo(newStatus, extraFields = {}, options = {}) {
             const allowed = {
                 // Manual cash flow
                 pending:        ['under_review', 'rejected'],
@@ -132,7 +141,7 @@ module.exports = (sequelize) => {
                 status: newStatus,
                 ...(timestampMap[newStatus] || {}),
                 ...extraFields,
-            });
+            }, options);
 
             return this;
         }

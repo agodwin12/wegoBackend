@@ -578,4 +578,9 @@ async function signupDriver(data) {
 module.exports = {
     signupPassenger,
     signupDriver,
+    // Exported so otp.service.js (sendOtpByIdentifier) can reuse the exact
+    // same signup-OTP dispatch mechanism for the "resend code while a
+    // PendingSignup is still live" fallback, instead of duplicating the
+    // SMS/email-sending logic.
+    sendBothSignupOtps,
 };

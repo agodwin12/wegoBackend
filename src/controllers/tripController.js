@@ -2,7 +2,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const { Op } = require('sequelize');
-const { Trip, TripEvent, Account, DriverProfile, Coupon, CouponUsage } = require('../models');
+const { Trip, TripEvent, Account, DriverProfile, Coupon } = require('../models');
 const couponService = require('../services/couponService');
 const fareCalculatorService = require('../services/fareCalculatorService');
 
@@ -11,6 +11,7 @@ const fareCalculatorService = require('../services/fareCalculatorService');
 const RIDE_COMMISSION_RATE = parseFloat(process.env.COMMISSION_RATE || '0.15');
 const tripMatchingService   = require('../services/tripMatchingService');
 const locationService       = require('../services/locationService');
+const { applyTransition }   = require('../services/tripState.service');
 // CamPay is NOT used for rides — the fare is paid directly to the driver.
 const { redisClient, redisHelpers, REDIS_KEYS } = require('../config/redis');
 const { getIO } = require('../sockets');
@@ -30,9 +31,13 @@ exports.createTrip = async (req, res, next) => {
     try {
         console.log('👤 User UUID:', req.user.uuid);
         console.log('👤 User Type:', req.user.user_type);
+        console.log('👤 Active Mode:', req.auth?.active_mode);
 
-        if (req.user.user_type !== 'PASSENGER') {
-            console.log('❌ [CREATE TRIP] Access denied. User type is not PASSENGER.');
+        // Gate on active_mode (not the permanent user_type) so a DRIVER or
+        // DELIVERY_AGENT account that has switched to PASSENGER mode can
+        // request rides, mirroring the pattern in driver.middleware.js.
+        if (req.auth?.active_mode !== 'PASSENGER') {
+            console.log('❌ [CREATE TRIP] Access denied. Active mode is not PASSENGER.');
             const err = new Error('Only passengers can create trips');
             err.status = 403;
             throw err;
@@ -153,6 +158,28 @@ exports.createTrip = async (req, res, next) => {
             if (!evalResult.ok) {
                 return res.status(400).json({ error: true, message: evalResult.message, code: 'COUPON_INVALID', data: null });
             }
+
+            // Atomically reserve the redemption BEFORE the discount is baked
+            // into the trip. evaluate() above only reads outside any lock —
+            // by itself it does not stop two concurrent requests from both
+            // passing it for the same coupon. redeem() re-validates under a
+            // row lock and is what actually prevents a limited-use coupon
+            // from being redeemed more times than allowed.
+            const redeemResult = await couponService.redeem({
+                couponId: evalResult.coupon.id,
+                userUuid: req.user.uuid,
+                discount: evalResult.discount,
+                tripId,
+            });
+            if (!redeemResult.ok) {
+                return res.status(400).json({
+                    error: true,
+                    message: redeemResult.message || 'This coupon can no longer be used',
+                    code: 'COUPON_INVALID',
+                    data: null,
+                });
+            }
+
             couponRow      = evalResult.coupon;
             couponDiscount = evalResult.discount;
         }
@@ -208,18 +235,10 @@ exports.createTrip = async (req, res, next) => {
         });
         console.log('✅ [DB] Trip persisted with status=SEARCHING');
 
-        // Record the redemption (best-effort — never fail a trip over this).
-        if (couponRow && couponDiscount > 0) {
-            try {
-                await CouponUsage.create({
-                    coupon_id: couponRow.id, user_id: req.user.uuid,
-                    trip_id: tripId, discount_applied: couponDiscount,
-                });
-                await couponRow.incrementUsage();
-            } catch (e) {
-                console.warn('⚠️ [CREATE TRIP] coupon usage record failed:', e.message);
-            }
-        }
+        // Coupon redemption (CouponUsage row + used_count increment) was
+        // already reserved atomically by couponService.redeem() above,
+        // before this trip's discounted price was ever computed — no
+        // separate post-create recording step needed here.
 
         console.log('🧠 [REDIS] Saving trip data to Redis...');
         await redisHelpers.setJson(REDIS_KEYS.ACTIVE_TRIP(tripId), tripData, ttl);
@@ -473,7 +492,7 @@ exports.getTripDetails = async (req, res, next) => {
 
 exports.getActiveTrip = async (req, res, next) => {
     try {
-        if (req.user.user_type === 'PASSENGER') {
+        if (req.auth?.active_mode === 'PASSENGER') {
             const activeTripKey = `passenger:active_trip:${req.user.uuid}`;
             const activeTripRef = await redisHelpers.getJson(activeTripKey);
 
@@ -488,7 +507,7 @@ exports.getActiveTrip = async (req, res, next) => {
             }
         }
 
-        const whereClause = req.user.user_type === 'PASSENGER'
+        const whereClause = req.auth?.active_mode === 'PASSENGER'
             ? { passengerId: req.user.uuid }
             : { driverId:    req.user.uuid };
 
@@ -548,7 +567,7 @@ exports.getTripHistory = async (req, res, next) => {
         const { page = 1, limit = 20 } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(limit);
 
-        const whereClause = req.user.user_type === 'PASSENGER'
+        const whereClause = req.auth?.active_mode === 'PASSENGER'
             ? { passengerId: req.user.uuid }
             : { driverId:    req.user.uuid };
 
@@ -656,13 +675,13 @@ exports.cancelTrip = async (req, res, next) => {
         let fromRedis = !!trip;
 
         if (!trip) {
-            const dbTrip = await Trip.findOne({ where: { id: tripId } });
-            if (!dbTrip) {
+            const dbTripLookup = await Trip.findOne({ where: { id: tripId } });
+            if (!dbTripLookup) {
                 const err = new Error('Trip not found');
                 err.status = 404;
                 throw err;
             }
-            trip = dbTrip.toJSON ? dbTrip.toJSON() : dbTrip;
+            trip = dbTripLookup.toJSON ? dbTripLookup.toJSON() : dbTripLookup;
         }
 
         const isPassenger = trip.passengerId === userId;
@@ -685,29 +704,30 @@ exports.cancelTrip = async (req, res, next) => {
         const canceledBy = isPassenger ? 'PASSENGER' : 'DRIVER';
         console.log(`🚫 Trip being canceled by: ${canceledBy}`);
 
-        await Trip.update(
-            {
-                status:       'CANCELED',
-                canceledBy,
-                cancelReason: reason || null,
-                canceledAt:   new Date(),
-            },
-            { where: { id: tripId } }
-        );
-
-        try {
-            await TripEvent.create({
-                id:      uuidv4(),
-                tripId,
-                type:    'trip_canceled',
-                payload: { canceledBy, reason: reason || 'No reason provided' },
+        // Re-fetch the LIVE Sequelize row — `trip` above may be a plain
+        // Redis-cached snapshot — and drive the actual status change through
+        // the shared state machine (applyTransition), never a raw
+        // `Trip.update({ status: ... })`. This is the same path
+        // driver.controller.js's cancelTrip already uses; it also re-checks
+        // eligibility against the authoritative DB row in case the Redis
+        // snapshot above was stale.
+        const dbTrip = await Trip.findByPk(tripId);
+        if (!dbTrip) {
+            const err = new Error('Trip not found');
+            err.status = 404;
+            throw err;
+        }
+        if (!cancelableStatuses.includes(dbTrip.status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Cannot cancel a trip that is already ${dbTrip.status}`,
             });
-        } catch (e) {
-            console.warn('⚠️  TripEvent create failed (non-fatal):', e.message);
         }
 
-        if (trip.driverId) {
-            await locationService.updateDriverStatus(trip.driverId, 'available', null);
+        await applyTransition(dbTrip, 'CANCELED', { actor: canceledBy, reason: reason || null });
+
+        if (dbTrip.driverId) {
+            await locationService.updateDriverStatus(dbTrip.driverId, 'available', null);
         }
 
         // ── Clean up Redis ────────────────────────────────────────────

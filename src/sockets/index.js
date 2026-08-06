@@ -14,6 +14,7 @@ const {
     handleTripCancel,
 } = require('./driverHandlers');
 
+const { applyTransition } = require('../services/tripState.service');
 const locationHandlers = require('./locationHandlers');
 
 const { ChatMessage, Trip, Account } = require('../models');
@@ -298,13 +299,16 @@ function setupSocketIO(server) {
                     // skipped the DB update for SEARCHING trips, leaving the row
                     // SEARCHING forever and permanently blocking the passenger
                     // with "you already have an active trip".
+                    //
+                    // The transition itself goes through the shared state machine
+                    // (applyTransition) — same as the REST cancel path in
+                    // tripController.js and driver.controller.js — instead of a
+                    // raw `dbTrip.status = 'CANCELED'` write, so an illegal jump
+                    // (e.g. the trip already moved to a terminal state the caller
+                    // didn't know about) is rejected instead of silently applied.
                     const dbTrip = dbTripPre;
                     if (dbTrip && dbTrip.status !== 'CANCELED' && dbTrip.status !== 'COMPLETED') {
-                        dbTrip.status       = 'CANCELED';
-                        dbTrip.canceledBy   = 'PASSENGER';
-                        dbTrip.cancelReason = reason || null;
-                        dbTrip.canceledAt   = new Date();
-                        await dbTrip.save();
+                        await applyTransition(dbTrip, 'CANCELED', { actor: 'PASSENGER', reason: reason || null });
                     }
 
                     // Dismiss the offer popup on any driver that received this

@@ -19,6 +19,7 @@ const {
 } = models;
 
 const { redisClient, REDIS_KEYS, redisHelpers, acquireLock, releaseLock } = require('../config/redis');
+const couponService             = require('../services/couponService');
 const locationService           = require('../services/locationService');
 const deliveryEarningsService   = require('../services/deliveryEarningsService');
 const deliveryCommissionService = require('../services/delivery/deliveryCommission.service');
@@ -388,11 +389,35 @@ exports.bookDelivery = async (req, res) => {
         let couponRow          = null;
         let couponDiscount     = 0;
         const originalTotal    = finalTotalPrice;
+        let couponUsageId = null;
         if (coupon_code && String(coupon_code).trim()) {
             const evalResult = await evaluateCoupon(coupon_code, senderUuid, finalTotalPrice);
             if (!evalResult.ok) {
                 return res.status(400).json({ success: false, message: evalResult.message, code: 'COUPON_INVALID' });
             }
+
+            // Atomically reserve the redemption BEFORE the discount is baked
+            // into the delivery price. evaluateCoupon() above only reads
+            // outside any lock — by itself it does not stop two concurrent
+            // bookings from both passing it for the same coupon. redeem()
+            // re-validates under a row lock and is what actually prevents a
+            // limited-use coupon from being redeemed more times than
+            // allowed. deliveryId is not known yet (DB-assigned on insert
+            // below) — usageId lets us link it in afterward.
+            const redeemResult = await couponService.redeem({
+                couponId: evalResult.coupon.id,
+                userUuid: senderUuid,
+                discount: evalResult.discount,
+            });
+            if (!redeemResult.ok) {
+                return res.status(400).json({
+                    success: false,
+                    message: redeemResult.message || 'This coupon can no longer be used',
+                    code:    'COUPON_INVALID',
+                });
+            }
+            couponUsageId = redeemResult.usageId;
+
             couponRow       = evalResult.coupon;
             couponDiscount  = evalResult.discount;
             finalTotalPrice = Math.max(0, finalTotalPrice - couponDiscount);
@@ -452,18 +477,20 @@ exports.bookDelivery = async (req, res) => {
             search_attempts:               0,
         });
 
-        // Record the redemption (best-effort — never fail a booking over this).
-        if (couponRow && couponDiscount > 0) {
+        // Redemption (CouponUsage row + used_count increment) was already
+        // reserved atomically by couponService.redeem() above, before this
+        // delivery's discounted price was ever computed. delivery_id wasn't
+        // known yet at that point (DB-assigned on insert), so link it in now
+        // — best-effort: the atomicity guarantee already landed, this is
+        // just completing the audit trail for reporting.
+        if (couponUsageId) {
             try {
-                await CouponUsage.create({
-                    coupon_id:        couponRow.id,
-                    user_id:          senderUuid,
-                    delivery_id:      delivery.id,
-                    discount_applied: couponDiscount,
-                });
-                await couponRow.incrementUsage();
+                await CouponUsage.update(
+                    { delivery_id: delivery.id },
+                    { where: { id: couponUsageId } },
+                );
             } catch (e) {
-                console.warn('⚠️  [DELIVERY] coupon usage record failed:', e.message);
+                console.warn('⚠️  [DELIVERY] coupon usage delivery_id link failed:', e.message);
             }
         }
 

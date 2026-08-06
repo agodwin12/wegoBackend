@@ -20,6 +20,13 @@ const ROUNDS      = Number(process.env.BCRYPT_ROUNDS || 12);
 const OTP_TTL_MIN = Number(process.env.OTP_TTL_MIN   || 10);
 const OTP_LEN     = Number(process.env.OTP_LEN        || 6);
 
+// Minimum interval between two OTP resends for the SAME PendingSignup, to stop
+// an attacker from using the resend endpoint to OTP-bomb a phone/email they
+// don't own. No cooldown gate existed anywhere in this codebase before this,
+// so this introduces the constant fresh (kept configurable like the other
+// OTP_* knobs above) — 60s is a conventional, generous-for-real-users default.
+const OTP_RESEND_COOLDOWN_SEC = Number(process.env.OTP_RESEND_COOLDOWN_SEC || 60);
+
 // ═══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
@@ -178,18 +185,119 @@ async function sendOtpByIdentifier({ identifier, channel, purpose }) {
     const where   = identifier.includes('@') ? { email: identifier } : { phone_e164: identifier };
     const account = await Account.findOne({ where });
 
-    if (!account) {
-        const e = new Error("Account not found for identifier");
-        e.status = 404;
-        e.code   = 'ACCOUNT_NOT_FOUND';
-        throw e;
+    if (account) {
+        console.log(`✅ [ACCOUNT FOUND] UUID: ${account.uuid}`);
+
+        const res = await issueOtp({ accountUuid: account.uuid, purpose, channel, target: identifier }, null);
+
+        return { account, otp: res };
     }
 
-    console.log(`✅ [ACCOUNT FOUND] UUID: ${account.uuid}`);
+    // ─────────────────────────────────────────────────────────────
+    // FALLBACK: no Account row yet.
+    // A signup that hasn't finished OTP verification only exists as a
+    // PendingSignup row — the Account row is only created afterwards, in
+    // verifyOtpAndCreateAccount(). The mobile "Resend Code" button hits this
+    // same endpoint during signup verification (purpose EMAIL_VERIFY /
+    // PHONE_VERIFY), so without this fallback it always 404s with
+    // ACCOUNT_NOT_FOUND even though the original signup call successfully
+    // dispatched a first OTP moments earlier.
+    //
+    // Scoped to the signup-verification purposes only, so PASSWORD_RESET
+    // (forgotPassword's anti-enumeration flow) keeps its existing 404
+    // behavior for unknown identifiers instead of leaking "a pending signup
+    // exists for this email/phone".
+    // ─────────────────────────────────────────────────────────────
+    if (purpose === 'EMAIL_VERIFY' || purpose === 'PHONE_VERIFY') {
+        console.log(`⚠️  [ACCOUNT NOT FOUND] Checking PendingSignup for identifier: ${identifier}`);
 
-    const res = await issueOtp({ accountUuid: account.uuid, purpose, channel, target: identifier }, null);
+        const pendingSignup = await PendingSignup.findOne({ where });
 
-    return { account, otp: res };
+        if (pendingSignup && new Date() <= pendingSignup.expires_at) {
+            console.log(`✅ [PENDING SIGNUP FOUND] UUID: ${pendingSignup.uuid} | Type: ${pendingSignup.user_type}`);
+
+            // ── Anti-bombing cooldown ───────────────────────────────
+            // No per-PendingSignup throttle existed here before — only the
+            // generic per-IP+identifier authLimiter (shared by many routes)
+            // guarded this endpoint. Without this, the resend path could be
+            // hit repeatedly to force real OTP sends at a phone/email the
+            // caller doesn't own. Gate on otp_sent_at, mirroring the 429 +
+            // error-code convention already used for OTP-related throttling
+            // in this codebase (see TOO_MANY_ATTEMPTS in
+            // verifyOtpAndCreateAccount below).
+            if (pendingSignup.otp_sent_at) {
+                const elapsedMs  = Date.now() - new Date(pendingSignup.otp_sent_at).getTime();
+                const cooldownMs = OTP_RESEND_COOLDOWN_SEC * 1000;
+
+                if (elapsedMs < cooldownMs) {
+                    const waitSec = Math.ceil((cooldownMs - elapsedMs) / 1000);
+                    console.log(`⏳ [PENDING SIGNUP OTP COOLDOWN] UUID: ${pendingSignup.uuid} | wait ${waitSec}s`);
+
+                    const err = new Error(`Please wait ${waitSec}s before requesting another code.`);
+                    err.status = 429;
+                    err.code   = 'OTP_COOLDOWN';
+                    throw err;
+                }
+            }
+
+            // Reuse the EXACT dispatch helper the original signup call used
+            // (auth.services.sendBothSignupOtps) instead of duplicating the
+            // SMS/email-sending logic here. Required lazily (not at module
+            // top) because auth.services.js requires this file already —
+            // a top-level require here would resolve to an incomplete
+            // (still-loading) module.exports.
+            const { sendBothSignupOtps } = require('./auth.services');
+
+            const otpDelivery = await sendBothSignupOtps({
+                uuid:       pendingSignup.uuid,
+                email:      pendingSignup.email,
+                phone_e164: pendingSignup.phone_e164,
+            });
+
+            await pendingSignup.update({ otp_sent_at: new Date() });
+
+            console.log(`✅ [PENDING SIGNUP OTP RESENT] UUID: ${pendingSignup.uuid}`);
+
+            // ── Disclosure channel is derived ONLY from the identifier the
+            // caller actually supplied (and that was looked up above) —
+            // NEVER from the client-controlled `channel` body field. The
+            // request-body `channel` is untrusted and unvalidated against
+            // `identifier` (no validation middleware on this route), so
+            // using it to pick which delivery result to expose let a caller
+            // who only knows a victim's phone pass channel:'EMAIL' and get
+            // the victim's email address echoed back in `otp.target` — plus
+            // force a real email OTP to it. By keying strictly off whether
+            // `identifier` itself is an email, the response can only ever
+            // echo back a target the caller already supplied.
+            const identifierIsEmail = identifier.includes('@');
+            const matchedResult     = identifierIsEmail ? otpDelivery.email : otpDelivery.phone;
+
+            // If the matched channel's delivery isn't in otpDelivery (e.g.
+            // best-effort email dispatch failed inside sendBothSignupOtps),
+            // fall back to a synthetic result built from the caller's own
+            // identifier — never from the other channel's result, which
+            // would reintroduce the same cross-channel leak.
+            const res = matchedResult || {
+                delivery: 'FAILED',
+                channel:  identifierIsEmail ? 'EMAIL' : 'SMS',
+                target:   identifier,
+            };
+
+            return {
+                account: { uuid: pendingSignup.uuid, user_type: pendingSignup.user_type },
+                otp: res,
+            };
+        }
+
+        if (pendingSignup) {
+            console.log(`⌛ [PENDING SIGNUP EXPIRED] UUID: ${pendingSignup.uuid}`);
+        }
+    }
+
+    const e = new Error("Account not found for identifier");
+    e.status = 404;
+    e.code   = 'ACCOUNT_NOT_FOUND';
+    throw e;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

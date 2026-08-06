@@ -44,34 +44,34 @@ exports.getAllRentals = async (req, res) => {
         const {
             page = 1, limit = 10,
             status, paymentStatus, rentalType, search,
-            sortBy = 'created_at', sortOrder = 'DESC',
+            sortBy = 'createdAt', sortOrder = 'DESC',
             startDate, endDate, isOverdue, pickupsToday, returnsToday,
         } = req.query;
 
         const offset = (parseInt(page) - 1) * parseInt(limit);
         const where  = {};
 
-        if (status)        where.status        = status;
-        if (paymentStatus) where.payment_status = paymentStatus;
-        if (rentalType)    where.rental_type    = rentalType;
-        if (startDate)     where.start_date     = { [Op.gte]: new Date(startDate) };
-        if (endDate)       where.end_date       = { [Op.lte]: new Date(endDate) };
+        if (status)        where.status       = status;
+        if (paymentStatus) where.paymentStatus = paymentStatus;
+        if (rentalType)    where.rentalType    = rentalType;
+        if (startDate)     where.startDate     = { [Op.gte]: new Date(startDate) };
+        if (endDate)       where.endDate       = { [Op.lte]: new Date(endDate) };
 
         if (pickupsToday === 'true') {
             const today    = new Date(); today.setHours(0, 0, 0, 0);
             const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-            where.start_date = { [Op.gte]: today, [Op.lt]: tomorrow };
+            where.startDate = { [Op.gte]: today, [Op.lt]: tomorrow };
         }
 
         if (returnsToday === 'true') {
             const today    = new Date(); today.setHours(0, 0, 0, 0);
             const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-            where.end_date = { [Op.gte]: today, [Op.lt]: tomorrow };
+            where.endDate = { [Op.gte]: today, [Op.lt]: tomorrow };
         }
 
         if (isOverdue === 'true') {
-            where.end_date = { [Op.lt]: new Date() };
-            where.status   = { [Op.in]: ['PENDING', 'CONFIRMED'] };
+            where.endDate = { [Op.lt]: new Date() };
+            where.status  = { [Op.in]: ['PENDING', 'CONFIRMED'] };
         }
 
         const vehicleInclude = {
@@ -164,7 +164,7 @@ exports.getRentalById = async (req, res) => {
 
         if (!rental) return res.status(404).json({ success: false, message: 'Vehicle rental not found' });
 
-        const duration = calculateDuration(rental.start_date, rental.end_date);
+        const duration = calculateDuration(rental.startDate, rental.endDate);
 
         return res.status(200).json({
             success: true,
@@ -338,11 +338,11 @@ exports.getRentalStats = async (req, res) => {
             VehicleRental.count({ where: { status: 'CONFIRMED' } }),
             VehicleRental.count({ where: { status: 'COMPLETED' } }),
             VehicleRental.count({ where: { status: 'CANCELLED' } }),
-            VehicleRental.count({ where: { payment_status: 'unpaid' } }),
-            VehicleRental.count({ where: { payment_status: 'paid' } }),
-            VehicleRental.count({ where: { start_date: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
-            VehicleRental.count({ where: { end_date: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
-            VehicleRental.count({ where: { end_date: { [Op.lt]: new Date() }, status: { [Op.in]: ['PENDING', 'CONFIRMED'] } } }),
+            VehicleRental.count({ where: { paymentStatus: 'unpaid' } }),
+            VehicleRental.count({ where: { paymentStatus: 'paid' } }),
+            VehicleRental.count({ where: { startDate: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
+            VehicleRental.count({ where: { endDate: { [Op.gte]: today, [Op.lt]: tomorrow } } }),
+            VehicleRental.count({ where: { endDate: { [Op.lt]: new Date() }, status: { [Op.in]: ['PENDING', 'CONFIRMED'] } } }),
         ]);
 
         return res.status(200).json({

@@ -227,7 +227,7 @@ exports.exportToCSV = async (req, res) => {
             },
             include: [
                 { model: ServiceListingPlan, as: 'plan',    attributes: ['label_fr'] },
-                { model: Account,            as: 'seller',  attributes: ['first_name', 'last_name', 'phone_e164'] },
+                { model: Account,            as: 'payer',  attributes: ['first_name', 'last_name', 'phone_e164'] },
                 { model: ServiceListing,     as: 'listing', attributes: ['title'] },
             ],
             order: [['created_at', 'DESC']],
@@ -236,8 +236,8 @@ exports.exportToCSV = async (req, res) => {
         const header = 'ID,Vendeur,Téléphone,Plan,Annonce,Montant XAF,Statut,Début,Fin,Acheté le\n';
         const rows   = payments.map(p => [
             p.id,
-            `${p.seller?.first_name ?? ''} ${p.seller?.last_name ?? ''}`.trim(),
-            p.seller?.phone_e164 ?? '',
+            `${p.payer?.first_name ?? ''} ${p.payer?.last_name ?? ''}`.trim(),
+            p.payer?.phone_e164 ?? '',
             p.plan?.label_fr ?? p.plan_key_snapshot,
             p.listing?.title ?? '',
             p.amount_snapshot,

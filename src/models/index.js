@@ -2,6 +2,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { DataTypes } = require('sequelize');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MODEL IMPORTS — CORE ACCOUNT
@@ -16,7 +17,17 @@ const PendingSignup    = require('./PendingSignup');
 const PartnerProfile   = require('./PartnerProfile');
 const FleetOwnerProfile = require('./FleetOwnerProfile');
 const Coupon           = require('./Coupon');
+// NOTE: was never registered here before — `require('../models').CouponUsage`
+// was silently `undefined` at every call site (tripController.js,
+// delivery.controller.js, Coupon.canBeUsedByUser). That made coupon
+// redemption bookkeeping a no-op: CouponUsage.create() always threw inside a
+// best-effort try/catch that only logged a warning, so used_count never
+// incremented and the per-user usage check always vacuously passed. Wiring
+// it up here is what makes the atomic redeem() in couponService.js (and the
+// per-user usage check it depends on) actually take effect.
+const CouponUsage      = require('./CouponUsage')(sequelize);
 const SupportTicket    = require('./SupportTicket');
+const FAQ              = require('./FAQ')(sequelize, DataTypes);
 
 // ─── Factory-pattern models (called before any associations) ──────────────────
 const Employee     = require('./Employee')(sequelize);
@@ -98,7 +109,7 @@ const DeliveryWalletTopUp       = require('./DeliveryWalletTopUp')(sequelize);
 
 const _allModels = {
     Account, PassengerProfile, DriverProfile, VerificationCode, DriverDocument,
-    PendingSignup, PartnerProfile, FleetOwnerProfile, Coupon, SupportTicket, Employee, RefreshToken,
+    PendingSignup, PartnerProfile, FleetOwnerProfile, Coupon, CouponUsage, SupportTicket, FAQ, Employee, RefreshToken,
     WegoPayment,
     Trip, TripEvent, ChatMessage, Rating, Payment,
     Driver, Vehicle, VehicleCategory, VehicleRental, DriverLocation,
@@ -179,6 +190,17 @@ PriceRule.belongsTo(Employee, { foreignKey: 'updated_by', as: 'updater' });
 
 Employee.hasMany(Coupon,   { foreignKey: 'created_by', as: 'createdCoupons' });
 Coupon.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator' });
+
+// ── Coupon redemption tracking (used by couponService.redeem() to enforce
+//    usage_limit_total / usage_limit_per_user atomically) ──────────────────
+Coupon.hasMany(CouponUsage,    { foreignKey: 'coupon_id', as: 'usages' });
+CouponUsage.belongsTo(Coupon,  { foreignKey: 'coupon_id', as: 'coupon' });
+
+Account.hasMany(CouponUsage,   { foreignKey: 'user_id', sourceKey: 'uuid', as: 'couponUsages' });
+CouponUsage.belongsTo(Account, { foreignKey: 'user_id', targetKey: 'uuid', as: 'user' });
+
+Trip.hasMany(CouponUsage,      { foreignKey: 'trip_id', as: 'couponUsages' });
+CouponUsage.belongsTo(Trip,    { foreignKey: 'trip_id', as: 'trip' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ASSOCIATIONS — PARTNER PROFILE
@@ -528,6 +550,7 @@ module.exports = {
     DriverDocument,
     Employee,
     Coupon,
+    CouponUsage,
     PartnerProfile,
     FleetOwnerProfile,
 
@@ -552,6 +575,7 @@ module.exports = {
     PriceRule,
     RideSurgeRule,
     SupportTicket,
+    FAQ,
     IdempotencyKey,
 
     // ── Services marketplace ─────────────────────────────────────────────────
