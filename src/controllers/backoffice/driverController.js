@@ -380,7 +380,7 @@ exports.approveDriver = async (req, res) => {
 exports.rejectDriver = async (req, res) => {
     try {
         const { id }     = req.params;
-        const { reason } = req.body;
+        const { reason } = req.body || {};
 
         const driver = await Account.findOne({
             where:   { uuid: id, user_type: 'DRIVER' },
@@ -408,7 +408,7 @@ exports.rejectDriver = async (req, res) => {
 exports.blockDriver = async (req, res) => {
     try {
         const { id }     = req.params;
-        const { reason } = req.body;
+        const { reason } = req.body || {};
 
         const driver = await Account.findOne({ where: { uuid: id, user_type: 'DRIVER' } });
         if (!driver) return res.status(404).json({ success: false, message: 'Driver not found' });

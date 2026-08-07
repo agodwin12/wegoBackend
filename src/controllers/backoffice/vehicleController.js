@@ -536,7 +536,7 @@ exports.unverifyVehicle = async (req, res) => {
 exports.blockVehicle = async (req, res) => {
     try {
         const { id } = req.params;
-        const { reason } = req.body;
+        const { reason } = req.body || {};
 
         if (!reason || !reason.trim()) {
             return res.status(400).json({

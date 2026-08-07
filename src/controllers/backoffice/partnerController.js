@@ -535,7 +535,7 @@ exports.deletePartner = async (req, res) => {
 exports.blockPartner = async (req, res) => {
     try {
         const { id } = req.params;
-        const { reason } = req.body;
+        const { reason } = req.body || {};
 
         console.log('🚫 Blocking partner:', { id, reason });
 
