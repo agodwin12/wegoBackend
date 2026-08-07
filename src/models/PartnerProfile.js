@@ -192,7 +192,7 @@ PartnerProfile.getActivePartners = async function() {
         order: [['created_at', 'DESC']],
         include: [{
             association: 'account',
-            attributes: ['uuid', 'role']
+            attributes: ['uuid', 'user_type']
         }]
     });
 };
@@ -205,11 +205,11 @@ PartnerProfile.getBlockedPartners = async function() {
         include: [
             {
                 association: 'account',
-                attributes: ['uuid', 'role']
+                attributes: ['uuid', 'user_type']
             },
             {
                 association: 'blockedByEmployee',
-                attributes: ['uuid', 'firstName', 'lastName']
+                attributes: ['uuid', 'first_name', 'last_name']
             }
         ]
     });
@@ -240,7 +240,7 @@ PartnerProfile.getPartnerWithVehicleCount = async function(partnerId) {
         include: [
             {
                 association: 'account',
-                attributes: ['uuid', 'role']
+                attributes: ['uuid', 'user_type']
             },
             {
                 model: Vehicle,

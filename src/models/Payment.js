@@ -5,7 +5,7 @@ const sequelize = require('../config/database');
 class Payment extends Model {}
 Payment.init({
     id: { type: DataTypes.STRING(36), primaryKey: true },
-    tripId: { type: DataTypes.STRING(36), allowNull: false },
+    tripId: { type: DataTypes.CHAR(36), allowNull: false }, // matches Trip.id (CHAR(36))
     method: { type: DataTypes.ENUM('cash','momo','om'), allowNull: false, defaultValue: 'cash' },
     amount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     status: { type: DataTypes.ENUM('pending','settled','failed'), allowNull: false, defaultValue: 'pending' },

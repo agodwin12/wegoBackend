@@ -139,9 +139,9 @@ module.exports = (sequelize) => {
             allowNull: true,
         },
 
-        // INT UNSIGNED — no references block, Sequelize associations handle the relationship
+        // INT (signed) to match Employee.id exactly — no references block, Sequelize associations handle the relationship
         frozen_by: {
-            type:      DataTypes.INTEGER.UNSIGNED,
+            type:      DataTypes.INTEGER,
             allowNull: true,
         },
 

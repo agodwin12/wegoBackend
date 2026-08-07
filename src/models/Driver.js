@@ -10,7 +10,7 @@ Driver.init({
         primaryKey: true,
     },
     userId: {
-        type:      DataTypes.STRING(36),
+        type:      DataTypes.CHAR(36),
         allowNull: false,
     },
     status: {

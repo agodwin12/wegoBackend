@@ -9,7 +9,7 @@ module.exports = (sequelize) => {
             autoIncrement: true
         },
         account_uuid: {
-            type: DataTypes.UUID,
+            type: DataTypes.CHAR(36),
             allowNull: false,
             references: {
                 model: 'accounts',

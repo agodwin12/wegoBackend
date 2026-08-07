@@ -153,8 +153,10 @@ PassengerProfile.belongsTo(Account, { foreignKey: 'account_id', as: 'account' })
 Account.hasOne(DriverProfile,    { foreignKey: 'account_id', as: 'driver_profile', onDelete: 'CASCADE' });
 DriverProfile.belongsTo(Account, { foreignKey: 'account_id', as: 'account' });
 
-Account.hasMany(VerificationCode,   { foreignKey: 'account_uuid', as: 'verificationCodes', onDelete: 'CASCADE' });
-VerificationCode.belongsTo(Account, { foreignKey: 'account_uuid', as: 'account' });
+// constraints: false — account_uuid must be able to point at a not-yet-created
+// account during a pending signup (the OTP is issued before the Account row exists).
+Account.hasMany(VerificationCode,   { foreignKey: 'account_uuid', as: 'verificationCodes', constraints: false });
+VerificationCode.belongsTo(Account, { foreignKey: 'account_uuid', as: 'account', constraints: false });
 
 Account.hasMany(DriverDocument,   { foreignKey: 'account_id', as: 'driverDocuments', onDelete: 'CASCADE' });
 DriverDocument.belongsTo(Account, { foreignKey: 'account_id', as: 'account' });
@@ -206,11 +208,20 @@ CouponUsage.belongsTo(Trip,    { foreignKey: 'trip_id', as: 'trip' });
 // ASSOCIATIONS — PARTNER PROFILE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-PartnerProfile.belongsTo(Employee, { foreignKey: 'createdByEmployeeId', as: 'createdByEmployee', onDelete: 'SET NULL' });
-Employee.hasMany(PartnerProfile,   { foreignKey: 'createdByEmployeeId', as: 'createdPartners' });
+// Despite the "Employee" naming, both columns' own declared type/references
+// (CHAR(36) -> accounts.uuid) target Account, not Employee (INTEGER id) —
+// matching the same "Employee"-named-but-Account-typed convention already
+// established in VehicleRental.handledByEmployeeId/approvedByAdminId. The
+// association below previously targeted Employee, which never crashed
+// sync() (mergeDefaults never overwrites the column's own type/references)
+// but produced a wrong-model association object (JOIN against employees.id
+// = partner_profiles.blocked_by, comparing an INTEGER to a CHAR(36) UUID —
+// always null).
+PartnerProfile.belongsTo(Account, { foreignKey: 'createdByEmployeeId', targetKey: 'uuid', as: 'createdByEmployee', onDelete: 'SET NULL' });
+Account.hasMany(PartnerProfile,   { foreignKey: 'createdByEmployeeId', sourceKey: 'uuid', as: 'createdPartners' });
 
-PartnerProfile.belongsTo(Employee, { foreignKey: 'blockedBy', as: 'blockedByEmployee', onDelete: 'SET NULL' });
-Employee.hasMany(PartnerProfile,   { foreignKey: 'blockedBy', as: 'blockedPartners' });
+PartnerProfile.belongsTo(Account, { foreignKey: 'blockedBy', targetKey: 'uuid', as: 'blockedByEmployee', onDelete: 'SET NULL' });
+Account.hasMany(PartnerProfile,   { foreignKey: 'blockedBy', sourceKey: 'uuid', as: 'blockedPartners' });
 
 PartnerProfile.hasMany(Vehicle,   { foreignKey: 'partnerId', sourceKey: 'accountId', as: 'vehicles', onDelete: 'RESTRICT' });
 Vehicle.belongsTo(PartnerProfile, { foreignKey: 'partnerId', targetKey: 'accountId', as: 'partnerProfile' });

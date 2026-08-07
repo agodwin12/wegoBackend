@@ -279,7 +279,7 @@ module.exports = (sequelize) => {
 
             // ── Review metadata (manual flow) ─────────────────────────────────
             reviewed_by: {
-                type:      DataTypes.INTEGER.UNSIGNED,   // Employee.id
+                type:      DataTypes.INTEGER,   // Employee.id (signed, matches employees.id)
                 allowNull: true,
                 comment:   'Employee who reviewed this request. NULL for CamPay top-ups.',
             },

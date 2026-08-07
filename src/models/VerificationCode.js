@@ -81,17 +81,8 @@ const VerificationCode = sequelize.define(
     }
 );
 
-// ✅ FIXED: Association WITHOUT foreign key constraints
-// This allows the model to work with both accounts and pending_signups
-// The constraints: false prevents Sequelize from creating the foreign key
-VerificationCode.belongsTo = function(Account) {
-
-    return this.hasOne(Account, {
-        foreignKey: 'uuid',
-        sourceKey: 'account_uuid',
-        constraints: false, // ✅ CRITICAL: No foreign key constraint!
-        as: 'account'
-    });
-};
+// Associations (Account.hasMany / VerificationCode.belongsTo) are wired in
+// src/models/index.js with constraints: false, since account_uuid must be
+// able to point at a not-yet-created account during a pending signup.
 
 module.exports = VerificationCode;

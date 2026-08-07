@@ -14,7 +14,7 @@ const SupportTicket = sequelize.define('SupportTicket', {
         unique: true
     },
     user_id: {
-        type: DataTypes.UUID,
+        type: DataTypes.CHAR(36),
         allowNull: false,
         comment: 'Account UUID of the user who created the ticket'
     },

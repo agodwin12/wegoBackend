@@ -112,7 +112,7 @@ module.exports = (sequelize) => {
             },
 
             delivery_id: {
-                type:      DataTypes.INTEGER.UNSIGNED,
+                type:      DataTypes.INTEGER,   // matches Delivery.id (signed)
                 allowNull: true,
             },
 
@@ -186,7 +186,7 @@ module.exports = (sequelize) => {
 
             // For admin adjustments — who did it
             created_by_employee_id: {
-                type:      DataTypes.INTEGER.UNSIGNED,
+                type:      DataTypes.INTEGER,   // matches Employee.id (signed)
                 allowNull: true,
             },
         },

@@ -38,11 +38,11 @@ module.exports = (sequelize) => {
                 allowNull: false
             },
             user_id: {
-                type: DataTypes.STRING(36),
+                type: DataTypes.CHAR(36),
                 allowNull: false
             },
             trip_id: {
-                type: DataTypes.STRING(36),
+                type: DataTypes.CHAR(36), // matches Trip.id (CHAR(36))
                 allowNull: true
             },
             delivery_id: {
