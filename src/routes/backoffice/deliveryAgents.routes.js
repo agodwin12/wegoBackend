@@ -27,17 +27,25 @@ const agentUpload = multer({
             file.mimetype === 'application/pdf' ||
             file.mimetype === 'application/octet-stream';
 
+        // A rejected upload is always a client mistake (wrong file type/field),
+        // never a server fault — tag 400 so it doesn't surface as a 500.
+        const reject = (message) => {
+            const err = new Error(message);
+            err.status = 400;
+            return err;
+        };
+
         if (file.fieldname === 'profile_photo') {
             const isValid = imageExts.test(file.originalname) && isValidMime;
-            return cb(isValid ? null : new Error('Profile photo must be JPG, PNG, or WEBP'), isValid);
+            return cb(isValid ? null : reject('Profile photo must be JPG, PNG, or WEBP'), isValid);
         }
 
         if (file.fieldname === 'driver_license') {
             const isValid = docExts.test(file.originalname) && isValidMime;
-            return cb(isValid ? null : new Error('Driver license must be JPG, PNG, or PDF'), isValid);
+            return cb(isValid ? null : reject('Driver license must be JPG, PNG, or PDF'), isValid);
         }
 
-        cb(new Error('Unexpected field'), false);
+        cb(reject('Unexpected field'), false);
     },
 }).fields([
     { name: 'profile_photo',  maxCount: 1 },

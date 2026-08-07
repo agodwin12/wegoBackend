@@ -15,9 +15,13 @@ const proofUpload = multer({
     limits:  { fileSize: 5 * 1024 * 1024 },
     fileFilter(_req, file, cb) {
         const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        allowed.includes(file.mimetype)
-            ? cb(null, true)
-            : cb(new Error('Only JPEG, PNG, or WEBP images are accepted as payment proof.'), false);
+        if (allowed.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            const err = new Error('Only JPEG, PNG, or WEBP images are accepted as payment proof.');
+            err.status = 400; // a bad upload is a client mistake, not a server fault
+            cb(err, false);
+        }
     },
 });
 

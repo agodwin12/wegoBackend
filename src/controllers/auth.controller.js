@@ -174,11 +174,11 @@ const fileFilter = (req, file, cb) => {
         return cb(null, true);
     }
 
-    return cb(
-        new Error(
-            `Invalid file type for ${file.fieldname}. Only JPEG, JPG, PNG, PDF, WEBP allowed.`
-        )
+    const err = new Error(
+        `Invalid file type for ${file.fieldname}. Only JPEG, JPG, PNG, PDF, WEBP allowed.`
     );
+    err.status = 400; // a bad upload is a client mistake, not a server fault
+    return cb(err);
 };
 
 const uploadPassengerPhoto = multer({

@@ -36,10 +36,12 @@ const proofUpload = multer({
         const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
         const isAllowed = allowed.includes(file.mimetype);
 
-        cb(
-            isAllowed ? null : new Error('Only JPEG/PNG/WEBP accepted'),
-            isAllowed
-        );
+        let err = null;
+        if (!isAllowed) {
+            err = new Error('Only JPEG/PNG/WEBP accepted');
+            err.status = 400; // a bad upload is a client mistake, not a server fault
+        }
+        cb(err, isAllowed);
     },
 });
 

@@ -6,6 +6,7 @@ const cors    = require('cors');
 const helmet  = require('helmet');
 const morgan  = require('morgan');
 const path    = require('path');
+const multer  = require('multer');
 const Sentry  = require('@sentry/node');
 
 const { corsOptions, globalLimiter, authLimiter } = require('./config/security');
@@ -319,6 +320,13 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
     console.error('   Error:', err.message);
     console.error('   Path: ', req.originalUrl);
     console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+    // Multer's own errors (file too large, too many files, unexpected field)
+    // never carry a .status — without this they fall through as 500s for
+    // what is always a client mistake, not a server fault.
+    if (err instanceof multer.MulterError && !err.status) {
+        err.status = 400;
+    }
 
     res.status(err.status || 500).json({
         success: false,

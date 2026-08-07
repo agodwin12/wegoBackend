@@ -19,6 +19,14 @@ const memoryStorage = multer.memoryStorage();
 
 // Images only (JPEG, PNG, WEBP)
 // Accepts application/octet-stream because Flutter sometimes sends that
+// Upload-validation errors are always a client mistake (wrong file type) —
+// tag them 400 so app.js's global handler doesn't report them as a 500.
+const uploadRejection = (message) => {
+    const err = new Error(message);
+    err.status = 400;
+    return err;
+};
+
 const imageFilter = (req, file, cb) => {
     const validExt  = /\.(jpg|jpeg|png|webp)$/i.test(file.originalname);
     const validMime = file.mimetype.startsWith('image/') ||
@@ -27,7 +35,7 @@ const imageFilter = (req, file, cb) => {
     if (validExt && validMime) {
         cb(null, true);
     } else {
-        cb(new Error('Only image files (JPEG, PNG, WEBP) are allowed.'), false);
+        cb(uploadRejection('Only image files (JPEG, PNG, WEBP) are allowed.'), false);
     }
 };
 
@@ -41,7 +49,7 @@ const documentFilter = (req, file, cb) => {
     if (validExt && validMime) {
         cb(null, true);
     } else {
-        cb(new Error('Only JPG, PNG or PDF files are allowed.'), false);
+        cb(uploadRejection('Only JPG, PNG or PDF files are allowed.'), false);
     }
 };
 
@@ -59,7 +67,7 @@ const serviceVideoFilter = (req, file, cb) => {
         cb(null, true);
     } else {
         cb(
-            new Error('Only video files (MP4, MOV, AVI, MKV, WEBM) are allowed.'),
+            uploadRejection('Only video files (MP4, MOV, AVI, MKV, WEBM) are allowed.'),
             false
         );
     }
@@ -80,7 +88,7 @@ const serviceMediaFilter = (req, file, cb) => {
         cb(null, true);
     } else {
         cb(
-            new Error('Only images (JPG, PNG, WEBP) and videos (MP4, MOV) are allowed.'),
+            uploadRejection('Only images (JPG, PNG, WEBP) and videos (MP4, MOV) are allowed.'),
             false
         );
     }

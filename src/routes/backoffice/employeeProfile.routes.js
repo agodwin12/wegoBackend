@@ -31,7 +31,9 @@ const fileFilter = (req, file, cb) => {
     if (isValidExt && isValidMime) {
         cb(null, true);
     } else {
-        cb(new Error('Only image files (JPG, PNG, WEBP) are allowed!'), false);
+        const err = new Error('Only image files (JPG, PNG, WEBP) are allowed!');
+        err.status = 400; // a bad upload is a client mistake, not a server fault
+        cb(err, false);
     }
 };
 
