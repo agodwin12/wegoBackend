@@ -69,7 +69,8 @@ Account.init(
                 'DRIVER',
                 'PARTNER',
                 'ADMIN',
-                'DELIVERY_AGENT'
+                'DELIVERY_AGENT',
+                'FLEET_OWNER'
             ),
             allowNull: false,
             comment: 'Permanent base role set at registration. Never changes.',

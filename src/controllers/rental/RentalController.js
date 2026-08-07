@@ -153,44 +153,13 @@ async function createVehicle(req, res, next) {
             return res.status(400).json({ error: error.details[0].message });
         }
 
-        const employeeId = req.body.employeeId || req.user?.uuid;
+        // Identity comes from the authenticateEmployee middleware (req.user is
+        // the real, already-status-checked Employee row) — never from the
+        // request body, so a caller cannot register a vehicle as someone else.
+        const employee = req.user;
+        const employeeId = employee.id;
 
-        if (!employeeId) {
-            return res.status(400).json({
-                error: 'Employee ID is required',
-                message: 'Please provide employeeId in the request body'
-            });
-        }
-
-        console.log("✅ Checking employee ID:", employeeId);
-
-        const employee = await Employee.findOne({
-            where: { accountId: employeeId },
-            include: [{
-                model: Account,
-                as: 'account',
-                attributes: ['uuid', 'first_name', 'last_name', 'email', 'user_type']
-            }]
-        });
-
-        if (!employee) {
-            console.log("❌ Employee not found in employees table:", employeeId);
-            return res.status(404).json({
-                error: 'Employee not found',
-                message: 'The provided employee ID does not exist in the employees table',
-                employeeId: employeeId
-            });
-        }
-
-        if (employee.employmentStatus !== 'ACTIVE') {
-            console.log("❌ Employee not active:", employee.employmentStatus);
-            return res.status(403).json({
-                error: 'Employee not active',
-                message: `Employee status is ${employee.employmentStatus}. Only active employees can register vehicles.`
-            });
-        }
-
-        console.log("✅ Employee verified:", employee.account?.first_name, employee.account?.last_name);
+        console.log("✅ Employee verified:", employee.first_name, employee.last_name);
 
         const partner = await Account.findOne({
             where: { uuid: value.partnerId, user_type: 'PARTNER' }
@@ -265,8 +234,8 @@ async function createVehicle(req, res, next) {
                 createdAt: vehicle.createdAt
             },
             postedBy: {
-                employeeCode: employee.employeeCode,
-                name: `${employee.account?.first_name} ${employee.account?.last_name}`,
+                employeeId: employee.employee_id,
+                name: `${employee.first_name} ${employee.last_name}`,
                 department: employee.department
             }
         });

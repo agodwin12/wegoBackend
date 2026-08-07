@@ -32,18 +32,22 @@ const { authenticateEmployee } = require('../middleware/employeeAuth.middleware'
 
 /**
  * @route   POST /api/rentals/vehicles
- * @desc    Employee posts a new vehicle for rental with images
- * @access  Public (for testing)
+ * @desc    Employee registers a new vehicle for a partner (physical hand-over
+ *          workflow — partners don't self-list, see wegoPartner's vehicles
+ *          page: "Vehicles are added by the WeGo team when you hand them over.")
+ * @access  Private (backoffice employee only) — identity taken from the
+ *          authenticated employee (req.user.id), never from the request body.
  * @upload  Multiple images (up to 10)
  */
-router.post('/vehicles', uploadVehicle.array('images', 10), createVehicle);
+router.post('/vehicles', authenticateEmployee, uploadVehicle.array('images', 10), createVehicle);
 
 /**
  * @route   PATCH /api/rentals/vehicles/:id/availability
- * @desc    Update vehicle availability status
- * @access  Public (for testing)
+ * @desc    Update vehicle availability status (part of the same employee-run
+ *          hand-over/return workflow)
+ * @access  Private (backoffice employee only)
  */
-router.patch('/vehicles/:id/availability', updateVehicleAvailability);
+router.patch('/vehicles/:id/availability', authenticateEmployee, updateVehicleAvailability);
 
 /**
  * =====================================================
