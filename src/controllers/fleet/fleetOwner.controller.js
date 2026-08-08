@@ -64,6 +64,7 @@ async function loadOwnedDriver(ownerUuid, driverUuid) {
             fleet_owner_id: ownerUuid,
             status:     { [Op.ne]: 'DELETED' },  // soft-deleted = gone
         },
+        attributes: { exclude: ['password_hash', 'password_algo'] },
     });
 }
 

@@ -139,7 +139,11 @@ exports.getWallet = async (req, res) => {
             include: [
                 {
                     association: 'driver',
-                    include: [{ model: Account, as: 'account' }],
+                    include: [{
+                        model: Account,
+                        as: 'account',
+                        attributes: ['uuid', 'email', 'phone_e164', 'first_name', 'last_name', 'avatar_url', 'status', 'createdAt'],
+                    }],
                 },
             ],
         });
