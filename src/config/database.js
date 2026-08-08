@@ -18,6 +18,15 @@ const sequelize = new Sequelize(
         dialect: process.env.DB_DIALECT || 'mysql',
         logging: false,
 
+        // `define.charset` below only controls DDL defaults (CREATE TABLE ...
+        // DEFAULT CHARSET=...) — it does NOT set the actual client connection
+        // encoding. Without this, mysql2 negotiates its own default charset for
+        // the connection, so multi-byte characters (emoji) get mangled on
+        // INSERT even though the column itself is correctly utf8mb4.
+        dialectOptions: {
+            charset: 'utf8mb4',
+        },
+
         define: {
             charset: 'utf8mb4',
             collate: 'utf8mb4_unicode_ci',

@@ -593,6 +593,7 @@ module.exports = {
     ServiceCategory,
     ServiceListing,
     ServiceRating,
+    ServiceListingReport,
     ServiceListingPlan,
     ServiceAdPayment,
 

@@ -58,7 +58,9 @@ const {
 } = require('../models');
 
 // ── Business rules ──────────────────────────────────────────────────────
-const MIN_TOPUP_AMOUNT      = 1000;    // XAF
+// Must match driverTopUp.controller.js's MIN_TOPUP_XAF — both endpoints write
+// to the same DriverWallet/DriverWalletTransaction tables for the same feature.
+const MIN_TOPUP_AMOUNT      = parseInt(process.env.MIN_TOPUP_XAF || '25', 10);    // XAF
 const MAX_TOPUP_AMOUNT      = 500_000; // XAF
 const MIN_WITHDRAWAL_AMOUNT = 1000;    // XAF
 const MIN_WALLET_BALANCE    = 2000;    // XAF — driver must keep this after withdrawal
