@@ -7,9 +7,9 @@ const router  = express.Router();
 
 const ctrl = require('../../controllers/delivery/agentDeliveryHistory.controller');
 const { authenticate }                    = require('../../middleware/auth.middleware');
-const { requireDriver, requireDriverAny } = require('../../middleware/driver.middleware');
+const { requireDriverAny } = require('../../middleware/driver.middleware');
 
-const driverAuth = [authenticate, requireDriver];
+const driverAuth = [authenticate, requireDriverAny];
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AGENT DELIVERY HISTORY ROUTES

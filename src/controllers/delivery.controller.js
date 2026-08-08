@@ -788,6 +788,9 @@ exports.acceptDelivery = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const io          = _getIO(req);
 
         const driver = req.deliveryDriver || await getDriverByAccountUuid(accountUuid);
@@ -960,6 +963,9 @@ exports.updateStatus = async (req, res) => {
     try {
         const accountUuid                  = req.user.uuid;
         const deliveryId                   = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const { status, pickup_photo_url } = req.body;
         const io                           = _getIO(req);
 
@@ -1063,6 +1069,9 @@ exports.verifyPin = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const { pin, proof_photo_url } = req.body;
         const io          = _getIO(req);
 
@@ -1194,6 +1203,9 @@ exports.confirmCash = async (req, res) => {
     try {
         const accountUuid = req.user.uuid;
         const deliveryId  = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const io          = _getIO(req);
 
         const driver = await getDriverByAccountUuid(accountUuid);
@@ -1235,6 +1247,9 @@ exports.cancelDelivery = async (req, res) => {
     try {
         const { reason } = req.body;
         const deliveryId = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const io         = _getIO(req);
 
         const isDriver = ['DRIVER', 'DELIVERY_AGENT'].includes(req.user.user_type);
@@ -1355,6 +1370,9 @@ exports.rateDelivery = async (req, res) => {
     try {
         const senderUuid          = req.user.uuid;
         const deliveryId          = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const { rating, comment } = req.body;
 
         if (!rating || rating < 1 || rating > 5) {
@@ -1397,6 +1415,9 @@ exports.rateDelivery = async (req, res) => {
 exports.getDelivery = async (req, res) => {
     try {
         const deliveryId = parseInt(req.params.id);
+        if (isNaN(deliveryId)) {
+            return res.status(400).json({ success: false, message: 'Invalid delivery ID.' });
+        }
         const delivery   = await Delivery.findByPk(deliveryId, {
             include: [
                 { association: 'sender',      attributes: ['uuid', 'first_name', 'last_name', 'phone_e164', 'avatar_url'] },

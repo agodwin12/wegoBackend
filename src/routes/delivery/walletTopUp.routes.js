@@ -4,6 +4,7 @@ const express = require('express');
 const multer  = require('multer');
 
 const { authenticate }                              = require('../../middleware/auth.middleware');
+const { requireDriverAny }                          = require('../../middleware/driver.middleware');
 const { authenticateEmployee, requireEmployeeRole } = require('../../middleware/employeeAuth.middleware');
 
 const driverCtrl = require('../../controllers/delivery/walletTopUp.controller');
@@ -31,7 +32,7 @@ const proofUpload = multer({
 
 const driverRouter = express.Router();
 
-driverRouter.use(authenticate);
+driverRouter.use(authenticate, requireDriverAny);
 
 // Wallet balance
 driverRouter.get('/', driverCtrl.getWallet);

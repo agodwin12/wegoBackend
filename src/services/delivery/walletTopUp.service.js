@@ -190,6 +190,7 @@ async function submitTopUp(driverId, payload) {
         amount,
         payment_channel,
         driver_note = null,
+        proof_url = null,
     } = payload;
 
     const parsedAmount = validateTopUpPayload(amount, payment_channel);
@@ -247,6 +248,7 @@ async function submitTopUp(driverId, payload) {
             payment_channel: 'cash',
             amount:          parsedAmount,
             driver_note,
+            proof_url,
             status:          'pending',
         }, { transaction: t });
 

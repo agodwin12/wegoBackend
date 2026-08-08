@@ -22,8 +22,9 @@
 
 'use strict';
 
-const { Driver }         = require('../../models');
-const walletTopUpService = require('../../services/delivery/walletTopUp.service');
+const { Driver }          = require('../../models');
+const walletTopUpService  = require('../../services/delivery/walletTopUp.service');
+const { uploadFileToR2 }  = require('../../middleware/upload');
 
 // ─── Internal helper ──────────────────────────────────────────────────────────
 
@@ -57,10 +58,16 @@ exports.submitTopUp = async (req, res) => {
 
         const { amount, driver_note = null } = req.body;
 
+        let proof_url = null;
+        if (req.file && req.file.buffer) {
+            proof_url = await uploadFileToR2(req.file, 'topup-proofs');
+        }
+
         const { topUp, isDuplicate } = await walletTopUpService.submitTopUp(driver.id, {
             amount,
             payment_channel: 'cash',
             driver_note,
+            proof_url,
         });
 
         return res.status(isDuplicate ? 200 : 201).json({
