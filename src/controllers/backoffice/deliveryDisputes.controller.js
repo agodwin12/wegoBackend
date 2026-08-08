@@ -51,8 +51,10 @@ exports.getDisputes = async (req, res) => {
                 },
             ],
             order: [
-                [sequelize.literal(`FIELD(priority, 'urgent', 'high', 'medium', 'low')`)],
-                [sequelize.literal(`FIELD(status, 'open', 'investigating', 'awaiting_response', 'resolved', 'closed')`)],
+                // Backtick-qualified to avoid ambiguous column error once the joined
+                // Delivery association (which also has a `status` column) is included.
+                [sequelize.literal("FIELD(`DeliveryDispute`.`priority`, 'urgent', 'high', 'medium', 'low')")],
+                [sequelize.literal("FIELD(`DeliveryDispute`.`status`, 'open', 'investigating', 'awaiting_response', 'resolved', 'closed')")],
                 ['created_at', 'DESC'],
             ],
             limit:  parseInt(limit),

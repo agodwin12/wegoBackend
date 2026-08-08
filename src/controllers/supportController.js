@@ -125,12 +125,12 @@ exports.getFAQCategories = async (req, res) => {
  */
 exports.createSupportTicket = async (req, res) => {
     try {
-        const userId = req.user.id; // UUID from auth middleware
+        const userId = req.user.uuid; // Account's real PK — not 'id', that field doesn't exist
         const { subject, category, message, priority } = req.body;
 
         // Get user info for email
         const user = await Account.findByPk(userId, {
-            attributes: ['id', 'first_name', 'last_name', 'email', 'phone']
+            attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164']
         });
 
         if (!user) {
@@ -202,7 +202,7 @@ exports.createSupportTicket = async (req, res) => {
  */
 exports.getUserTickets = async (req, res) => {
     try {
-        const userId = req.user.id; // UUID
+        const userId = req.user.uuid;
         const { status } = req.query;
 
         // Build query
@@ -261,7 +261,7 @@ exports.getUserTickets = async (req, res) => {
  */
 exports.getTicketDetails = async (req, res) => {
     try {
-        const userId = req.user.id; // UUID
+        const userId = req.user.uuid;
         const { ticketNumber } = req.params;
 
         // Use custom class method
@@ -374,12 +374,12 @@ exports.getUnassignedTickets = async (req, res) => {
  */
 exports.reportProblem = async (req, res) => {
     try {
-        const userId = req.user.id; // UUID
+        const userId = req.user.uuid;
         const { problemType, description, stepsToReproduce, deviceInfo } = req.body;
 
         // Get user info
         const user = await Account.findByPk(userId, {
-            attributes: ['id', 'first_name', 'last_name', 'email', 'phone']
+            attributes: ['uuid', 'first_name', 'last_name', 'email', 'phone_e164']
         });
 
         if (!user) {
@@ -455,12 +455,12 @@ exports.reportProblem = async (req, res) => {
  */
 exports.submitFeedback = async (req, res) => {
     try {
-        const userId = req.user.id; // UUID
+        const userId = req.user.uuid;
         const { feedbackType, rating, message } = req.body;
 
         // Get user info
         const user = await Account.findByPk(userId, {
-            attributes: ['id', 'first_name', 'last_name', 'email']
+            attributes: ['uuid', 'first_name', 'last_name', 'email']
         });
 
         if (!user) {

@@ -309,12 +309,24 @@ exports.resendCredentials = async (req, res) => {
             'Password: ' + tempPassword + '\n\n' +
             'Log in to the WEGO Driver app.';
 
-        await sendSmsNotification(account.phone_e164, smsMessage);
-        console.log('📱 [DELIVERY AGENT] Credentials resent to', account.phone_e164);
+        let smsSent = false;
+        try {
+            await sendSmsNotification(account.phone_e164, smsMessage);
+            smsSent = true;
+            console.log('📱 [DELIVERY AGENT] Credentials resent to', account.phone_e164);
+        } catch (smsErr) {
+            console.error('❌ [DELIVERY AGENT] resendCredentials SMS failed:', smsErr.message);
+        }
 
+        // The password was already rotated above regardless of SMS outcome —
+        // always return tempPassword so the admin can hand it over manually
+        // if the SMS didn't go through.
         return res.json({
             success:     true,
-            message:     'New credentials sent via SMS to ' + account.phone_e164,
+            message:     smsSent
+                ? 'New credentials sent via SMS to ' + account.phone_e164
+                : 'Password reset, but SMS delivery failed — share the new password with the agent manually.',
+            smsSent,
             tempPassword,
         });
 

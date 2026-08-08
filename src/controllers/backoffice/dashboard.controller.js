@@ -461,7 +461,7 @@ exports.getActivityFeed = async (req, res) => {
             Account.findAll({
                 order      : [['created_at', 'DESC']],
                 limit      : 5,
-                attributes : ['uuid', 'first_name', 'last_name', 'user_type', 'created_at'],
+                attributes : ['uuid', 'first_name', 'last_name', 'email', 'phone_e164', 'user_type', 'created_at'],
                 raw        : true,
             }),
 
@@ -513,7 +513,7 @@ exports.getActivityFeed = async (req, res) => {
                 id        : a.uuid,
                 icon      : typeLabel.split(' ')[0],
                 title     : typeLabel.replace(/^\S+\s/, ''),
-                subtitle  : `${a.first_name} ${a.last_name}`,
+                subtitle  : `${a.first_name || ''} ${a.last_name || ''}`.trim() || a.email || a.phone_e164 || 'New signup',
                 meta      : a.user_type,
                 timestamp : a.created_at,
             });
