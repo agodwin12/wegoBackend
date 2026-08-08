@@ -112,7 +112,7 @@ exports.submitRating = async (req, res) => {
                     stars: rating.stars,
                     comment: rating.comment,
                     ratingType: rating.rating_type,
-                    createdAt: rating.createdAt,
+                    createdAt: rating.created_at,
                 },
             },
         });
@@ -142,7 +142,7 @@ exports.getTripRatings = async (req, res) => {
                     required: false,
                 },
             ],
-            order: [['createdAt', 'DESC']],
+            order: [['created_at', 'DESC']],
         });
 
         console.log(`✅ [RATING] Found ${ratings.length} ratings`);
@@ -163,7 +163,7 @@ exports.getTripRatings = async (req, res) => {
                             avatar: r.rater.avatar_url,
                         }
                         : null,
-                    createdAt: r.createdAt,
+                    createdAt: r.created_at,
                 })),
             },
         });
@@ -202,7 +202,7 @@ exports.getUserRatings = async (req, res) => {
                     required: false,
                 },
             ],
-            order: [['createdAt', 'DESC']],
+            order: [['created_at', 'DESC']],
             limit: limitNum,
             offset,
         });
@@ -240,7 +240,7 @@ exports.getUserRatings = async (req, res) => {
                             avatar: r.rater.avatar_url,
                         }
                         : null,
-                    createdAt: r.createdAt,
+                    createdAt: r.created_at,
                 })),
                 pagination: {
                     total: count,
@@ -285,7 +285,7 @@ exports.checkTripRated = async (req, res) => {
                         stars: rating.stars,
                         comment: rating.comment,
                         ratingType: rating.rating_type,
-                        createdAt: rating.createdAt,
+                        createdAt: rating.created_at,
                     }
                     : null,
             },

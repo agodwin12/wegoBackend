@@ -818,11 +818,11 @@ class TripMatchingService {
     async _getPassengerRating(passengerId) {
         try {
             const rows = await Rating.findAll({
-                where:      { ratedUser: passengerId, ratingType: 'DRIVER_TO_PASSENGER' },
-                attributes: ['rating'],
+                where:      { rated_user: passengerId, rating_type: 'DRIVER_TO_PASSENGER' },
+                attributes: ['stars'],
             });
             if (!rows || rows.length === 0) return null;
-            const avg = rows.reduce((s, r) => s + r.rating, 0) / rows.length;
+            const avg = rows.reduce((s, r) => s + r.stars, 0) / rows.length;
             return parseFloat(avg.toFixed(1));
         } catch {
             return null;

@@ -86,10 +86,10 @@ exports.getUserStats = async (req, res) => {
 
         const ratingStats = await Rating.findAll({
             where: {
-                ratedUser: userId
+                rated_user: userId
             },
             attributes: [
-                [sequelize.fn('AVG', sequelize.col('rating')), 'avg_rating'],
+                [sequelize.fn('AVG', sequelize.col('stars')), 'avg_rating'],
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_ratings']
             ],
             raw: true
@@ -157,8 +157,8 @@ exports.getUserStats = async (req, res) => {
         // Bonus for 5-star ratings
         const fiveStarRatings = await Rating.count({
             where: {
-                ratedUser: userId,
-                rating: 5
+                rated_user: userId,
+                stars: 5
             }
         });
         points += fiveStarRatings * 50;

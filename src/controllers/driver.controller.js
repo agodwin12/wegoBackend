@@ -1625,7 +1625,7 @@ exports.getRatings = async (req, res, next) => {
                 rated_user:  driverId,
                 rating_type: 'PASSENGER_TO_DRIVER',
             },
-            order:  [['createdAt', 'DESC']],
+            order:  [['created_at', 'DESC']],
             limit:  parseInt(limit),
             offset,
         });
@@ -1650,7 +1650,7 @@ exports.getRatings = async (req, res, next) => {
                     id:        r.id,
                     rating:    r.stars,
                     review:    r.comment || null,
-                    createdAt: r.createdAt,
+                    createdAt: r.created_at,
                     // rater identity intentionally omitted — ratings are anonymous.
                 })),
                 pagination: {
