@@ -1,7 +1,6 @@
 // src/controllers/rating.controller.js
 
-const Rating = require('../models/rating.model');
-const { Trip, Account, DriverProfile } = require('../models');
+const { Trip, Account, DriverProfile, Rating } = require('../models');
 const sequelize = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
@@ -75,7 +74,7 @@ exports.submitRating = async (req, res) => {
         console.log(`📝 ${ratingType} | Rated user: ${ratedUser}`);
 
         // ── Prevent duplicate ratings ─────────────────────────────────
-        const existing = await Rating.findOne({ where: { tripId, ratingType }, transaction });
+        const existing = await Rating.findOne({ where: { trip_id: tripId, rating_type: ratingType }, transaction });
         if (existing) {
             await transaction.rollback();
             return res.status(409).json({ success: false, message: 'You have already rated this trip' });
@@ -85,10 +84,10 @@ exports.submitRating = async (req, res) => {
         const rating = await Rating.create(
             {
                 id: uuidv4(),
-                tripId,
-                ratedBy: userId,
-                ratedUser,
-                ratingType,
+                trip_id: tripId,
+                rated_by: userId,
+                rated_user: ratedUser,
+                rating_type: ratingType,
                 stars: starsNum,                 // ✅ correct field
                 comment: comment || null,        // ✅ correct field
             },
@@ -112,7 +111,7 @@ exports.submitRating = async (req, res) => {
                     id: rating.id,
                     stars: rating.stars,
                     comment: rating.comment,
-                    ratingType: rating.ratingType,
+                    ratingType: rating.rating_type,
                     createdAt: rating.createdAt,
                 },
             },
@@ -134,7 +133,7 @@ exports.getTripRatings = async (req, res) => {
         console.log(`\n🔍 [RATING] getTripRatings — trip: ${tripId}`);
 
         const ratings = await Rating.findAll({
-            where: { tripId },
+            where: { trip_id: tripId },
             include: [
                 {
                     model: Account,
@@ -155,8 +154,8 @@ exports.getTripRatings = async (req, res) => {
                     id: r.id,
                     stars: r.stars,
                     comment: r.comment,
-                    ratingType: r.ratingType,
-                    ratedBy: r.ratedBy,
+                    ratingType: r.rating_type,
+                    ratedBy: r.rated_by,
                     rater: r.rater
                         ? {
                             uuid: r.rater.uuid,
@@ -189,9 +188,9 @@ exports.getUserRatings = async (req, res) => {
 
         console.log(`\n🔍 [RATING] getUserRatings — user: ${userId} | type: ${type || 'all'}`);
 
-        const where = { ratedUser: userId };
-        if (type === 'driver') where.ratingType = 'PASSENGER_TO_DRIVER';
-        if (type === 'passenger') where.ratingType = 'DRIVER_TO_PASSENGER';
+        const where = { rated_user: userId };
+        if (type === 'driver') where.rating_type = 'PASSENGER_TO_DRIVER';
+        if (type === 'passenger') where.rating_type = 'DRIVER_TO_PASSENGER';
 
         const { count, rows: ratings } = await Rating.findAndCountAll({
             where,
@@ -231,9 +230,9 @@ exports.getUserRatings = async (req, res) => {
                     id: r.id,
                     stars: r.stars,
                     comment: r.comment,
-                    ratingType: r.ratingType,
-                    ratedUser: r.ratedUser,
-                    ratedBy: r.ratedBy,
+                    ratingType: r.rating_type,
+                    ratedUser: r.rated_user,
+                    ratedBy: r.rated_by,
                     rater: r.rater
                         ? {
                             uuid: r.rater.uuid,
@@ -274,7 +273,7 @@ exports.checkTripRated = async (req, res) => {
         else if (userId === trip.passengerId) ratingType = 'PASSENGER_TO_DRIVER';
         else return res.status(403).json({ success: false, message: 'Unauthorized' });
 
-        const rating = await Rating.findOne({ where: { tripId, ratingType } });
+        const rating = await Rating.findOne({ where: { trip_id: tripId, rating_type: ratingType } });
 
         return res.status(200).json({
             success: true,
@@ -285,7 +284,7 @@ exports.checkTripRated = async (req, res) => {
                         id: rating.id,
                         stars: rating.stars,
                         comment: rating.comment,
-                        ratingType: rating.ratingType,
+                        ratingType: rating.rating_type,
                         createdAt: rating.createdAt,
                     }
                     : null,
@@ -305,7 +304,7 @@ async function updateAccountAverageRating(userId, ratingType, transaction) {
         console.log(`📊 [RATING] updateAccountAverageRating — user: ${userId} | type: ${ratingType}`);
 
         const ratings = await Rating.findAll({
-            where: { ratedUser: userId, ratingType },
+            where: { rated_user: userId, rating_type: ratingType },
             attributes: ['stars'],
             transaction,
         });

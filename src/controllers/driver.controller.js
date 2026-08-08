@@ -1551,7 +1551,7 @@ exports.getProfile = async (req, res, next) => {
     try {
         const driver = await Account.findByPk(req.user.uuid, {
             attributes: { exclude: ['password_hash', 'password_algo'] },
-            include: [{ model: DriverProfile, as: 'driverProfile', required: false }],
+            include: [{ model: DriverProfile, as: 'driver_profile', required: false }],
         });
         if (!driver) return res.status(404).json({ error: 'Driver not found' });
         res.status(200).json({ message: 'Driver profile retrieved', data: { driver } });
@@ -1597,7 +1597,7 @@ exports.updateProfile = async (req, res, next) => {
 
         const updated = await Account.findByPk(req.user.uuid, {
             attributes: { exclude: ['password_hash', 'password_algo'] },
-            include:    [{ model: DriverProfile, as: 'driverProfile', required: false }],
+            include:    [{ model: DriverProfile, as: 'driver_profile', required: false }],
         });
 
         console.log('✅ [DRIVER] Profile updated successfully');
@@ -1622,8 +1622,8 @@ exports.getRatings = async (req, res, next) => {
         // join the rater's identity — only the score, review text and date.
         const { count, rows: ratings } = await Rating.findAndCountAll({
             where: {
-                ratedUser:  driverId,
-                ratingType: 'PASSENGER_TO_DRIVER',
+                rated_user:  driverId,
+                rating_type: 'PASSENGER_TO_DRIVER',
             },
             order:  [['createdAt', 'DESC']],
             limit:  parseInt(limit),
@@ -1631,12 +1631,12 @@ exports.getRatings = async (req, res, next) => {
         });
 
         const average = count
-            ? parseFloat((ratings.reduce((s, r) => s + r.rating, 0) / count).toFixed(2))
+            ? parseFloat((ratings.reduce((s, r) => s + r.stars, 0) / count).toFixed(2))
             : 0;
 
         const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
         for (const r of ratings) {
-            const star = Math.round(r.rating);
+            const star = Math.round(r.stars);
             if (distribution[star] !== undefined) distribution[star]++;
         }
 
@@ -1648,8 +1648,8 @@ exports.getRatings = async (req, res, next) => {
                 distribution,
                 ratings: ratings.map(r => ({
                     id:        r.id,
-                    rating:    r.rating,
-                    review:    r.review || null,
+                    rating:    r.stars,
+                    review:    r.comment || null,
                     createdAt: r.createdAt,
                     // rater identity intentionally omitted — ratings are anonymous.
                 })),
